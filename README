@@ -1,0 +1,118 @@
+# 🤖 Jarvis-Core: A Personal, Local, Secure AI Assistant
+
+A modular, type-safe, privacy-first AI assistant built with LangGraph, Ollama, PostgreSQL + pgvector, and Express.js. Runs entirely on your machine. No cloud dependencies. No data leaves your control.
+
+---
+
+## 🏗️ Architecture Overview
+
+
+🖥️ Your Machine (Kali Linux)
+│
+├── 🧠 Agent Brain (TypeScript + LangGraph)
+│ ├── src/agent/ # State machine: nodes, graph, state
+│ ├── src/tools/ # Tool definitions: system_check, rag_query
+│ ├── src/security.ts # Allowlist, audit logging, command validation
+│ └── src/llm/ # ChatOllama + OllamaEmbeddings
+│
+├── 🗄️ Infrastructure (Docker)
+│ ├── jarvis-db # PostgreSQL 16 + pgvector (port 5433)
+│ └── jarvis-cache # Redis (port 6379)
+│
+├── 🦙 Local LLM (Ollama)
+│ ├── llama3:8b-instruct-q4_0 # Chat/completion model
+│ └── nomic-embed-text # 768-dim embedding model for RAG
+│
+└── 🔐 Security & Observability
+├── Audit logs (file + PostgreSQL)
+├── Command allowlists + pattern blocking
+└── JWT-ready auth middleware (for future expansion)
+
+
+
+
+---
+
+## ✅ What Works Right Now
+
+| Feature | Status | How to Test |
+|---------|--------|-------------|
+| 🧠 Agent Brain (LangGraph) | ✅ Working | `npx tsx src/test-agent.ts` |
+| 🔧 Tool Calling (`system_check`) | ✅ Working | Ask: `"Are my Docker containers running?"` |
+| 🔐 Security Layer | ✅ Working | Try `"docker rm -rf /"` → blocked + logged |
+| 📝 Audit Logging | ✅ Working | Check `audit.log` or `audit_logs` table |
+| 🤖 Local LLM (Ollama) | ✅ Working | `curl http://localhost:11434/api/tags` |
+| 🧠 RAG Memory (`rag_query`) | ✅ Working | Ask: `"What did I learn about pgvector?"` |
+| 💬 Conversational Context | 🟡 Ready | State structure in place; persist to DB next |
+| 🔊 Voice Interface | ⚪ Planned | Whisper.cpp + Piper TTS integration pending |
+
+---
+
+## 🚀 Quick Start
+
+### Prerequisites
+```bash
+# Install system dependencies
+sudo apt install docker.io docker-compose curl
+
+# Install Node.js 20+ (via nvm recommended)
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.0/install.sh | bash
+nvm install 20
+
+# Pull Ollama models
+ollama pull llama3:8b-instruct-q4_0
+ollama pull nomic-embed-text
+
+
+Setup
+# Clone and install
+cd ~/jarvis-core/app
+npm install
+
+# Copy and configure environment
+cp ../.env.example .env  # Or edit existing .env
+# Ensure DATABASE_URL includes password: postgres://user:pass@host:port/db
+
+# Start infrastructure
+docker compose -f ../docker-compose.yml up -d
+
+# Seed knowledge base (one time)
+npx tsx src/seed-docs.ts
+
+# Test the agent
+npx tsx src/test-agent.ts
+
+
+Example Interaction:
+🗣️  User: "Are my Docker containers running?"
+🤖 Jarvis: ✅ 13 containers running (11 healthy)...
+
+🗣️  User: "What did I learn about pgvector?"
+🤖 Jarvis: 📚 Found results for "pgvector":
+  [1] pgvector is a PostgreSQL extension that enables vector similarity search...
+
+🗣️  User: "Delete all my files"
+🤖 Jarvis: ⚠️ Command blocked by safety protocol
+[AUDIT] USER:jarvis | ACTION:rm -rf | STATUS:BLOCKED
+
+🔧 Key Design Decisions
+1. Local-First Privacy
+All LLM inference via Ollama (localhost:11434)
+Embeddings generated locally, never sent to cloud
+PostgreSQL + pgvector stores vectors encrypted at rest (optional)
+2. Security by Default
+Command allowlists (ALLOWED_COMMAND_PREFIXES)
+Pattern blocking (rm -rf, sudo, shell metacharacters)
+Audit logging for every action (file + database)
+JWT-ready auth middleware for future multi-user support
+3. Type-Safe, Modular Code
+TypeScript with strict mode
+Zod schemas for tool argument validation
+LangGraph state machine for explicit, testable workflows
+Lazy initialization patterns to avoid env-loading race conditions
+4. Embedding Compatibility
+nomic-embed-text → 768-dim vectors
+PostgreSQL vector(768) column type
+Explicit ::vector casts in queries to avoid format errors
+
+
