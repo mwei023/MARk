@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "@langchain/core": "^1.1.40",
+    "@langchain/langgraph": "^1.2.9",
+    "@langchain/ollama": "^1.2.6",
+    "typescript": "^6.0.2"
+  }
+}

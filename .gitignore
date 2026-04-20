@@ -1,0 +1,6 @@
+/home/mwei/jarvis-core/app/.env
+/home/mwei/jarvis-core/data/postgres
+/home/mwei/jarvis-core/data/redis
+/home/mwei/jarvis-core/data/redis-commanderdata/
+data/postgres/
+data/redis/dump.rdb   

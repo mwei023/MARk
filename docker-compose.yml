@@ -1,0 +1,59 @@
+
+
+services:
+  # Local LLM (already installed on host, but we'll expose it)
+  # Note: Ollama is running on host:11434, so we don't need a container for it
+  # But we document the port for clarity
+  
+  # Vector Database
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: jarvis-db
+    environment:
+      POSTGRES_USER: mwei
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: jarvis_memory
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jarvis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching/real-time events (optional but recommended)
+  redis:
+    image: redis:7-alpine
+    container_name: jarvis-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    restart: unless-stopped
+
+  # Your API (to be built)
+  api:
+    build: 
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: jarvis-api
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - OLLAMA_HOST=http://host.docker.internal:11434  # Special for Docker Desktop
+      - DATABASE_URL=postgres://jarvis:${DB_PASSWORD}@postgres:5432/jarvis_memory
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./app:/usr/src/app
+      - /usr/src/app/node_modules
+    command: npm run dev
