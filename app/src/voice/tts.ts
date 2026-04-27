@@ -1,49 +1,46 @@
-// src/voice/tts.ts
-import { execFile } from 'child_process';
+// src/voice/tts.ts - SIMPLIFIED: Uses system aplay, no native modules
+import { exec } from 'child_process';
 import { promisify } from 'util';
-import { join } from 'path';
-import { createWriteStream, createReadStream } from 'fs';
-import { pipeline } from 'stream/promises';
 
-const execFilePromise = promisify(execFile);
+const execPromise = promisify(exec);
 
-// src/voice/tts.ts - FIX THE PATHS
-const PIPER_BIN = process.env.PIPER_BIN || '/home/mwei/jarvis-core/bin/piper/piper';
-const PIPER_MODEL = process.env.PIPER_MODEL || '/home/mwei/jarvis-core/models/piper/en_US-lessac-medium.onnx';
-
-export const speak = async (text: string, outputPath: string = '/tmp/piper_out.wav'): Promise<void> => {
+export const speak = async (text: string, outputPath: string): Promise<void> => {
+  const PIPER_MODEL = process.env.PIPER_MODEL || '/home/mwei/jarvis-core/models/piper/en_US-lessac-medium.onnx';
+  
   try {
-    const { stdout, stderr } = await execFilePromise(PIPER_BIN, [
-      '-m', PIPER_MODEL,  // ← Direct path, no join()
-      '-f', outputPath,
-    ], {
-      input: text,
-      stdio: ['pipe', 'pipe', 'pipe'],
+    // Escape text for shell safety
+    const escapedText = text
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, '\\$')
+      .replace(/`/g, '\\`');
+    
+    // Generate WAV using Piper via shell pipe (reliable stdin handling)
+    const command = `echo "${escapedText}" | piper -m "${PIPER_MODEL}" -f "${outputPath}"`;
+    
+    await execPromise(command, {
+      env: { ...process.env, LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH },
+      timeout: 30000, // 30 second timeout
     });
     
-    if (stderr) console.debug('[Piper stderr]', stderr);
-    console.log(`✅ TTS: Generated ${outputPath}`);
+    console.log(`✅ TTS Generated: ${outputPath}`);
   } catch (error: any) {
-    console.error('[TTS Error]', error.message);
+    console.error('[Piper Error]', error.stderr || error.message);
     throw new Error(`Speech synthesis failed: ${error.message}`);
   }
 };
 
-// Optional: Play the generated WAV file
-export const playAudio = async (audioPath: string): Promise<void> => {
-  const { default: Speaker } = await import('speaker');
-  const { createReadStream } = await import('fs');
-  
-  return new Promise((resolve, reject) => {
-    const speaker = new Speaker({
-      channels: 1,
-      bitDepth: 16,
-      sampleRate: 22050,
+// Play audio using system aplay (no Node.js native modules)
+export const playAudio = async (filePath: string): Promise<void> => {
+  try {
+    await execPromise(`aplay "${filePath}"`, { 
+      timeout: 30000,
+      stdio: ['ignore', 'ignore', 'pipe'] // Suppress aplay output
     });
-    
-    createReadStream(audioPath)
-      .pipe(speaker)
-      .on('finish', resolve)
-      .on('error', reject);
-  });
+    console.log(`✅ Audio played: ${filePath}`);
+  } catch (error: any) {
+    console.warn('⚠️ Audio playback failed:', error.message);
+    console.warn('💡 Try: sudo apt install alsa-utils');
+    // Don't throw - let the loop complete even if playback fails
+  }
 };

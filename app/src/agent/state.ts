@@ -1,30 +1,36 @@
 // src/agent/state.ts
 import { Annotation } from "@langchain/langgraph";
 
-export type ToolCall = {
-  name: string;
-  args: Record<string, any>;
-};
-
 export const AgentState = Annotation.Root({
-  /** Conversation history */
+  // 📝 Conversation History
   messages: Annotation<string[]>({
     reducer: (x, y) => x.concat(y),
+    default: () => [],
   }),
-  // Persistent conversation history (for RAG + context)
-  conversationHistory: Annotation<Array<{
-    role: 'user' | 'assistant';
-    content: string;
-    timestamp: string;
-  }>>({
-    reducer: (x, y) => [...x, ...y].slice(-20), // Keep last 20 messages
+  history: Annotation<string>({
+    reducer: (x, y) => y ?? x,
+    default: () => "",
   }),
-  /** Next node to execute */
-  next: Annotation<string | undefined>,
-  /** Parsed tool call from LLM */
-  tool_call: Annotation<ToolCall | undefined>,
-  /** Result from tool execution */
-  tool_result: Annotation<string | undefined>,
-  /** User ID for audit logging */
-  userId: Annotation<string>,
+
+  // 🧠 Agent Logic
+  next: Annotation<string>({
+    reducer: (x, y) => y ?? x,
+    default: () => "__end__",
+  }),
+  userId: Annotation<string>({
+    reducer: (x, y) => y ?? x,
+    default: () => "mwei",
+  }),
+
+  // 🔧 Tool Execution
+  tool_call: Annotation<any>({
+    reducer: (x, y) => y ?? x,
+    default: () => null,
+  }),
+  tool_result: Annotation<string>({
+    reducer: (x, y) => y ?? x,
+    default: () => "",
+  }),
 });
+
+export type StateType = typeof AgentState.State;

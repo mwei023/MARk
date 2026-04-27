@@ -21,7 +21,12 @@ export const createRagQueryTool = () => createTool({
     else if (lowerQuery.includes('song') || lowerQuery.includes('music')) topic = 'personal';
     else if (lowerQuery.includes('docker') || lowerQuery.includes('container')) topic = 'devops';
     
-    const results = await retrieveContext(args.query, args.limit, topic);
+    const results = await retrieveContext(
+  args.query,      // query
+  args.limit,      // limit (number)
+  topic,           // topic (string | undefined)
+  0.3              // threshold (lower for personal notes)
+);
     
     if (!results || results.trim() === "") {
       return `🔍 No notes found for "${args.query}". Try rephrasing or add more docs.`;

@@ -9,8 +9,13 @@ export const rememberArgsSchema = z.object({
     .min(10, "Note must be at least 10 characters")
     .max(2000, "Note must be under 2000 characters")
     .describe("The fact, insight, or note you want to remember"),
+  
+  // ✅ Change this line:
+  // topic: z.string().optional()...
+  
+  // ✅ To this (accepts string | undefined | null):
   topic: z.string()
-    .optional()
+    .nullish()  // ← accepts string, undefined, OR null
     .describe("Optional category/tag (e.g., 'typescript', 'devops', 'personal')"),
 });
 
@@ -37,8 +42,6 @@ export const createRememberTool = () => createTool({
       );
       
       return `✅ Remembered: "${args.note}"${args.topic ? ` [${args.topic}]` : ''}`;
-
-      return `Found results for "${args.query}":\n\n${results}`;
       
     } catch (error: any) {
       await logAction("jarvis", `remember: ${args.note}`, "ERROR", error.message);

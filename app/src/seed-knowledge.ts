@@ -1,5 +1,5 @@
 // src/scripts/seed-knowledge.ts
-import { ingestDocument } from '../../rags';
+import { ingestDocument } from './rags';
 import * as dotenv from 'dotenv';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';

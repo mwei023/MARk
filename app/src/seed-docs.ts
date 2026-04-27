@@ -22,7 +22,7 @@ console.log('  DATABASE_URL:', process.env.DATABASE_URL?.replace(/:[^:@]+@/, ':*
 console.log('  DB_PASSWORD:', process.env.DB_PASSWORD ? '***set***' : '❌ missing');
 
 // ── NOW IMPORT YOUR APP CODE (after dotenv) ───────────────
-import { ingestDocument } from '../rags';
+import { ingestDocument } from './rags';
 
 // ── SEED FUNCTION ─────────────────────────────────────────
 const seed = async () => {

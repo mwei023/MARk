@@ -2,12 +2,13 @@
 import * as dotenv from "dotenv";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
-import { runAgent } from "./agent";
 
 // Load .env from project root
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, "../.env") });
+
+import { runAgent } from "./agent";
 
 const showThinking = () => process.stdout.write("🤖 Jarvis: ⋯ ");
 const clearThinking = () => process.stdout.write("\r🤖 Jarvis: ");

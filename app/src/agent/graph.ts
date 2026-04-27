@@ -21,4 +21,5 @@ const workflow = new StateGraph(AgentState)
   
   .setEntryPoint("llm");
 
-export const agentGraph = workflow.compile();
+const compiledGraph = workflow.compile();
+export { compiledGraph };

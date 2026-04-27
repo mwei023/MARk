@@ -47,3 +47,7 @@
 [2026-04-17T20:04:45.237Z] USER:jarvis | ACTION:remember: I prefer TypeScript strict mode... | STATUS:SUCCESS | DETAILS:topic:typescript
 [2026-04-18T04:32:29.570Z] USER:jarvis | ACTION:remember: I prefer TypeScript Strict mode... | STATUS:SUCCESS | DETAILS:topic:typescript
 [2026-04-19T11:48:00.391Z] USER:jarvis | ACTION:remember: My name is Mwei and my favourite song is Deja vu by J.Cole | STATUS:ERROR | DETAILS:Expected 768-dim vector, got 3072
+[2026-04-23T11:13:32.110Z] USER:jarvis | ACTION:remember: My favourite color is blue | STATUS:ERROR | DETAILS:Expected 768-dim vector, got 3072
+[2026-04-23T12:57:47.177Z] USER:jarvis | ACTION:remember: My favourite color is blue | STATUS:ERROR | DETAILS:Expected 768-dim vector, got 3072
+[2026-04-23T13:40:17.729Z] USER:jarvis | ACTION:remember: My favourite color is blue... | STATUS:SUCCESS
+[2026-04-27T18:59:01.079Z] USER:jarvis | ACTION:remember: Your favorite programming language is Rust... | STATUS:SUCCESS

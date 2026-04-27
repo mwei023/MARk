@@ -9,47 +9,33 @@ const WHISPER_BIN = process.env.WHISPER_BIN || '/home/mwei/jarvis-core/bin/whisp
 const WHISPER_MODEL = process.env.WHISPER_MODEL || '/home/mwei/jarvis-core/models/ggml-small.en.bin';
 
 // src/voice/stt.ts - UPDATED for whisper-cli output
+// src/voice/stt.ts - UPDATED for whisper-cli
 export const transcribe = async (audioPath: string): Promise<string> => {
-  const WHISPER_BIN = process.env.WHISPER_BIN || '/home/mwei/jarvis-core/bin/whisper-bin';
+  const WHISPER_BIN = process.env.WHISPER_BIN || '/home/mwei/jarvis-core/bin/whisper.cpp/build/bin/whisper-cli';
   const WHISPER_MODEL = process.env.WHISPER_MODEL || '/home/mwei/jarvis-core/models/ggml-small.en.bin';
   
   try {
     const { stdout, stderr } = await execFilePromise(WHISPER_BIN, [
-      '-m', WHISPER_MODEL,
-      '-f', audioPath,
-      '-l', 'en',  // Force English
+      '--model', WHISPER_MODEL,  // Use --model not -m
+      '--file', audioPath,        // Use --file not -f
+      // --language en is optional (small.en is English-only)
     ], {
-      timeout: 60000, // 60 second timeout for large models
-      stdio: ['ignore', 'pipe', 'pipe'],
+  env: { ...process.env, LD_LIBRARY_PATH: process.env.LD_LIBRARY_PATH },
+      timeout: 60000,
     });
     
-    // Parse whisper-cli output: extract text from timestamp lines
-    // Format: [00:00:00.000 --> 00:00:02.640]   Hello Mark, can you hear me?
+    // Parse output: whisper-cli prints timestamps like [00:00:00.000 --> ...]   text
     const lines = (stdout + stderr).split('\n');
-    const transcription = lines
-      .filter(line => /^\[\d{2}:\d{2}:\d{2}\.\d{3}/.test(line)) // Match timestamp lines
-      .map(line => line.replace(/^\[.*?\]\s+/, '').trim()) // Remove timestamp prefix
+    const text = lines
+      .filter(line => /^\[\d{2}:\d{2}:\d{2}\.\d{3}/.test(line))
+      .map(line => line.replace(/^\[.*?\]\s+/, '').trim())
       .join(' ')
       .trim();
     
-    if (!transcription) {
-      // Fallback: return raw stdout if no timestamp lines found
-      const clean = (stdout + stderr)
-        .replace(/WARNING:.*deprecated.*$/gm, '')
-        .replace(/whisper_.*?:.*$/gm, '') // Remove whisper logs
-        .trim();
-      if (clean) return clean;
-      throw new Error('No transcription found in output');
-    }
-    
-    return transcription;
+    return text || stdout.trim();
     
   } catch (error: any) {
-    console.error('[STT Error]', {
-      cmd: error.cmd,
-      message: error.message,
-      stderr: error.stderr?.slice(0, 200), // First 200 chars
-    });
+    console.error('[STT Error]', error.message);
     throw new Error(`Transcription failed: ${error.message}`);
   }
 };

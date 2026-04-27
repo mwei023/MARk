@@ -1,32 +1,32 @@
 // src/agent.ts
-import { agentGraph } from "./agent/graph";
+import { compiledGraph } from "./agent/graph";// Adjust import if your graph variable is named differently
+import { getRecentHistory, saveTurn } from "./agent/history";
+import { AgentState } from "./agent/state";
 
-/**
- * Run the Jarvis agent with a user input.
- * @param input - The user's message/command
- * @param userId - User identifier for audit logging (default: "mwei")
- * @returns The agent's final response string
- */
-export const runAgent = async (input: string, userId: string = "mwei"): Promise<string> => {
-  const initialState = {
-    messages: [`User: ${input}`],
-    next: undefined,
-    tool_call: undefined,
-    tool_result: undefined,
-    userId,
-  };
-  
+export const runAgent = async (input: string, userId: string = "mwei") => {
   try {
-    const result = await agentGraph.invoke(initialState, {
-    recursionLimit: 10, // Lower = safer, prevents runaway loops
-  });
-    console.log("[runAgent] Full graph result:", JSON.stringify(result, null, 2)); 
-    const lastMessage = result.messages?.[result.messages.length - 1];
-    
-    // Clean up the response prefix if present
-    return lastMessage?.replace(/^Jarvis:\s*/, "") || "No response generated";
-  } catch (error) {
-    console.error("[runAgent error]", error);
-    return `⚠️ Error: ${error instanceof Error ? error.message : "Unknown error"}`;
-  };
+    // 1. Load History
+    const history = await getRecentHistory(userId, 3); // Last 3 turns
+
+    // 2. Run Graph with History injected into State
+    // Assuming your graph takes an input like { input, messages, userId, history }
+    const result = await compiledGraph.invoke({
+      input: input, 
+      userId: userId,
+      history: history,
+      messages: [`User: ${input}`]
+    });
+
+    // 3. Extract Response (adjust based on your graph's output structure)
+    const lastMsg = result.messages?.at(-1) || "";
+    const response = lastMsg.replace(/^Jarvis:\s*/i, ""); // Clean up prefix
+
+    // 4. Save to Database
+    await saveTurn(userId, input, response);
+
+    return response;
+  } catch (error: any) {
+    console.error("[Agent Error]", error.message);
+    return `⚠️ Error: ${error.message}`;
+  }
 };

@@ -1,6 +1,6 @@
 // src/agent/nodes.ts
 import { AgentState, ToolCall } from "./state";
-import { model } from "../llm";
+import { model, getModel, SYSTEM_PROMPT } from "../llm"; // ✅ Import SYSTEM_PROMPT
 import { toolsRegistry, Tool } from "../tools"; 
 import { z } from "zod";
 
@@ -8,80 +8,74 @@ import { z } from "zod";
 const tools = toolsRegistry;
 
 // Prompt template for structured tool calling
-const TOOL_CALL_PROMPT = `
-You are Jarvis, a helpful AI assistant for Mwei.
+/*const SYSTEM_PROMPT = `
+You are Jarvis, a private voice assistant with access to the user's personal knowledge base.
 
-AVAILABLE TOOLS (call these when appropriate):
-1. system_check
-   - Use when: user asks about Docker, containers, system status
-   - Examples: "are my containers running?", "show docker stats", "check system health"
-   - Args: { action: "ps" | "stats" | "images" | "logs" | "version" }
+🔍 TOOL USAGE RULES:
+1. ALWAYS call "rag_query" when the user asks about:
+   - Their preferences ("what's my favorite X?")
+   - Things they told you to remember ("what did I say about Y?")
+   - Their notes, learnings, or past conversations
+   - Questions starting with: "what's my...", "did I mention...", "remind me about..."
 
-2. rag_query  
-   - Use when: user asks a question about their notes, past learnings, or saved info
-   - Examples: "What did I learn about pgvector?", "What do I prefer about TypeScript?", "show me my notes on X"
-   - Args: { query: "the search question" }
+2. ONLY respond directly when:
+   - The question is general knowledge ("what is Docker?")
+   - The user asks for system actions ("check CPU usage")
+   - rag_query returns no results (then say: "I don't have notes on that yet")
 
-3. remember
-   - Use when: user explicitly says "remember", "save this", "note that", or "don't forget"
-   - Examples: 
-     • "remember that I prefer TypeScript strict mode" → { note: "I prefer TypeScript strict mode", topic: "typescript" }
-     • "save this: my name is Mwei" → { note: "my name is Mwei", topic: "personal" }
-     • "note that pgvector uses HNSW indexing" → { note: "pgvector uses HNSW indexing", topic: "devops" }
-   - Args: { note: "the fact to save (min 10 chars)", topic?: "optional category" }
+3. If unsure, CALL rag_query first — it's better to check than to guess.
 
-RESPONSE FORMAT RULES (STRICT):
-You MUST respond with EXACTLY ONE of these JSON objects (no extra text, no markdown):
+🗣️ RESPONSE STYLE:
+- Keep answers concise, friendly, and conversational
+- When quoting saved notes, paraphrase naturally: "You mentioned that your favorite color is blue"
+- Never mention tool names or technical details to the user
 
-{"tool_call": {"name": "system_check", "args": {"action": "ps"}}}
-{"tool_call": {"name": "rag_query", "args": {"query": "What did I learn about X?"}}}
-{"tool_call": {"name": "remember", "args": {"note": "fact to save", "topic": "optional"}}}
-{"response": "your natural conversational answer when no tool is needed"}
-
-ADDITIONAL RULES:
-- If user says "remember"/"save"/"note", ALWAYS call the 'remember' tool
-- After a tool returns "[Tool result: ...]", do NOT call tools again - just respond naturally
-- If rag_query returns no results, say: "I don't have notes on that yet. Would you like me to remember something about it?"
-- Never invent tools or args. If unsure, ask for clarification.
-
-User message: {input}
-`.trim();
+📝 EXAMPLE FLOW:
+User: "what's my favorite color?"
+→ You: [CALL rag_query with query="favorite color"]
+→ Tool returns: "My favourite color is blue"
+→ You: "Your favorite color is blue."
+`;*/
 
 export const llmNode = async (state: typeof AgentState.State) => {
-  const { messages, userId } = state;
+  const { messages, userId, history } = state;
   const lastMessage = messages[messages.length - 1];
 
   if (lastMessage?.includes("[Tool result:")) {
-  const toolMatch = lastMessage.match(/\[Tool result: (\w+)\]/);
-  const toolName = toolMatch?.[1] || "tool";
-  let summary = lastMessage.replace(/\[Tool result:.*?\]\n?/, '').trim();
+    const toolMatch = lastMessage.match(/\[Tool result: (\w+)\]/);
+    const toolName = toolMatch?.[1] || "tool";
+    let summary = lastMessage.replace(/\[Tool result:.*?\]\n?/, '').trim();
+    
+    const emoji = toolName === "system_check" ? "✅" : 
+                  toolName === "remember" ? "✅" : 
+                  toolName === "rag_query" ? "📚" : "💡";
+    
+    return {
+      next: "end",
+      messages: [`Jarvis: ${emoji} ${summary}`],
+    };
+  }
   
-  // Add emoji prefix ONCE here
-  const emoji = toolName === "system_check" ? "✅" : 
-                toolName === "remember" ? "✅" : 
-                toolName === "rag_query" ? "📚" : "💡";
-  
-  return {
-    next: "end",
-    messages: [`Jarvis: ${emoji} ${summary}`],  // ← Single emoji prefix
-  };
-}
-  
-  const prompt = TOOL_CALL_PROMPT.replace("{input}", lastMessage);
-  
+  const prompt = TOOL_CALL_PROMPT
+    .replace("{input}", lastMessage)
+    .replace("{history}", history || "No history yet.");
+    
   try {
-    const response = await model.invoke([{ role: "user", content: prompt }]);
+    // ✅ Pass system prompt + user prompt as message array
+    const response = await getModel().invoke([
+      { role: "system", content: SYSTEM_PROMPT }, // ✅ System prompt here
+      { role: "user", content: prompt }            // ✅ User prompt here
+    ]);
+    
     const content = typeof response.content === 'string' 
       ? response.content 
       : JSON.stringify(response.content);
     
-    // Parse the JSON response
     const parsed = JSON.parse(content);
     
     console.log("[llmNode] Parsed decision:", parsed.tool_call ? `CALL ${parsed.tool_call.name}` : "RESPOND");
 
     if (parsed.tool_call && tools[parsed.tool_call.name]) {
-      // Validate args against Zod schema
       const tool = tools[parsed.tool_call.name];
       const validatedArgs = tool.argsSchema.parse(parsed.tool_call.args);
       
@@ -98,7 +92,6 @@ export const llmNode = async (state: typeof AgentState.State) => {
       };
     }
     
-    // Fallback if parsing fails
     return {
       next: "end",
       messages: [`Jarvis: I received your request but couldn't process it. Please try rephrasing.`],
@@ -142,3 +135,43 @@ export const toolExecutorNode = async (state: typeof AgentState.State) => {
     };
   }
 };
+
+const toolDefinitions = Object.entries(tools).map(([name, tool]) => {
+  return `- ${name}: ${tool.description}\n  Args: ${JSON.stringify(tool.argsSchema.shape, null, 2)}`;
+}).join('\n\n');
+
+export const TOOL_CALL_PROMPT = `
+${SYSTEM_PROMPT}
+
+🛠️ AVAILABLE TOOLS:
+${toolDefinitions}
+
+📋 OUTPUT FORMAT (STRICT JSON):
+You MUST respond with ONE of these JSON structures:
+
+Option 1 - Call a tool:
+{
+  "tool_call": {
+    "name": "tool_name_here",
+    "args": { /* validated args matching the tool's schema */ }
+  }
+}
+
+Option 2 - Respond directly:
+{
+  "response": "Your natural language answer here"
+}
+
+❗ RULES:
+- Output ONLY valid JSON. No markdown, no explanations, no extra text.
+- If calling a tool, ensure args match the schema exactly.
+- If the user asks about personal knowledge, PREFER rag_query.
+
+📥 CURRENT CONTEXT:
+User's recent history: {history}
+
+🗣️ USER INPUT:
+{input}
+
+👉 Your JSON response:
+`;
