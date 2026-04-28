@@ -1,6 +1,60 @@
-/home/mwei/jarvis-core/app/.env
-/home/mwei/jarvis-core/data/postgres
-/home/mwei/jarvis-core/data/redis
-/home/mwei/jarvis-core/data/redis-commanderdata/
+# ── Dependencies ──────────────────────────────
+node_modules/
+app/node_modules/
+package-lock.json
+app/package-lock.json
+
+# ── Environment / Secrets ─────────────────────
+.env
+app/.env
+*.pem
+*.key
+
+# ── Data & Databases ──────────────────────────
+data/
+app/data/
+*.db
+*.sqlite
+*.rdb
+
+# ── Large Models & Binaries ───────────────────
+models/
+*.bin
+*.onnx
+*.tar.gz
+*.tar
+*.zip
+*.pt
+*.pth
+*.safetensors
+
+# ── Compiled / Build artifacts ────────────────
+dist/
+build/
+*.o
+*.a
+*.so
+*.so.*
+*.dll
+*.exe
+
+# ── External Tools (should be cloned/built separately) ──
+bin/whisper.cpp/
+bin/piper/
+bin/piper-files/
+
+# ── Logs ──────────────────────────────────────
+*.log
+audit.log
+
+# ── OS / Editor ───────────────────────────────
+.DS_Store
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Docker volumes ────────────────────────────
 data/postgres/
-data/redis/dump.rdb   
+data/redis/
+
