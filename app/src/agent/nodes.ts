@@ -1,46 +1,74 @@
 // src/agent/nodes.ts
 import { AgentState, ToolCall } from "./state";
-import { model, getModel, SYSTEM_PROMPT } from "../llm"; // ✅ Import SYSTEM_PROMPT
+import { model, getModel, SYSTEM_PROMPT } from "../llm";
 import { toolsRegistry, Tool } from "../tools"; 
-import { z } from "zod";
 
-// Register tools here (expand as you add more)
 const tools = toolsRegistry;
 
-// Prompt template for structured tool calling
-/*const SYSTEM_PROMPT = `
-You are Jarvis, a private voice assistant with access to the user's personal knowledge base.
+// 🕐 Helper: Get current time in Nairobi (your idea!)
+const getCurrentTimeNairobi = () => {
+  return new Date().toLocaleString('en-KE', {
+    timeZone: 'Africa/Nairobi',
+    weekday: 'short',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+};
 
-🔍 TOOL USAGE RULES:
-1. ALWAYS call "rag_query" when the user asks about:
-   - Their preferences ("what's my favorite X?")
-   - Things they told you to remember ("what did I say about Y?")
-   - Their notes, learnings, or past conversations
-   - Questions starting with: "what's my...", "did I mention...", "remind me about..."
+// Build tool definitions for the prompt
+const toolDefinitions = Object.entries(tools).map(([name, tool]) => {
+  const argsExample = Object.keys(tool.argsSchema?.shape || {}).length > 0
+    ? JSON.stringify(Object.fromEntries(
+        Object.entries(tool.argsSchema.shape).map(([k]) => [k, "value"])
+      ), null, 2)
+    : "{}";
+  return `- ${name}: ${tool.description}\n  Args example: ${argsExample}`;
+}).join('\n\n');
 
-2. ONLY respond directly when:
-   - The question is general knowledge ("what is Docker?")
-   - The user asks for system actions ("check CPU usage")
-   - rag_query returns no results (then say: "I don't have notes on that yet")
+// Prompt template with time injection
+const buildPrompt = (history: string, input: string) => `
+You are Jarvis, an AI assistant for Mwei.
+Current time: ${getCurrentTimeNairobi()}
 
-3. If unsure, CALL rag_query first — it's better to check than to guess.
+TOOLS AVAILABLE:
+- remember: save a personal fact. Args: {"note": "text"}
+- rag_query: search Mwei's personal notes. Args: {"query": "text"}
+- system_check: run safe shell commands. Args: {"command": "ls -la ~"}
 
-🗣️ RESPONSE STYLE:
-- Keep answers concise, friendly, and conversational
-- When quoting saved notes, paraphrase naturally: "You mentioned that your favorite color is blue"
-- Never mention tool names or technical details to the user
+DECISION RULES:
+💡 EXAMPLES:
+User: "What time is it?"
+→ {"response": "It's ${getCurrentTimeNairobi()}."}
 
-📝 EXAMPLE FLOW:
-User: "what's my favorite color?"
-→ You: [CALL rag_query with query="favorite color"]
-→ Tool returns: "My favourite color is blue"
-→ You: "Your favorite color is blue."
-`;*/
+User: "list files" OR "show my files" OR "ls"
+→ {"tool_call": {"name": "system_check", "args": {"command": "ls -la ~"}}}
+
+User: "check disk space" OR "how much storage"
+→ {"tool_call": {"name": "system_check", "args": {"command": "df -h"}}}
+
+User: "what's my favorite color"
+→ {"tool_call": {"name": "rag_query", "args": {"query": "favorite color"}}}
+
+User: "remember I like blue"
+→ {"tool_call": {"name": "remember", "args": {"note": "I like blue"}}}
+- everything else → respond directly
+
+Respond with ONE JSON only, no markdown:
+{"response": "answer"} OR {"tool_call": {"name": "...", "args": {...}}}
+
+History: ${history || "none"}
+User: ${input}
+`.trim();
 
 export const llmNode = async (state: typeof AgentState.State) => {
   const { messages, userId, history } = state;
   const lastMessage = messages[messages.length - 1];
+  
 
+  // Handle tool result responses
   if (lastMessage?.includes("[Tool result:")) {
     const toolMatch = lastMessage.match(/\[Tool result: (\w+)\]/);
     const toolName = toolMatch?.[1] || "tool";
@@ -56,60 +84,107 @@ export const llmNode = async (state: typeof AgentState.State) => {
     };
   }
   
-  const prompt = TOOL_CALL_PROMPT
-    .replace("{input}", lastMessage)
-    .replace("{history}", history || "No history yet.");
+  // Quick pre-router for common commands (before LLM)
+  const quickRoute = (text: string) => {
+    const lower = (text || "").toLowerCase();
+    if (/(list files|ls |show files|directory)/.test(lower)) 
+      return { tool_call: { name: "system_check", args: { command: "ls -la ~" } } };
+    if (/(disk|storage|df)/.test(lower)) 
+      return { tool_call: { name: "system_check", args: { command: "df -h" } } };
+    return null;
+  };
+
+  const routed = quickRoute(lastMessage);
+  if (routed) {
+    console.log("[llmNode] Quick-routed:", routed.tool_call.name);
+    return { next: "execute_tool", tool_call: routed.tool_call };
+  }
+
+  const prompt = buildPrompt(history || "No history yet.", lastMessage || "");
     
   try {
-    // ✅ Pass system prompt + user prompt as message array
     const response = await getModel().invoke([
-      { role: "system", content: SYSTEM_PROMPT }, // ✅ System prompt here
-      { role: "user", content: prompt }            // ✅ User prompt here
+      { role: "system", content: SYSTEM_PROMPT },
+      { role: "user", content: prompt }
     ]);
     
-    const content = typeof response.content === 'string' 
-      ? response.content 
-      : JSON.stringify(response.content);
+    // Handle different response formats defensively
+    let content = "";
+    if (typeof response.content === 'string') {
+      content = response.content.trim();
+    } else if (response.content && typeof response.content === 'object') {
+      content = JSON.stringify(response.content);
+    }
     
-    const parsed = JSON.parse(content);
+    // Clean markdown code fences if LLM adds them
+    content = content.replace(/^```(?:json)?\n?|\n?```$/g, '').trim();
     
-    console.log("[llmNode] Parsed decision:", parsed.tool_call ? `CALL ${parsed.tool_call.name}` : "RESPOND");
-
-    if (parsed.tool_call && tools[parsed.tool_call.name]) {
-      const tool = tools[parsed.tool_call.name];
-      const validatedArgs = tool.argsSchema.parse(parsed.tool_call.args);
-      
+    // Parse JSON with fallback
+    let parsed: any;
+    try {
+      parsed = JSON.parse(content);
+    } catch (parseErr) {
+      console.warn("[llmNode] JSON parse failed, attempting fallback...");
+      // Fallback: treat as direct response
       return {
-        next: "execute_tool",
-        tool_call: { name: parsed.tool_call.name, args: validatedArgs },
+        next: "end",
+        messages: [`Jarvis: ${content}`],
       };
     }
     
-    if (parsed.response) {
+    console.log("[llmNode] Parsed:", JSON.stringify(parsed).slice(0, 200));
+
+    // Handle tool call
+    if (parsed?.tool_call?.name && tools[parsed.tool_call.name]) {
+      const tool = tools[parsed.tool_call.name];
+      try {
+        const validatedArgs = tool.argsSchema?.parse 
+          ? tool.argsSchema.parse(parsed.tool_call.args || {}) 
+          : parsed.tool_call.args || {};
+        
+        return {
+          next: "execute_tool",
+          tool_call: { name: parsed.tool_call.name, args: validatedArgs },
+        };
+      } catch (schemaErr: any) {
+        console.warn("[llmNode] Args validation failed, falling back to response:", schemaErr.message);
+        return {
+          next: "end",
+          messages: [`Jarvis: I need a bit more detail to do that. Could you rephrase?`],
+        };
+      }
+    }
+    
+    // Handle direct response
+    if (parsed?.response) {
       return {
         next: "end",
         messages: [`Jarvis: ${parsed.response}`],
       };
     }
     
+    // Fallback if structure is unexpected
     return {
       next: "end",
-      messages: [`Jarvis: I received your request but couldn't process it. Please try rephrasing.`],
+      messages: [`Jarvis: I received your request. How can I help further?`],
     };
     
-  } catch (error) {
-    console.error("[LLM Node Error]", error);
+  } catch (error: any) {
+    console.error("[LLM Node Error]", error?.message || error);
     return {
       next: "end",
-      messages: [`Jarvis: ⚠️ Error processing request. Check logs for details.`],
+      messages: [`Jarvis: ⚠️ I hit a snag. Please try again in a moment.`],
     };
   }
 };
 
 export const toolExecutorNode = async (state: typeof AgentState.State) => {
-  console.log("[toolExecutorNode] Executing tool:", state.tool_call?.name);
+  console.log("[toolExecutorNode] Executing:", state.tool_call?.name);
   const { tool_call, userId } = state;
-  if (!tool_call) return { next: "end", tool_result: undefined };
+  
+  if (!tool_call?.name) {
+    return { next: "end", tool_result: undefined };
+  }
   
   const tool = tools[tool_call.name as keyof typeof tools];
   if (!tool) {
@@ -121,57 +196,18 @@ export const toolExecutorNode = async (state: typeof AgentState.State) => {
   }
   
   try {
-    const result = await tool.func(tool_call.args);
+    const result = await tool.func(tool_call.args || {});
     return {
-      next: "llm", // Loop back to LLM to formulate natural response
+      next: "llm",
       tool_result: result,
       messages: [`[Tool result: ${tool_call.name}]\n${result}`],
     };
   } catch (error: any) {
+    console.error("[toolExecutorNode] Error:", error?.message);
     return {
       next: "end",
       tool_result: `Error: ${error.message}`,
-      messages: [`Jarvis: ⚠️ ${error.message}`],
+      messages: [`Jarvis: ⚠️ ${error.message || "Something went wrong."}`],
     };
   }
 };
-
-const toolDefinitions = Object.entries(tools).map(([name, tool]) => {
-  return `- ${name}: ${tool.description}\n  Args: ${JSON.stringify(tool.argsSchema.shape, null, 2)}`;
-}).join('\n\n');
-
-export const TOOL_CALL_PROMPT = `
-${SYSTEM_PROMPT}
-
-🛠️ AVAILABLE TOOLS:
-${toolDefinitions}
-
-📋 OUTPUT FORMAT (STRICT JSON):
-You MUST respond with ONE of these JSON structures:
-
-Option 1 - Call a tool:
-{
-  "tool_call": {
-    "name": "tool_name_here",
-    "args": { /* validated args matching the tool's schema */ }
-  }
-}
-
-Option 2 - Respond directly:
-{
-  "response": "Your natural language answer here"
-}
-
-❗ RULES:
-- Output ONLY valid JSON. No markdown, no explanations, no extra text.
-- If calling a tool, ensure args match the schema exactly.
-- If the user asks about personal knowledge, PREFER rag_query.
-
-📥 CURRENT CONTEXT:
-User's recent history: {history}
-
-🗣️ USER INPUT:
-{input}
-
-👉 Your JSON response:
-`;

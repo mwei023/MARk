@@ -1,11 +1,29 @@
 // src/voice/tts.ts - SIMPLIFIED: Uses system aplay, no native modules
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { access, constants } from 'fs/promises';
 
 const execPromise = promisify(exec);
 
+const validateVoiceModel = async (modelPath: string): Promise<void> => {
+  try {
+    await access(modelPath, constants.F_OK);
+    await access(`${modelPath}.json`, constants.F_OK);
+  } catch {
+    throw new Error(
+      `🎤 Piper voice model not found at: ${modelPath}\n` +
+      `💡 Download it with:\n` +
+      `   curl -Lo ${modelPath} \\\n` +
+      `     https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/en_US-lessac-medium.onnx`
+    );
+  }
+};
+
+
 export const speak = async (text: string, outputPath: string): Promise<void> => {
   const PIPER_MODEL = process.env.PIPER_MODEL || '/home/mwei/jarvis-core/models/piper/en_US-lessac-medium.onnx';
+
+  await validateVoiceModel(PIPER_MODEL);
   
   try {
     // Escape text for shell safety

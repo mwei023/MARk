@@ -1,6 +1,7 @@
 // src/llm/index.ts - lazy initialization
 import { ChatOllama } from "@langchain/ollama";
 
+
 // ✅ Export system prompt for use in nodes.ts
 export const SYSTEM_PROMPT = `
 You are Jarvis, a private voice assistant with access to the user's personal knowledge base.

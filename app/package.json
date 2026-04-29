@@ -13,7 +13,7 @@
     "@langchain/core": "^1.1.40",
     "@langchain/langgraph": "^1.2.9",
     "csv-parse": "^6.1.0",
-    "dotenv": "^17.3.1",
+    "dotenv": "^17.4.2",
     "ollama": "^0.6.3",
     "pg": "^8.20.0",
     "speaker": "^0.5.5",
