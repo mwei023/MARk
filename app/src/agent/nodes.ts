@@ -29,44 +29,58 @@ const toolDefinitions = Object.entries(tools).map(([name, tool]) => {
 }).join('\n\n');
 
 // Prompt template with time injection
-const buildPrompt = (history: string, input: string) => `
-You are Jarvis, an AI assistant for Mwei.
+const buildPrompt = (history: string, input: string) => {
+  // Dynamically list available tools from registry
+  const toolsList = Object.entries(tools).map(([name, tool]) => 
+    `- ${name}: ${tool.description}`
+  ).join('\n');
+
+  return `You are Jarvis, an AI assistant for Mwei.
 Current time: ${getCurrentTimeNairobi()}
 
 TOOLS AVAILABLE:
-- remember: save a personal fact. Args: {"note": "text"}
-- rag_query: search Mwei's personal notes. Args: {"query": "text"}
-- system_check: run safe shell commands. Args: {"command": "ls -la ~"}
+${toolsList}
 
-DECISION RULES:
-💡 EXAMPLES:
-User: "What time is it?"
-→ {"response": "It's ${getCurrentTimeNairobi()}."}
+ROUTING RULES (pick ONE tool or respond directly):
 
-User: "list files" OR "show my files" OR "ls"
-→ {"tool_call": {"name": "system_check", "args": {"command": "ls -la ~"}}}
+💡 FOR MARKET QUERIES:
+User: "what's bitcoin price" OR "btc price" OR "ethereum price"
+→ {"tool_call": {"name": "market_snapshot", "args": {"symbol": "bitcoin"}}}
 
-User: "check disk space" OR "how much storage"
+User: "give me a brief on bitcoin" OR "brief me on ethereum" OR "market outlook for solana"
+→ {"tool_call": {"name": "market_brief", "args": {"symbol": "bitcoin"}}}
+
+User: "add bitcoin to watchlist" OR "alert me if ethereum drops" 
+→ {"tool_call": {"name": "watchlist", "args": {"action": "add", "symbol": "bitcoin", "condition": {"type": "above", "price": 75000}}}}
+
+User: "list my watchlist" OR "what are my alerts"
+→ {"tool_call": {"name": "watchlist", "args": {"action": "list"}}}
+
+User: "show my portfolio" OR "what's my P&L"
+→ {"tool_call": {"name": "portfolio", "args": {"action": "view"}}}
+
+💡 FOR KNOWLEDGE QUERIES:
+User: "what's my favorite X" OR "remind me about Y" OR "did I mention Z"
+→ {"tool_call": {"name": "rag_query", "args": {"query": "favorite X"}}}
+
+User: "remember I like blue" OR "note that I prefer X"  
+→ {"tool_call": {"name": "remember", "args": {"note": "I like blue"}}}
+
+💡 FOR SYSTEM QUERIES:
+User: "check disk space" OR "list files" OR "how much storage"
 → {"tool_call": {"name": "system_check", "args": {"command": "df -h"}}}
 
-User: "what's my favorite color"
-→ {"tool_call": {"name": "rag_query", "args": {"query": "favorite color"}}}
-
-User: "remember I like blue"
-→ {"tool_call": {"name": "remember", "args": {"note": "I like blue"}}}
-- everything else → respond directly
-
-Respond with ONE JSON only, no markdown:
-{"response": "answer"} OR {"tool_call": {"name": "...", "args": {...}}}
-
-User: "what's bitcoin price"
-→ {"tool_call": {"name": "market_snapshot", "args": {"symbol": "bitcoin"}}}
-User: "how is ethereum doing"
-→ {"tool_call": {"name": "market_snapshot", "args": {"symbol": "ethereum"}}}
+User: "what time is it" OR "anything general knowledge"
+→ {"response": "Your direct answer here"}
 
 History: ${history || "none"}
 User: ${input}
+
+Respond with ONE valid JSON only, no markdown:
+{"response": "answer"} OR {"tool_call": {"name": "tool_name", "args": {...}}}
 `.trim();
+};
+
 
 export const llmNode = async (state: typeof AgentState.State) => {
   const { messages, userId, history } = state;

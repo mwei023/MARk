@@ -1,18 +1,6 @@
 // src/rags.ts - MINIMAL WORKING VERSION
-import { Pool } from 'pg';
+import { getPool } from './db/postgres';
 import { embeddings } from './llm/embeddings';
-
-let _pool: Pool | null = null;
-
-const getPool = (): Pool => {
-  if (!_pool) {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) throw new Error('DATABASE_URL not set');
-    _pool = new Pool({ connectionString });
-    console.log('✅ PostgreSQL pool initialized');
-  }
-  return _pool;
-};
 
 export const ingestDocument = async (text: string, metadata: Record<string, any> = {}) => {
   const pool = getPool();
@@ -73,8 +61,6 @@ export const clearDocuments = async () => {
 };
 
 export const shutdown = async () => {
-  if (_pool) {
-    await _pool.end();
-    _pool = null;
-  }
+  const { shutdown: dbShutdown } = await import('./db/postgres');
+  await dbShutdown();
 };

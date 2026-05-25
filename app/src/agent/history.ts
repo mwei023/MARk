@@ -1,16 +1,5 @@
 // src/agent/history.ts
-import { Pool } from 'pg';
-
-// 🔑 Lazy pool (same pattern as rags.ts)
-let _pool: Pool | null = null;
-const getPool = (): Pool => {
-  if (!_pool) {
-    const conn = process.env.DATABASE_URL;
-    if (!conn) throw new Error('DATABASE_URL not set');
-    _pool = new Pool({ connectionString: conn });
-  }
-  return _pool;
-};
+import { getPool } from '../db/postgres';
 
 export const saveTurn = async (userId: string, userMsg: string, assistantMsg: string) => {
   const pool = getPool();
