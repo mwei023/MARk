@@ -1,6 +1,6 @@
 // src/tools/rag_query.ts
 import { z } from "zod";
-import { createTool } from "./index";
+import { createTool } from "./toolFactory";
 import { retrieveContext } from "../rags";
 
 export const ragQueryArgsSchema = z.object({

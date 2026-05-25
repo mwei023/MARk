@@ -59,6 +59,11 @@ User: "remember I like blue"
 Respond with ONE JSON only, no markdown:
 {"response": "answer"} OR {"tool_call": {"name": "...", "args": {...}}}
 
+User: "what's bitcoin price"
+→ {"tool_call": {"name": "market_snapshot", "args": {"symbol": "bitcoin"}}}
+User: "how is ethereum doing"
+→ {"tool_call": {"name": "market_snapshot", "args": {"symbol": "ethereum"}}}
+
 History: ${history || "none"}
 User: ${input}
 `.trim();
@@ -91,8 +96,11 @@ export const llmNode = async (state: typeof AgentState.State) => {
       return { tool_call: { name: "system_check", args: { command: "ls -la ~" } } };
     if (/(disk|storage|df)/.test(lower)) 
       return { tool_call: { name: "system_check", args: { command: "df -h" } } };
+    if (/(memory|ram|how much mem)/.test(lower))
+      return { tool_call: { name: "system_check", args: { command: "free -h" } } };
     return null;
   };
+
 
   const routed = quickRoute(lastMessage);
   if (routed) {

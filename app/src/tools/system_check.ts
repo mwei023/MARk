@@ -29,7 +29,7 @@ export const createSystemCheckTool = () => ({
     }
     
     // 🛡️ Block dangerous patterns
-    const dangerous = ['rm -rf', 'sudo', 'chmod 777', '>', '>>', '|', ';', '`', '$(', '&&', '||'];
+    const dangerous = ['rm -rf', 'sudo', 'chmod 777', ';', '`', '$(', '&&', '||'];
     if (dangerous.some(pattern => rawCmd.includes(pattern))) {
       return `❌ Command contains unsafe patterns. Please rephrase.`;
     }

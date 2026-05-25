@@ -49,16 +49,28 @@ export const speak = async (text: string, outputPath: string): Promise<void> => 
 };
 
 // Play audio using system aplay (no Node.js native modules)
-export const playAudio = async (filePath: string): Promise<void> => {
-  try {
-    await execPromise(`aplay "${filePath}"`, { 
-      timeout: 30000,
-      stdio: ['ignore', 'ignore', 'pipe'] // Suppress aplay output
-    });
-    console.log(`✅ Audio played: ${filePath}`);
-  } catch (error: any) {
-    console.warn('⚠️ Audio playback failed:', error.message);
-    console.warn('💡 Try: sudo apt install alsa-utils');
-    // Don't throw - let the loop complete even if playback fails
+export const playAudio = async (filePath: string, retries = 3): Promise<void> => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      // Verify file exists before playing
+      await access(filePath, constants.F_OK);
+      
+      await execPromise(`aplay "${filePath}"`, { 
+        timeout: 30000,
+        stdio: ['ignore', 'ignore', 'pipe']
+      });
+      console.log(`✅ Audio played: ${filePath}`);
+      return;
+    } catch (error: any) {
+      console.warn(`⚠️ Play attempt ${i + 1}/${retries} failed:`, error.message);
+      if (i < retries - 1) {
+        const delay = 500 * Math.pow(2, i); // Exponential backoff: 500ms, 1s, 2s
+        console.log(`⏳ Retrying in ${delay}ms...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
   }
+  console.warn(`❌ Final playAudio failed after ${retries} attempts for ${filePath}`);
+  console.warn('💡 Check: file exists? alsa-utils installed? audio device available?');
+  // Still non-blocking
 };

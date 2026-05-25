@@ -1,6 +1,6 @@
 // src/tools/remember.ts
 import { z } from "zod";
-import { createTool } from "./index";
+import { createTool } from "./toolFactory";
 import { ingestDocument } from "../rags";
 import { logAction } from "../security";
 
