@@ -11,7 +11,7 @@ export const runAgent = async (input: string, userId: string = "mwei") => {
     // 2. Run Graph with History injected into State
     // Assuming your graph takes an input like { input, messages, userId, history }
     const result = await compiledGraph.invoke({
-      input: input, 
+      input: input,  // Keep user input in state for consistent routing
       userId: userId,
       history: history,
       messages: [`User: ${input}`]
@@ -25,8 +25,35 @@ export const runAgent = async (input: string, userId: string = "mwei") => {
     await saveTurn(userId, input, response);
 
     return response;
-  } catch (error: any) {
-    console.error("[Agent Error]", error.message);
-    return `⚠️ Error: ${error.message}`;
-  }
+  // src/agent.ts - UPDATE THE CATCH BLOCK
+} catch (error: any) {
+  // 🔍 Detailed error logging - log EVERYTHING
+  console.error('🔍 [Agent] Full error debug:', {
+    errorType: typeof error,
+    errorConstructor: error?.constructor?.name,
+    errorMessage: error?.message,
+    errorName: error?.name,
+    errorStack: error?.stack?.split('\n')[0],
+    errorString: String(error),
+    errorKeys: error ? Object.keys(error) : 'null',
+    // Safe stringify attempt
+    errorJSON: (() => {
+      try {
+        return JSON.stringify(error, Object.getOwnPropertyNames(error), 2).slice(0, 800);
+      } catch {
+        return '[JSON stringify failed]';
+      }
+    })(),
+  });
+  
+  // Build a safe message for the user
+  const message = 
+    error instanceof Error ? error.message :
+    typeof error === 'string' ? error :
+    error?.message || 
+    error?.toString() || 
+    'Unknown error occurred';
+    
+  return `⚠️ Error: ${message}`;
+}
 };

@@ -2,6 +2,12 @@
 import { Annotation } from "@langchain/langgraph";
 
 export const AgentState = Annotation.Root({
+  // 📝 Original user input (stays constant)
+  input: Annotation<string>({
+    reducer: (x, y) => y ?? x,
+    default: () => "",
+  }),
+  
   // 📝 Conversation History
   messages: Annotation<string[]>({
     reducer: (x, y) => x.concat(y),

@@ -23,7 +23,10 @@ export const marketSnapshotTool = createTool({
       
       const price = coin.usd.toLocaleString();
       const change = coin.usd_24h_change?.toFixed(2) || "N/A";
-      const marketCap = coin.market_cap ? `$${(coin.market_cap/1e9).toFixed(2)}B` : "N/A";
+      const marketCap = coin.market_cap
+      ? `$${(coin.market_cap / 1e9).toFixed(2)}B`
+      : "N/A";
+
       const trend = coin.usd_24h_change > 2 ? "📈" : coin.usd_24h_change < -2 ? "📉" : "➡️";
       
       return `📊 ${args.symbol.toUpperCase()}: $${price} | 24h: ${trend} ${change}% | Market Cap: ${marketCap}`;

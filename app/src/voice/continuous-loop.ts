@@ -9,12 +9,12 @@ import { transcribe } from './stt';
 import { speak, playAudio } from './tts';
 import { runAgent } from '../agent';
 import * as readline from 'readline';
-import { runHealthChecks, logAlert, Alert, type CommandKey } from '../monitoring/proactive';
+import { runHealthChecks, logAlert, type Alert, type CommandKey } from '../monitoring/proactive';
 
 const execPromise = promisify(exec);
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
 dotenv.config({ path: join(__dirname, '../../.env') });
 
 const RECORD_SECONDS = parseInt(process.env.RECORD_SECONDS || '5');
@@ -33,9 +33,7 @@ const checkAudioDependencies = async (): Promise<void> => {
 // Record audio for N seconds using arecord
 const recordAudio = async (seconds: number): Promise<void> => {
   console.log(`🎙️  Recording for ${seconds} seconds...`);
-  await execPromise(
-    `arecord -d ${seconds} -f cd -r 16000 -c 1 ${AUDIO_INPUT}`
-  );
+  await execPromise(`arecord -d ${seconds} -f cd -r 16000 -c 1 ${AUDIO_INPUT}`);
 };
 
 // Main continuous loop
@@ -48,14 +46,6 @@ const continuousLoop = async () => {
   console.log('Press ENTER to speak, Ctrl+C to quit.');
   console.log('─────────────────────────────────────');
   console.log('');
-
-  // Handle Ctrl+C gracefully
-  const cleanup = async () => {
-    if (monitorInterval) clearInterval(monitorInterval);
-    console.log('\n\n👋 Jarvis: Goodbye Mwei. Standing by.');
-    process.exit(0);
-  };
-  process.on('SIGINT', cleanup);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -74,18 +64,12 @@ const continuousLoop = async () => {
       const alert = await runHealthChecks();
       if (alert && !awaitingAlertResponse) {
         console.log(`⚠️  Alert: ${alert.message}`);
-        
-        // Speak the alert + suggestion
         const alertMessage = `⚠️  ${alert.message}. ${alert.suggestion || ''}`;
         const outputPath = `/tmp/jarvis_alert_${Date.now()}.wav`;
         await speak(alertMessage, outputPath);
         await playAudio(outputPath);
         await unlink(outputPath).catch(() => {});
-        
-        // Log the alert
         await logAlert(alert, 'mwei', false);
-        
-        // Set flag to handle response in next voice interaction
         awaitingAlertResponse = { alert, userId: 'mwei' };
       }
     } catch (error) {
@@ -93,12 +77,22 @@ const continuousLoop = async () => {
     }
   }, 5 * 60 * 1000);
 
-  // Keep looping forever
+  // Handle Ctrl+C gracefully
+  const cleanup = async () => {
+    clearInterval(monitorInterval);
+    rl.close();
+    console.log('\n👋 Jarvis: Goodbye Mwei. Standing by.');
+    process.exit(0);
+  };
+  process.on('SIGINT', cleanup);
+
+  // 🔁 MAIN LOOP
   while (true) {
-    // Declare response at top of loop scope
+    // Declare response at TOP of loop scope
     let response: string = "I'm not sure how to help with that yet.";
 
     try {
+      // Wait for user input
       await new Promise<void>((resolve) => {
         rl.question('⏎  Press ENTER to speak...', () => resolve());
       });
@@ -125,9 +119,8 @@ const continuousLoop = async () => {
       if (awaitingAlertResponse) {
         const { alert, userId } = awaitingAlertResponse;
         const lower = text.toLowerCase();
-        
+
         if (lower.includes('yes') || lower.includes('sure') || lower.includes('go ahead')) {
-          // Execute suggestion based on alert type
           let actionResponse = '';
           if (alert.type === 'disk' && alert.suggestion?.includes('large files')) {
             actionResponse = await runAgent('find large files', userId);
@@ -138,50 +131,43 @@ const continuousLoop = async () => {
           } else {
             actionResponse = "I can help with that — what would you like to do?";
           }
-          
-          await logAlert(alert, userId, true); // Mark as resolved
+          await logAlert(alert, userId, true);
           awaitingAlertResponse = null;
           response = actionResponse;
-          
+
         } else if (lower.includes('no') || lower.includes('later') || lower.includes('dismiss')) {
-          await logAlert(alert, userId, true); // Mark as dismissed
+          await logAlert(alert, userId, true);
           awaitingAlertResponse = null;
           response = "✅ Alert dismissed. I'll check again later.";
-          
+
         } else {
-          // Unclear response — re-prompt
           response = `❓ ${alert.suggestion} (Say "yes" or "no")`;
-          // Keep awaitingAlertResponse for next iteration
           isProcessing = false;
           continue;
         }
-        
-      } 
+      }
       // 🔐 Handle pending command confirmation
       else if (awaitingConfirmation) {
         const { command, userId } = awaitingConfirmation;
         const lower = text.toLowerCase();
-        
+
         if (lower.includes('yes')) {
-          // Execute the pending command via agent
           response = await runAgent(`execute ${command}`, userId);
           awaitingConfirmation = null;
         } else {
           response = "🚫 Command cancelled.";
           awaitingConfirmation = null;
         }
-        
-      } 
+      }
       // 🧠 Normal flow: run agent
       else {
         const agentResult = await runAgent(text, 'mwei');
-        response = typeof agentResult === 'string' 
-          ? agentResult 
-          : agentResult?.messages?.[0] || response;
-        
+        response = typeof agentResult === 'string'
+          ? agentResult
+          : (agentResult as any)?.messages?.[0] || response;
+
         // Check if agent wants confirmation for a command
-        if (response.includes('Say "yes') && response.includes('to confirm')) {
-          // Extract command key from response (simple parse)
+        if (typeof response === 'string' && response.includes('Say "yes') && response.includes('to confirm')) {
           const cmdMatch = response.match(/restart (\w+)/);
           if (cmdMatch?.[1]) {
             awaitingConfirmation = { command: cmdMatch[1] as CommandKey, userId: 'mwei' };
@@ -195,14 +181,17 @@ const continuousLoop = async () => {
       const outputPath = `/tmp/jarvis_response_${Date.now()}.wav`;
       await speak(response, outputPath);
       await playAudio(outputPath);
-      await unlink(outputPath).catch(err => 
-        console.warn('⚠️  Cleanup failed:', err.message)
-      );
+      await unlink(outputPath).catch(err => console.warn('⚠️  Cleanup failed:', err.message));
 
     } catch (error: any) {
+      // 🔍 Detailed error logging
+      console.error('⚠️ Error Details:', {
+        name: error?.name || 'Unknown',
+        message: error?.message || 'No message',
+        stack: error?.stack?.split('\n')[0] || 'No stack',
+      });
       const message = error instanceof Error ? error.message : 'Unknown error';
-      console.error('⚠️ Error:', message);
-      response = "⚠️  I encountered an error. Please try again.";
+      response = `⚠️  I encountered an error: ${message}. Please try again.`;
     } finally {
       isProcessing = false;
     }

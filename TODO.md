@@ -1,1 +1,0 @@
-# Task: Fix playAudio + agent quickRoute&#10;&#10;## Steps:&#10;- [x] Step 1: Edit playAudio in app/src/voice/tts.ts (retry + backoff)&#10;- [x] Step 2: Add memory/ram quickRoute in app/src/agent/nodes.ts&#10;- [ ] Step 3: Test voice/agent (tsx app/src/voice/continuous-loop.ts or test-agent.ts)&#10;- [x] Step 4: Complete task

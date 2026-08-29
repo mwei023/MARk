@@ -22,6 +22,9 @@ export const marketSnapshotTool = createTool({
       
       const data = await res.json();
       const coin = data[args.symbol.toLowerCase()];
+      const marketCap = coin.market_cap 
+      ? `$${(coin.market_cap / 1e9).toFixed(2)}B` 
+      : "N/A";
       
       if (!coin?.usd) {
         throw new Error(`Symbol '${args.symbol}' not found. Try: bitcoin, ethereum, solana`);

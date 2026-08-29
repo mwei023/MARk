@@ -41,53 +41,60 @@ Current time: ${getCurrentTimeNairobi()}
 TOOLS AVAILABLE:
 ${toolsList}
 
-ROUTING RULES (pick ONE tool or respond directly):
+⚠️ CRITICAL ROUTING RULES (DECIDE BASED ON USER INPUT ONLY):
 
-💡 FOR MARKET QUERIES:
-User: "what's bitcoin price" OR "btc price" OR "ethereum price"
+🚫 DO NOT USE rag_query FOR MARKET QUERIES!
+If user asks about: "brief", "market", "crypto", "bitcoin", "ethereum", "price", "outlook" → USE market_brief OR market_snapshot
+
+✅ ROUTE BY INPUT KEYWORD:
+
+IF user says "price" OR "how much" OR "current $" → market_snapshot (quick price only)
+IF user says "brief" OR "outlook" OR "analysis" OR "analyst" → market_brief (detailed analysis)
+IF user says "favorite" OR "remind me" OR "did I" OR "my notes" → rag_query (personal memory)
+IF user says "remember" OR "note" OR "save that" → remember (save to memory)
+IF user says "watchlist" OR "alert" OR "price drop" → watchlist
+IF user says "portfolio" OR "holdings" OR "my coins" → portfolio
+IF user says "disk" OR "files" OR "storage" OR "cpu" → system_check
+OTHERWISE → respond directly as Jarvis
+
+💡 EXAMPLES (EXACT USER INPUTS):
+
+User: "what's bitcoin price"
 → {"tool_call": {"name": "market_snapshot", "args": {"symbol": "bitcoin"}}}
 
-User: "give me a brief on bitcoin" OR "brief me on ethereum" OR "market outlook for solana"
+User: "give me a brief on bitcoin"
 → {"tool_call": {"name": "market_brief", "args": {"symbol": "bitcoin"}}}
 
-User: "add bitcoin to watchlist" OR "alert me if ethereum drops" 
-→ {"tool_call": {"name": "watchlist", "args": {"action": "add", "symbol": "bitcoin", "condition": {"type": "above", "price": 75000}}}}
+User: "brief me on ethereum"
+→ {"tool_call": {"name": "market_brief", "args": {"symbol": "ethereum"}}}
 
-User: "list my watchlist" OR "what are my alerts"
-→ {"tool_call": {"name": "watchlist", "args": {"action": "list"}}}
+User: "what's my favorite color"
+→ {"tool_call": {"name": "rag_query", "args": {"query": "favorite color"}}}
 
-User: "show my portfolio" OR "what's my P&L"
-→ {"tool_call": {"name": "portfolio", "args": {"action": "view"}}}
-
-💡 FOR KNOWLEDGE QUERIES:
-User: "what's my favorite X" OR "remind me about Y" OR "did I mention Z"
-→ {"tool_call": {"name": "rag_query", "args": {"query": "favorite X"}}}
-
-User: "remember I like blue" OR "note that I prefer X"  
+User: "remember I like blue"
 → {"tool_call": {"name": "remember", "args": {"note": "I like blue"}}}
 
-💡 FOR SYSTEM QUERIES:
-User: "check disk space" OR "list files" OR "how much storage"
-→ {"tool_call": {"name": "system_check", "args": {"command": "df -h"}}}
+User: "list files"
+→ {"tool_call": {"name": "system_check", "args": {"command": "ls -la ~"}}}
 
-User: "what time is it" OR "anything general knowledge"
-→ {"response": "Your direct answer here"}
-
-History: ${history || "none"}
+CURRENT INPUT TO ROUTE:
 User: ${input}
 
-Respond with ONE valid JSON only, no markdown:
-{"response": "answer"} OR {"tool_call": {"name": "tool_name", "args": {...}}}
+Output ONLY valid JSON, no markdown:
+{"tool_call": {"name": "...", "args": {...}}} OR {"response": "answer"}
 `.trim();
 };
 
 
-export const llmNode = async (state: typeof AgentState.State) => {
-  const { messages, userId, history } = state;
-  const lastMessage = messages[messages.length - 1];
-  
 
-  // Handle tool result responses
+export const llmNode = async (state: typeof AgentState.State) => {
+  const { messages, userId, history, input: userInput } = state;
+  
+  // Use the original user input for routing, not accumulated messages
+  const currentInput = userInput || messages[0]?.replace("User: ", "") || "";
+  
+  // Handle tool result responses - only if we had a tool call before
+  const lastMessage = messages[messages.length - 1];
   if (lastMessage?.includes("[Tool result:")) {
     const toolMatch = lastMessage.match(/\[Tool result: (\w+)\]/);
     const toolName = toolMatch?.[1] || "tool";
@@ -115,14 +122,13 @@ export const llmNode = async (state: typeof AgentState.State) => {
     return null;
   };
 
-
-  const routed = quickRoute(lastMessage);
+  const routed = quickRoute(currentInput);
   if (routed) {
     console.log("[llmNode] Quick-routed:", routed.tool_call.name);
     return { next: "execute_tool", tool_call: routed.tool_call };
   }
 
-  const prompt = buildPrompt(history || "No history yet.", lastMessage || "");
+  const prompt = buildPrompt(history || "No history yet.", currentInput || "");
     
   try {
     const response = await getModel().invoke([
@@ -192,12 +198,22 @@ export const llmNode = async (state: typeof AgentState.State) => {
     };
     
   } catch (error: any) {
-    console.error("[LLM Node Error]", error?.message || error);
-    return {
-      next: "end",
-      messages: [`Jarvis: ⚠️ I hit a snag. Please try again in a moment.`],
-    };
-  }
+  // 🔍 Detailed error logging
+  console.error("[LLM Node Error]", {
+    name: error?.name || 'Unknown',
+    message: error?.message || 'No message',
+    stack: error?.stack?.split('\n')[0] || 'No stack',
+    // Log what the LLM actually returned (if anything)
+    llmContent: typeof response?.content === 'string' 
+      ? response.content.slice(0, 200) 
+      : JSON.stringify(response?.content)?.slice(0, 200)
+  });
+  
+  return {
+    next: "end",
+    messages: [`Jarvis: ⚠️ ${error?.message || 'I hit a snag. Please try again.'}`],
+  };
+}
 };
 
 export const toolExecutorNode = async (state: typeof AgentState.State) => {
@@ -225,11 +241,12 @@ export const toolExecutorNode = async (state: typeof AgentState.State) => {
       messages: [`[Tool result: ${tool_call.name}]\n${result}`],
     };
   } catch (error: any) {
-    console.error("[toolExecutorNode] Error:", error?.message);
-    return {
-      next: "end",
-      tool_result: `Error: ${error.message}`,
-      messages: [`Jarvis: ⚠️ ${error.message || "Something went wrong."}`],
-    };
-  }
+  console.error('🔍 [llmNode] Full error debug:', {
+    errorType: typeof error,
+    errorMessage: error?.message,
+    errorName: error?.name,
+    errorStack: error?.stack?.split('\n')[0],
+  });
+  // ... rest of existing catch logic
+}
 };

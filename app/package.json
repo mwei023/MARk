@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "ts-node app/src/api/server-v2.ts",
+    "dev:old": "ts-node app/src/api/server.ts",
+    "test": "jest"
   },
   "keywords": [],
   "author": "",
@@ -14,8 +17,9 @@
     "@langchain/langgraph": "^1.2.9",
     "csv-parse": "^6.1.0",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "ollama": "^0.6.3",
-    "pg": "^8.20.0",
+    "pg": "^8.23.0",
     "speaker": "^0.5.5",
     "ts-node": "^10.9.2",
     "twelvedata": "^3.0.1",
