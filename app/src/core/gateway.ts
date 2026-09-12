@@ -4,6 +4,7 @@
  */
 
 import { Event, EventType } from './events';
+import { routeLocally } from '../runtime/router';
 
 export type RoutingPath = 'deterministic' | 'agent' | 'reasoning' | 'escalate';
 
@@ -94,7 +95,8 @@ export class Gateway {
   }
 
   private routeUserCommand(event: Event): RoutingDecision {
-    if (!event.data.command) {
+    const command = (event.data as Record<string, any>).command;
+    if (!command || typeof command !== 'string') {
       return {
         path: 'escalate',
         needsLLM: false,
@@ -103,7 +105,29 @@ export class Gateway {
       };
     }
 
-    const cmd = event.data.command.toLowerCase();
+    const cmd = command.toLowerCase();
+
+    if (
+      /\b(what llm|which llm|what model|which model|llm provider|ai provider|mark status|system status|how are you configured|configuration)\b/i.test(
+        command,
+      )
+    ) {
+      return {
+        path: 'deterministic',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'MARK can answer its own configuration locally.',
+      };
+    }
+
+    if (routeLocally(command)) {
+      return {
+        path: 'deterministic',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'A local host capability can answer this request.',
+      };
+    }
 
     // Git commands
     if (cmd.includes('git') || cmd.includes('branch') || cmd.includes('commit')) {
@@ -154,13 +178,12 @@ export class Gateway {
       };
     }
 
-    // Default: try agent, but may need LLM
+    // General conversation and knowledge requests belong to the reasoning path.
     return {
-      path: 'agent',
-      agent: 'git-agent', // Default to git for now
-      needsLLM: false,
+      path: 'reasoning',
+      needsLLM: true,
       priority: 'normal',
-      reasoning: 'Unknown command type. Attempting deterministic handling.',
+      reasoning: 'No deterministic capability or specialist agent matches the request.',
     };
   }
 }

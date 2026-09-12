@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/core/mark-runtime.test.ts",
+    "src/types/**/*.d.ts"
+  ]
+}

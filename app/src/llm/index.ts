@@ -1,8 +1,22 @@
-// src/llm/index.ts - lazy initialization
-import { ChatOllama } from "@langchain/ollama";
+/**
+ * LLM Module - Public Entry Point
+ * 
+ * Exports the canonical LLMProvider interface and factory.
+ * MARK's reasoning layer depends on this interface, not on specific implementations.
+ */
 
+export {
+  getLLMProvider,
+  getLLMProviderCached,
+  resetLLMProvider,
+  getLLMConfiguration,
+  getActiveLLMInfo,
+  loadLLMConfig,
+} from './factory';
+export { LLMProvider, Message, LLMResponse, ProviderMetadata } from './provider';
+export { embeddings } from './embeddings';
 
-// ✅ Export system prompt for use in nodes.ts
+// System prompt for reasoning
 export const SYSTEM_PROMPT = `
 You are Jarvis, a private voice assistant with access to the user's personal knowledge base.
 
@@ -31,30 +45,3 @@ User: "what's my favorite color?"
 → Tool returns: "My favourite color is blue"
 → You: "Your favorite color is blue."
 `;
-
-let _model: ChatOllama | null = null;
-
-export const getModel = (): ChatOllama => {
-  if (!_model) {
-    const host = process.env.OLLAMA_HOST || "http://localhost:11434";
-    const modelName = process.env.OLLAMA_MODEL || "llama3.2:3b";
-    
-    console.log(`[LLM] Initializing model: ${modelName} @ ${host}`);
-    
-    // ✅ NO .bind() - system prompt is passed in message array at invocation
-    _model = new ChatOllama({
-      model: modelName,
-      temperature: 0,
-      baseUrl: host,
-      format: "json",
-    });
-  }
-  return _model;
-};
-
-// Keep for backwards compatibility
-export const model = new Proxy({} as ChatOllama, {
-  get: (_, prop) => {
-    return (getModel() as any)[prop];
-  }
-});
