@@ -7,10 +7,12 @@ import { createSystemCheckTool } from "./system_check";
 import { marketBriefTool } from "./market/brief";
 import { watchlistTool } from "./market/watchlist";
 import { portfolioTool } from "./market/portfolio";
+import { systemConfigTool } from "./system_config";
 
 // ── Registry ────────────────────────────────────
 export const toolsRegistry: Record<string, Tool> = {
   system_check: createSystemCheckTool(),
+  system_config: systemConfigTool,
   rag_query: createRagQueryTool(),
   remember: createRememberTool(),
   market_snapshot: marketSnapshotTool,
@@ -22,7 +24,4 @@ export const toolsRegistry: Record<string, Tool> = {
 
 // ── Re-exports for convenience ──────────────────
 export { createSystemCheckTool };
-export { marketSnapshotTool };
-export { marketBriefTool };
-export { watchlistTool };
-export { portfolioTool };
+export { systemConfigTool };

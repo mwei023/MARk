@@ -9,6 +9,8 @@ import { incidentStore } from '../core/incident';
 import { eventBus } from '../core/event-bus';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import type { CapabilityRegistry } from '../runtime/capabilities/registry';
+import { repositoryRegistry } from '../repositories/registry';
 
 const execPromise = promisify(exec);
 
@@ -32,8 +34,11 @@ export class GitAgent extends Agent {
       name: 'fetch_diff',
       description: 'Get git diff for a commit',
       func: async (args) => {
+        const repoRef = args.repo;
+        const repo = repositoryRegistry.resolve(repoRef);
+        const localPath = repo?.localPath || repoRef || process.cwd();
         try {
-          const { stdout } = await execPromise(`git -C ${args.repo} diff ${args.commit}~1..${args.commit}`);
+          const { stdout } = await execPromise(`git -C "${localPath}" diff ${args.commit}~1..${args.commit}`);
           return stdout;
         } catch (error) {
           return `Failed to fetch diff: ${error}`;
@@ -74,7 +79,19 @@ export class GitAgent extends Agent {
     });
   }
 
+  private resolveRepositoryContext(data: Record<string, any>): { repo: any; fullName: string; localPath?: string } {
+    const repoRef = data.repository || data.repo || data.full_name || data.fullName || data.localPath;
+    const resolved = repositoryRegistry.resolve(repoRef, data.localPath);
+    const localPath = resolved?.localPath || data.localPath;
+    const fullName = resolved?.fullName || repoRef || 'unknown-repository';
+    return { repo: resolved, fullName, localPath };
+  }
+
   canHandle(event: Event): boolean {
+    if (event.type === 'user.command.received') {
+      const command = String((event.data as Record<string, any>).command || '').toLowerCase();
+      return command.includes('git') || command.includes('branch') || command.includes('commit');
+    }
     const types = [
       'github.workflow.failed',
       'github.workflow.completed',
@@ -86,30 +103,47 @@ export class GitAgent extends Agent {
     return types.includes(event.type);
   }
 
+  /**
+   * Phase 1 command bridge: the agent owns Git-domain interpretation, while
+   * the runtime-owned capability performs the concrete host operation.
+   */
+  async handleCommand(event: Event, capabilities: CapabilityRegistry): Promise<string> {
+    const command = String((event.data as Record<string, any>).command || '');
+    if (/\b(status|branch|commit)\b/i.test(command)) {
+      const result = await capabilities.execute(command);
+      return result ? `GitHub Agent: ${result}` : 'GitHub Agent could not find a local Git capability.';
+    }
+    return 'GitHub Agent received the request. GitHub webhook investigation is available for repository events.';
+  }
+
   async handle(event: Event): Promise<void> {
-    if (!event.data.repository) {
+    const data = event.data as Record<string, any>;
+    const repositoryContext = this.resolveRepositoryContext(data);
+    if (!repositoryContext.fullName || repositoryContext.fullName === 'unknown-repository') {
       console.warn('[GitAgent] Missing repository in event');
       return;
     }
 
-    console.log(`[GitAgent] Handling ${event.type} for ${event.data.repository}`);
+    console.log(`[GitAgent] Handling ${event.type} for ${repositoryContext.fullName}`);
 
     // Create incident for tracking
     const incident = await incidentStore.createIncident({
-      title: `Build failed: ${event.data.repository}`,
-      description: event.data.failureMessage || 'GitHub workflow failed',
-      severity: event.severity,
+      title: `Build failed: ${repositoryContext.fullName}`,
+      description: data.failureMessage || 'GitHub workflow failed',
+      severity: event.severity === 'critical' ? 'critical' : event.severity === 'warning' ? 'medium' : 'low',
       status: 'investigating',
       triggerEvent: event.type,
       triggerEventId: event.id,
       correlationId: event.correlationId || event.id,
       assignedAgent: this.name,
-      tags: ['build', 'github', event.data.branch || 'unknown-branch'],
+      tags: ['build', 'github', data.branch || 'unknown-branch'],
       context: {
-        repository: event.data.repository,
-        commit: event.data.commit,
-        branch: event.data.branch,
-        workflowName: event.data.workflowName,
+        repository: repositoryContext.fullName,
+        repositoryId: repositoryContext.repo?.id,
+        localPath: repositoryContext.localPath,
+        commit: data.commit,
+        branch: data.branch,
+        workflowName: data.workflowName,
       },
     });
 
@@ -121,7 +155,7 @@ export class GitAgent extends Agent {
       
       const logResult = await this.executeTool(
         'fetch_logs',
-        { runId: event.data.runId },
+        { runId: data.runId },
         { environment: 'production' }
       );
       
@@ -137,7 +171,7 @@ export class GitAgent extends Agent {
       console.log('[GitAgent] Step 3: Fetching git diff...');
       const diffResult = await this.executeTool(
         'fetch_diff',
-        { repo: event.data.repository, commit: event.data.commit },
+        { repo: repositoryContext.fullName, commit: data.commit },
         { environment: 'production' }
       );
       
@@ -160,7 +194,7 @@ export class GitAgent extends Agent {
       // Step 5: Attempt automatic fix if low-risk
       if (this.isAutoFixable(failureType)) {
         console.log(`[GitAgent] Failure is auto-fixable: ${failureType}`);
-        await this.attemptAutoFix(incident.id, failureType, event.data);
+        await this.attemptAutoFix(incident.id, failureType, data);
       } else {
         console.log(`[GitAgent] Failure requires manual investigation`);
         await incidentStore.updateStatus(incident.id, 'open');
@@ -228,11 +262,14 @@ export class GitAgent extends Agent {
     console.log(`[GitAgent] Attempting auto-fix for ${failureType}`);
 
     try {
+      const repo = repositoryRegistry.resolve(eventData.repository, eventData.localPath);
+      const repoPath = repo?.localPath || eventData.repository || process.cwd();
+
       if (failureType === 'MISSING_DEPENDENCY') {
         // Create a branch to fix dependencies
         const branchName = `auto-fix/deps-${Date.now()}`;
-        await execPromise(`git -C ${eventData.repository} checkout -b ${branchName}`);
-        await execPromise(`npm install`);
+        await execPromise(`git -C "${repoPath}" checkout -b ${branchName}`);
+        await execPromise('npm install', { cwd: repoPath });
         
         await incidentStore.addAction(incidentId, {
           timestamp: new Date(),
@@ -252,7 +289,7 @@ export class GitAgent extends Agent {
 
       if (failureType === 'LINT_FAILURE') {
         // Auto-fix linting
-        await execPromise(`npm run lint:fix`);
+        await execPromise('npm run lint:fix', { cwd: repoPath });
         
         await incidentStore.addAction(incidentId, {
           timestamp: new Date(),

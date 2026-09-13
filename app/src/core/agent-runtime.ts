@@ -6,6 +6,7 @@
 import { Event } from './events';
 import { IncidentAction } from './incident';
 import { PolicyContext, policyEngine } from './policies';
+import type { CapabilityRegistry } from '../runtime/capabilities/registry';
 
 export interface ToolDefinition {
   name: string;
@@ -137,6 +138,9 @@ export abstract class Agent {
   abstract canHandle(event: Event): boolean;
   abstract handle(event: Event): Promise<void>;
 
+  /** Optional synchronous command surface for a specialist agent. */
+  handleCommand?(_event: Event, _capabilities: CapabilityRegistry): Promise<string>;
+
   getName(): string {
     return this.name;
   }
@@ -179,6 +183,13 @@ export class AgentRuntime {
     } catch (error) {
       console.error(`[AgentRuntime] Error in agent ${handler.getName()}:`, error);
     }
+  }
+
+  /** Route a user command to a specialist and return its user-facing result. */
+  async handleCommand(event: Event, capabilities: CapabilityRegistry): Promise<string | null> {
+    const handler = this.agents.find(agent => agent.canHandle(event));
+    if (!handler || !handler.handleCommand) return null;
+    return handler.handleCommand(event, capabilities);
   }
 
   /**

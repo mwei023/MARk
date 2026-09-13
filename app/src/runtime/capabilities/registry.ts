@@ -1,9 +1,35 @@
+/**
+ * Concrete host operation exposed to MARK.
+ *
+ * Agents coordinate behaviour; capabilities perform the actual host work.  This
+ * small registry is the single capability registry used by the Phase 1 runtime.
+ */
 export interface Capability {
   id: string;
   name: string;
-  provides: string[];
-  execute(method: string, args: any): Promise<any>;
+  canHandle(input: string): boolean;
+  execute(input: string): Promise<string>;
 }
-export const capabilities = new Map<string, Capability>();
-export function register(cap: Capability) { capabilities.set(cap.id, cap); }
-export function find(method: string) { return Array.from(capabilities.values()).filter(c => c.provides.includes(method)); }
+
+export class CapabilityRegistry {
+  private readonly capabilities = new Map<string, Capability>();
+
+  register(capability: Capability): void {
+    this.capabilities.set(capability.id, capability);
+  }
+
+  findFor(input: string): Capability | undefined {
+    return Array.from(this.capabilities.values()).find(capability => capability.canHandle(input));
+  }
+
+  async execute(input: string): Promise<string | undefined> {
+    const capability = this.findFor(input);
+    return capability ? capability.execute(input) : undefined;
+  }
+
+  list(): Capability[] {
+    return Array.from(this.capabilities.values());
+  }
+}
+
+export const capabilityRegistry = new CapabilityRegistry();

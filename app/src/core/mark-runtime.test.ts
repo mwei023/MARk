@@ -87,6 +87,25 @@ const run = async (): Promise<void> => {
   assert.equal(local.route, 'capability');
   assert.match(local.response, /It's/);
 
+  const files = await runtime.executeCommand('show my files', 'test-user', 'cli');
+  assert.equal(files.route, 'capability');
+
+  const displayedFiles = await runtime.executeCommand('display my files', 'test-user', 'cli');
+  assert.equal(displayedFiles.route, 'capability');
+
+  const directoryFiles = await runtime.executeCommand(
+    'list the files in my directory',
+    'test-user',
+    'cli',
+  );
+  assert.equal(directoryFiles.route, 'capability');
+
+  const folder = await runtime.executeCommand('open the folder', 'test-user', 'cli');
+  assert.equal(folder.route, 'capability');
+
+  const cpu = await runtime.executeCommand('check my CPU usage', 'test-user', 'cli');
+  assert.equal(cpu.route, 'capability');
+
   const disk = await runtime.executeCommand('check disk space', 'test-user', 'cli');
   assert.equal(disk.route, 'capability');
 
@@ -138,9 +157,11 @@ const run = async (): Promise<void> => {
     (incidentStore as any).resolveIncident = originalResolveIncident;
   }
 
-  assert.equal(bus.getRecentEvents('user.command.received', 10).length, 5);
-  assert.equal(bus.getRecentEvents('agent.action.taken', 10).length, 5);
-  console.log('MARK runtime routes local capability, specialist agent, general knowledge, webhook repo routing, and multi-repo incident association.');
+  assert.equal(bus.getRecentEvents('user.command.received', 10).length, 10);
+  assert.equal(bus.getRecentEvents('agent.action.taken', 10).length, 10);
+  console.log(
+    'MARK runtime routes local time, files, system metrics, specialist agents, general knowledge, webhook repo routing, and multi-repo incident association.',
+  );
 };
 
 run().catch(error => {
