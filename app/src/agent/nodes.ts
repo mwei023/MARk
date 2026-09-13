@@ -1,6 +1,6 @@
 // src/agent/nodes.ts
 import { AgentState, ToolCall } from "./state";
-import { model, getModel, SYSTEM_PROMPT } from "../llm";
+import { getLLMProviderCached, SYSTEM_PROMPT, Message } from "../llm";
 import { toolsRegistry, Tool } from "../tools"; 
 
 const tools = toolsRegistry;
@@ -16,6 +16,77 @@ const getCurrentTimeNairobi = () => {
     hour: '2-digit',
     minute: '2-digit',
   });
+};
+
+const parseModelText = (content: unknown): string => {
+  if (typeof content === 'string') return content.trim();
+  if (content && typeof content === 'object') return JSON.stringify(content).trim();
+  return '';
+};
+
+const isSystemOperationRequest = (text: string): boolean => {
+  const lower = (text || '').toLowerCase();
+  if (!lower) return false;
+
+  const systemMarkers = [
+    'list files', 'show files', 'directory', 'folder', 'ls -',
+    'disk', 'storage', 'df ', 'space', 'memory', 'ram', 'cpu',
+    'process', 'uptime', 'whoami', 'pwd', 'date', 'check disk',
+    'check memory', 'check cpu', 'system status', 'top ', 'ps ',
+    'free -', 'du ', 'cat ', 'head ', 'tail ', 'grep ', 'find '
+  ];
+
+  return systemMarkers.some(marker => lower.includes(marker));
+};
+
+const isGeneralKnowledgeQuestion = (text: string): boolean => {
+  const lower = (text || '').toLowerCase();
+  if (!lower) return false;
+  if (isSystemOperationRequest(lower)) return false;
+
+  const knowledgePatterns = [
+    /\b(who|what|where|when|why|how)\s+(is|was|are|does|do|can|would)\b/,
+    /\b(who's|what's|what are|who are|why is|how does|how do)\b/,
+    /\b(explain|define|describe|compare|summarize|tell me about)\b/,
+    /\b(president|capital|country|city|company|language|history)\b/
+  ];
+
+  return knowledgePatterns.some(pattern => pattern.test(lower));
+};
+
+const directReasoningReply = async (input: string) => {
+  const provider = await getLLMProviderCached();
+  const messages: Message[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: `Answer the user directly and do not call any tool. Keep it short, factual, and conversational. User: ${input}` }
+  ];
+  const response = await provider.chat(messages);
+  const directText = response.content || 'I can help with that directly.';
+  return {
+    next: 'end',
+    messages: [`Jarvis: ${directText}`],
+  };
+};
+
+const isLikelyMarketRequest = (text: string): boolean => {
+  const lower = (text || '').toLowerCase();
+  if (!lower) return false;
+
+  const directKnowledgeMarkers = [
+    'explain', 'what is', 'how does', 'why', 'compare', 'neural network',
+    'machine learning', 'database', 'docker', 'git', 'linux', 'algorithm',
+    'computer science', 'programming', 'how to'
+  ];
+  const marketMarkers = [
+    'bitcoin', 'ethereum', 'crypto', 'stock', 'market', 'portfolio',
+    'watchlist', 'price', 'outlook', 'analyst', 'ticker', 'coin', 'token'
+  ];
+
+  if (directKnowledgeMarkers.some(marker => lower.includes(marker))) {
+    return false;
+  }
+
+  return marketMarkers.some(marker => lower.includes(marker));
 };
 
 // Build tool definitions for the prompt
@@ -43,13 +114,14 @@ ${toolsList}
 
 ⚠️ CRITICAL ROUTING RULES (DECIDE BASED ON USER INPUT ONLY):
 
-🚫 DO NOT USE rag_query FOR MARKET QUERIES!
-If user asks about: "brief", "market", "crypto", "bitcoin", "ethereum", "price", "outlook" → USE market_brief OR market_snapshot
+🚫 NEVER USE market_brief OR market_snapshot for general knowledge or conceptual questions.
+Only use a market tool when the user explicitly asks about a market asset, price, outlook, or a coin/stock/watchlist/portfolio request.
+If the request is about explaining a concept (for example: "Explain neural networks", "What is Docker?", "How does a database work?"), respond directly and do not call any tool.
+The word "brief" alone is NOT a market request unless it is clearly about a coin, token, stock, or market outlook.
 
 ✅ ROUTE BY INPUT KEYWORD:
 
-IF user says "price" OR "how much" OR "current $" → market_snapshot (quick price only)
-IF user says "brief" OR "outlook" OR "analysis" OR "analyst" → market_brief (detailed analysis)
+IF user asks for a market asset or price such as: "bitcoin", "ethereum", "crypto", "stock", "coin", "portfolio", "watchlist", "price", "outlook" → market_* tools only for those market requests.
 IF user says "favorite" OR "remind me" OR "did I" OR "my notes" → rag_query (personal memory)
 IF user says "remember" OR "note" OR "save that" → remember (save to memory)
 IF user says "watchlist" OR "alert" OR "price drop" → watchlist
@@ -67,6 +139,9 @@ User: "give me a brief on bitcoin"
 
 User: "brief me on ethereum"
 → {"tool_call": {"name": "market_brief", "args": {"symbol": "ethereum"}}}
+
+User: "Explain neural networks"
+→ {"response": "A neural network is a machine learning model inspired by biological neurons..."}
 
 User: "what's my favorite color"
 → {"tool_call": {"name": "rag_query", "args": {"query": "favorite color"}}}
@@ -92,6 +167,11 @@ export const llmNode = async (state: typeof AgentState.State) => {
   
   // Use the original user input for routing, not accumulated messages
   const currentInput = userInput || messages[0]?.replace("User: ", "") || "";
+  
+  if (isGeneralKnowledgeQuestion(currentInput) && !isSystemOperationRequest(currentInput)) {
+    console.warn("[llmNode] Blocked general-knowledge request before tool routing:", currentInput);
+    return directReasoningReply(currentInput);
+  }
   
   // Handle tool result responses - only if we had a tool call before
   const lastMessage = messages[messages.length - 1];
@@ -129,28 +209,26 @@ export const llmNode = async (state: typeof AgentState.State) => {
   }
 
   const prompt = buildPrompt(history || "No history yet.", currentInput || "");
-    
+  let response: any;
+  
   try {
-    const response = await getModel().invoke([
+    const provider = await getLLMProviderCached();
+    const messages: Message[] = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: prompt }
-    ]);
+    ];
+    response = await provider.chat(messages);
     
-    // Handle different response formats defensively
-    let content = "";
-    if (typeof response.content === 'string') {
-      content = response.content.trim();
-    } else if (response.content && typeof response.content === 'object') {
-      content = JSON.stringify(response.content);
-    }
+    // Handle response from provider
+    const content = response.content.trim();
     
     // Clean markdown code fences if LLM adds them
-    content = content.replace(/^```(?:json)?\n?|\n?```$/g, '').trim();
+    const cleanedContent = content.replace(/^```(?:json)?\n?|\n?```$/g, '').trim();
     
     // Parse JSON with fallback
     let parsed: any;
     try {
-      parsed = JSON.parse(content);
+      parsed = JSON.parse(cleanedContent);
     } catch (parseErr) {
       console.warn("[llmNode] JSON parse failed, attempting fallback...");
       // Fallback: treat as direct response
@@ -162,9 +240,25 @@ export const llmNode = async (state: typeof AgentState.State) => {
     
     console.log("[llmNode] Parsed:", JSON.stringify(parsed).slice(0, 200));
 
+    if (parsed?.tool_call?.name === 'system_check' && !isSystemOperationRequest(currentInput)) {
+      console.warn('[llmNode] Blocked system_check for non-system request:', currentInput);
+      return directReasoningReply(currentInput);
+    }
+
+    if (isGeneralKnowledgeQuestion(currentInput) && !isSystemOperationRequest(currentInput)) {
+      console.warn("[llmNode] Blocked general-knowledge request before tool routing:", currentInput);
+      return directReasoningReply(currentInput);
+    }
+
     // Handle tool call
     if (parsed?.tool_call?.name && tools[parsed.tool_call.name]) {
-      const tool = tools[parsed.tool_call.name];
+      const toolName = parsed.tool_call.name;
+      if (toolName.startsWith('market_') && !isLikelyMarketRequest(currentInput)) {
+        console.warn('[llmNode] Blocked market tool for non-market request:', currentInput);
+        return directReasoningReply(currentInput);
+      }
+
+      const tool = tools[toolName];
       try {
         const validatedArgs = tool.argsSchema?.parse 
           ? tool.argsSchema.parse(parsed.tool_call.args || {}) 
@@ -172,7 +266,7 @@ export const llmNode = async (state: typeof AgentState.State) => {
         
         return {
           next: "execute_tool",
-          tool_call: { name: parsed.tool_call.name, args: validatedArgs },
+          tool_call: { name: toolName, args: validatedArgs },
         };
       } catch (schemaErr: any) {
         console.warn("[llmNode] Args validation failed, falling back to response:", schemaErr.message);
@@ -204,9 +298,11 @@ export const llmNode = async (state: typeof AgentState.State) => {
     message: error?.message || 'No message',
     stack: error?.stack?.split('\n')[0] || 'No stack',
     // Log what the LLM actually returned (if anything)
-    llmContent: typeof response?.content === 'string' 
-      ? response.content.slice(0, 200) 
-      : JSON.stringify(response?.content)?.slice(0, 200)
+    llmContent: response?.content
+      ? (typeof response.content === 'string'
+          ? response.content.slice(0, 200)
+          : JSON.stringify(response.content)?.slice(0, 200))
+      : 'No response content',
   });
   
   return {
