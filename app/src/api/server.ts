@@ -1,6 +1,6 @@
 // src/api/server.ts
 import express from 'express';
-import { runAgent } from '../agent';
+import { markRuntime } from '../core/mark-runtime';
 import { runHealthChecks, logAlert } from '../monitoring/proactive';
 import { Pool } from 'pg';
 import * as dotenv from 'dotenv';
@@ -17,8 +17,8 @@ app.post('/api/ask', async (req, res) => {
   try {
     const { query, userId = 'mwei' } = req.body;
     if (!query) return res.status(400).json({ error: 'Query required' });
-    const response = await runAgent(query, userId);
-    res.json({ success: true, response, timestamp: new Date().toISOString() });
+    const result = await markRuntime.executeCommand(query, userId, 'api');
+    res.json({ success: true, response: result.response, route: result.route, timestamp: new Date().toISOString() });
   } catch (error: any) {
     console.error('[API /ask Error]', error);
     res.status(500).json({ success: false, error: error.message });

@@ -12,47 +12,16 @@
 
 import express from 'express';
 import * as dotenv from 'dotenv';
-import { eventBus } from '../core/event-bus';
-import { agentRuntime } from '../core/agent-runtime';
 import { incidentStore } from '../core/incident';
-import { gateway } from '../core/gateway';
-import { GitAgent } from '../agents/git-agent';
+import { agentRuntime } from '../core/agent-runtime';
 import { GitHubWebhookHandler } from '../webhooks/github';
+import { eventBus } from '../core/event-bus';
+import { markRuntime } from '../core/mark-runtime';
 
 dotenv.config({ path: '.env' });
 
 const app = express();
 app.use(express.json());
-
-// ─────────────────────────────────────────────────────────────
-// Setup Agents
-// ─────────────────────────────────────────────────────────────
-const gitAgent = new GitAgent();
-agentRuntime.registerAgent(gitAgent);
-
-// TODO: Register other agents when implemented
-// const devopsAgent = new DevOpsAgent();
-// agentRuntime.registerAgent(devopsAgent);
-
-// ─────────────────────────────────────────────────────────────
-// Event Bus Setup: Route events through gateway to agents
-// ─────────────────────────────────────────────────────────────
-eventBus.subscribeAll(async (event) => {
-  const decision = gateway.classify(event);
-  
-  console.log(`[Gateway] ${event.type} → ${decision.path} (agent: ${decision.agent})`);
-
-  // Route based on decision
-  if (decision.path === 'agent' && decision.agent) {
-    await agentRuntime.handleEvent(event);
-  } else if (decision.path === 'reasoning' && decision.needsLLM) {
-    // TODO: Queue for LLM analysis
-    console.log('[Gateway] Queuing for LLM reasoning');
-  } else if (decision.path === 'escalate') {
-    // TODO: Notify user
-    console.log('[Gateway] Escalating for manual review');
-  }
-});
 
 // ─────────────────────────────────────────────────────────────
 // Webhook Receivers
@@ -153,26 +122,13 @@ app.post('/api/command', async (req, res) => {
       });
     }
 
-    const event = {
-      id: `CMD-${Date.now()}`,
-      timestamp: new Date(),
-      source: source as any,
-      type: 'user.command.received' as const,
-      severity: 'info' as const,
-      correlationId: userId,
-      data: {
-        userId,
-        command,
-        source,
-      },
-    };
-
-    await eventBus.emit(event);
+    const result = await markRuntime.executeCommand(command, userId, source === 'voice' || source === 'cli' ? source : 'api');
 
     res.json({
       success: true,
-      message: 'Command received',
-      eventId: event.id,
+      response: result.response,
+      route: result.route,
+      eventId: result.eventId,
     });
   } catch (error: any) {
     res.status(500).json({
@@ -225,7 +181,7 @@ app.listen(PORT, '0.0.0.0', () => {
     ╠═══════════════════════════════════════╣
     ║  Port: ${PORT}                          ║
     ║  Event Bus: Active                    ║
-    ║  Agents: ${agentRuntime.getAgentCount?.() || 'Ready'}                         ║
+    ║  Agents: Ready                         ║
     ╚═══════════════════════════════════════╝
   `);
 });

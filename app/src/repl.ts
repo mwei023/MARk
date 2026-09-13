@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, "../.env") });
 
-import { runAgent } from "./agent";
+import { markRuntime } from "./core/mark-runtime";
 
 const showThinking = () => process.stdout.write("🤖 Jarvis: ⋯ ");
 const clearThinking = () => process.stdout.write("\r🤖 Jarvis: ");
@@ -52,9 +52,9 @@ const repl = async () => {
     try {
         const stopThinking = animateThinking();
         process.stdout.write("🤖 ");
-        const response = await runAgent(input, "mwei");
+        const result = await markRuntime.executeCommand(input, "mwei", "cli");
         stopThinking();
-        console.log(response + "\n");
+        console.log(result.response + "\n");
     } catch (error: any) {
         console.log(`⚠️ Error: ${error.message}\n`);
     }
