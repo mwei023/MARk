@@ -46,6 +46,11 @@ import {
 } from './execution-context';
 
 import {
+  TaskBinder,
+  TaskBinding,
+} from './task-binder';
+
+import {
   GoalExecutionResult,
   GoalExecutor,
 } from './goal-execution';
@@ -70,6 +75,7 @@ export class MARKKernel {
   readonly executor: KernelExecutor;
   readonly workflows: WorkflowEngine;
   readonly capabilityResolver: CapabilityResolver;
+  readonly taskBinder: TaskBinder;
   readonly goalExecutor: GoalExecutor;
 
   constructor(
@@ -90,22 +96,27 @@ export class MARKKernel {
     this.executor = new KernelExecutor({
       toolRegistry: this.toolRegistry,
       authorityManager: this.authorityManager,
-      observationStore: this.observationStore
-
+      observationStore: this.observationStore,
     });
 
-    this.goalExecutor = new GoalExecutor({
-  resolveCapability: goal => this.capabilityResolver.resolve(goal),
-  execute: (action, context) => this.executor.execute(action, context),
-});
+    this.workflows = new WorkflowEngine(this.executor);
 
     this.capabilityResolver = new CapabilityResolver({
-  toolRegistry: this.toolRegistry,
-});
-    
+      toolRegistry: this.toolRegistry,
+    });
 
+    this.taskBinder = new TaskBinder();
 
-    this.workflows = new WorkflowEngine(this.executor);
+    this.goalExecutor = new GoalExecutor({
+      resolveCapability: goal =>
+        this.capabilityResolver.resolve(goal),
+
+      bindTask: (goal, tool) =>
+        this.taskBinder.bind(goal, tool),
+
+      execute: (action, context) =>
+        this.executor.execute(action, context),
+    });
   }
 
   registerTool(tool: ToolDescriptor): void {
@@ -122,9 +133,18 @@ export class MARKKernel {
     this.executor.registerImplementation(implementation);
   }
 
-  resolveCapability(goal: string): CapabilityResolution {
-  return this.capabilityResolver.resolve(goal);
-}
+  resolveCapability(
+    goal: string,
+  ): CapabilityResolution {
+    return this.capabilityResolver.resolve(goal);
+  }
+
+  bindTask(
+    goal: string,
+    tool: ToolDescriptor,
+  ): TaskBinding {
+    return this.taskBinder.bind(goal, tool);
+  }
 
   unregisterImplementation(toolId: string): boolean {
     return this.executor.unregisterImplementation(toolId);
@@ -179,11 +199,14 @@ export class MARKKernel {
   }
 
   async executeGoal(
-  goal: string,
-  context: ExecutionContext,
-): Promise<GoalExecutionResult> {
-  return this.goalExecutor.executeGoal(goal, context);
-}
+    goal: string,
+    context: ExecutionContext,
+  ): Promise<GoalExecutionResult> {
+    return this.goalExecutor.executeGoal(
+      goal,
+      context,
+    );
+  }
 }
 
 export const markKernel = new MARKKernel();

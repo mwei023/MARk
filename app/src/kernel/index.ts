@@ -111,3 +111,12 @@ export type {
   GoalExecutionResult,
   GoalExecutionDependencies,
 } from './goal-execution';
+
+export {
+  TaskBinder,
+} from './task-binder';
+
+export type {
+  TaskBinding,
+  TaskBinderDependencies,
+} from './task-binder';

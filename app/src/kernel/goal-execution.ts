@@ -2,33 +2,38 @@ import {
   ActionRequest,
   ActionResult,
   ExecutionContext,
+  ToolDescriptor,
 } from './types';
+
 import {
   CapabilityResolution,
 } from './capability-resolver';
 
+import {
+  TaskBinder,
+  TaskBinding,
+} from './task-binder';
+
 export interface GoalExecutionResult {
   goal: string;
   resolution: CapabilityResolution;
+  binding?: TaskBinding;
   action?: ActionRequest;
   result?: ActionResult;
 }
 
 export interface GoalExecutionDependencies {
   resolveCapability: (goal: string) => CapabilityResolution;
+  bindTask: (
+    goal: string,
+    tool: ToolDescriptor,
+  ) => TaskBinding;
   execute: (
     action: ActionRequest,
     context: ExecutionContext,
   ) => Promise<ActionResult>;
 }
 
-/**
- * Generic goal-to-capability execution.
- *
- * This layer deliberately knows nothing about individual tools.
- * It resolves a goal using discovered capability metadata and,
- * when a viable capability exists, executes it through the kernel.
- */
 export class GoalExecutor {
   constructor(
     private readonly dependencies: GoalExecutionDependencies,
@@ -47,10 +52,23 @@ export class GoalExecutor {
       };
     }
 
+    const binding = this.dependencies.bindTask(
+      goal,
+      resolution.tool,
+    );
+
+    if (!binding.complete) {
+      return {
+        goal,
+        resolution,
+        binding,
+      };
+    }
+
     const action: ActionRequest = {
       id: `ACT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       toolId: resolution.tool.id,
-      input: {},
+      input: binding.input,
       requestedBy: context.userId,
       createdAt: new Date().toISOString(),
       metadata: {
@@ -58,14 +76,19 @@ export class GoalExecutor {
         goal,
         resolutionScore: resolution.score,
         matchedTerms: resolution.matchedTerms,
+        matchedInputFields: binding.matchedFields,
       },
     };
 
-    const result = await this.dependencies.execute(action, context);
+    const result = await this.dependencies.execute(
+      action,
+      context,
+    );
 
     return {
       goal,
       resolution,
+      binding,
       action,
       result,
     };
