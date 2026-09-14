@@ -45,6 +45,11 @@ import {
   CreateExecutionContextInput,
 } from './execution-context';
 
+import {
+  GoalExecutionResult,
+  GoalExecutor,
+} from './goal-execution';
+
 export interface KernelDependencies {
   toolRegistry?: ToolRegistry;
   toolDiscovery?: ToolDiscovery;
@@ -65,6 +70,7 @@ export class MARKKernel {
   readonly executor: KernelExecutor;
   readonly workflows: WorkflowEngine;
   readonly capabilityResolver: CapabilityResolver;
+  readonly goalExecutor: GoalExecutor;
 
   constructor(
     dependencies: KernelDependencies = {},
@@ -87,6 +93,11 @@ export class MARKKernel {
       observationStore: this.observationStore
 
     });
+
+    this.goalExecutor = new GoalExecutor({
+  resolveCapability: goal => this.capabilityResolver.resolve(goal),
+  execute: (action, context) => this.executor.execute(action, context),
+});
 
     this.capabilityResolver = new CapabilityResolver({
   toolRegistry: this.toolRegistry,
@@ -166,6 +177,13 @@ export class MARKKernel {
   listAvailableTools(): ToolDescriptor[] {
     return this.toolRegistry.listAvailable();
   }
+
+  async executeGoal(
+  goal: string,
+  context: ExecutionContext,
+): Promise<GoalExecutionResult> {
+  return this.goalExecutor.executeGoal(goal, context);
+}
 }
 
 export const markKernel = new MARKKernel();

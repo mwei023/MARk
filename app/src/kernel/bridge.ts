@@ -20,6 +20,10 @@ import {
   CapabilityResolution,
 } from './capability-resolver';
 
+import {
+  GoalExecutionResult,
+} from './goal-execution';
+
 
 export interface KernelBridgeOptions {
   initializeNativeProviders?: boolean;
@@ -116,6 +120,15 @@ export class MARKKernelBridge {
   ): Promise<WorkflowResult> {
     return this.kernel.executeWorkflow(workflow, context);
   }
+
+  async executeGoal(
+  goal: string,
+  contextInput: Parameters<MARKKernel['createContext']>[0],
+): Promise<GoalExecutionResult> {
+  const context = this.createContext(contextInput);
+
+  return this.kernel.executeGoal(goal, context);
+}
 }
 
 export const markKernelBridge = new MARKKernelBridge();

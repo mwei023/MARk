@@ -102,3 +102,12 @@ export type {
   CapabilityResolution,
   CapabilityResolverDependencies,
 } from './capability-resolver';
+
+export {
+  GoalExecutor,
+} from './goal-execution';
+
+export type {
+  GoalExecutionResult,
+  GoalExecutionDependencies,
+} from './goal-execution';

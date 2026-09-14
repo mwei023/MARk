@@ -153,6 +153,10 @@ export class MarkRuntime {
     return this.kernelBridge.listTools();
   }
 
+  resolveKernelCapability(goal: string) {
+  return this.kernelBridge.resolveCapability(goal);
+}
+
   kernelStatus() {
     return this.kernelBridge.status();
   }
@@ -168,6 +172,17 @@ export class MarkRuntime {
       source,
     });
   }
+
+  async executeKernelGoal(
+  goal: string,
+  userId = 'mwei',
+  source: 'api' | 'voice' | 'cli' = 'api',
+) {
+  return this.kernelBridge.executeGoal(goal, {
+    userId,
+    source,
+  });
+}
 }
 
 export const markRuntime = new MarkRuntime();
