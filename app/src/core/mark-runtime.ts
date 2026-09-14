@@ -156,6 +156,18 @@ export class MarkRuntime {
   kernelStatus() {
     return this.kernelBridge.status();
   }
+
+  async executeKernelTool(
+    toolId: string,
+    input: Record<string, unknown> = {},
+    userId = 'mwei',
+    source: 'api' | 'voice' | 'cli' = 'api',
+  ) {
+    return this.kernelBridge.executeTool(toolId, input, {
+      userId,
+      source,
+    });
+  }
 }
 
 export const markRuntime = new MarkRuntime();

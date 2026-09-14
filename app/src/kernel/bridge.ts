@@ -81,6 +81,26 @@ export class MARKKernelBridge {
     return this.kernel.execute(action, context);
   }
 
+  async executeTool(
+    toolId: string,
+    input: Record<string, unknown>,
+    contextInput: Parameters<MARKKernel['createContext']>[0],
+  ): Promise<ActionResult> {
+    const context = this.createContext(contextInput);
+    const action: ActionRequest = {
+      id: `ACT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      toolId,
+      input,
+      requestedBy: context.userId,
+      createdAt: new Date().toISOString(),
+      metadata: {
+        source: 'mark-runtime',
+      },
+    };
+
+    return this.execute(action, context);
+  }
+
   async executeWorkflow(
     workflow: WorkflowDefinition,
     context: ExecutionContext,
