@@ -7,6 +7,11 @@ import {
   WorkflowResult,
 } from './types';
 
+import {
+  CapabilityResolver,
+  CapabilityResolution,
+} from './capability-resolver';
+
 import { ToolRegistry, toolRegistry } from './tool-registry';
 
 import {
@@ -59,6 +64,7 @@ export class MARKKernel {
   readonly observationStore: ObservationStore;
   readonly executor: KernelExecutor;
   readonly workflows: WorkflowEngine;
+  readonly capabilityResolver: CapabilityResolver;
 
   constructor(
     dependencies: KernelDependencies = {},
@@ -78,8 +84,15 @@ export class MARKKernel {
     this.executor = new KernelExecutor({
       toolRegistry: this.toolRegistry,
       authorityManager: this.authorityManager,
-      observationStore: this.observationStore,
+      observationStore: this.observationStore
+
     });
+
+    this.capabilityResolver = new CapabilityResolver({
+  toolRegistry: this.toolRegistry,
+});
+    
+
 
     this.workflows = new WorkflowEngine(this.executor);
   }
@@ -97,6 +110,10 @@ export class MARKKernel {
   ): void {
     this.executor.registerImplementation(implementation);
   }
+
+  resolveCapability(goal: string): CapabilityResolution {
+  return this.capabilityResolver.resolve(goal);
+}
 
   unregisterImplementation(toolId: string): boolean {
     return this.executor.unregisterImplementation(toolId);

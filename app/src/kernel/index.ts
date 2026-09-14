@@ -93,3 +93,12 @@ export {
   MARKKernelBridge,
   markKernelBridge,
 } from './bridge';
+
+export {
+  CapabilityResolver,
+} from './capability-resolver';
+
+export type {
+  CapabilityResolution,
+  CapabilityResolverDependencies,
+} from './capability-resolver';

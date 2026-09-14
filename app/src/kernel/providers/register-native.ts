@@ -1,15 +1,23 @@
-import { markKernel } from '../kernel';
-import { toolDiscovery } from '../tool-discovery';
-
 import {
   nativeSystemDiscoveryProvider,
   nativeSystemImplementations,
 } from './system-tools';
 
-export function registerNativeSystemProvider(): void {
+import {
+  MARKKernel,
+  markKernel,
+} from '../kernel';
+
+import {
+  toolDiscovery,
+} from '../tool-discovery';
+
+export function registerNativeSystemProvider(
+  kernel: MARKKernel = markKernel,
+): void {
   toolDiscovery.registerProvider(nativeSystemDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
-    markKernel.registerImplementation(implementation);
+    kernel.registerImplementation(implementation);
   }
 }

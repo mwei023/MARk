@@ -16,6 +16,11 @@ import {
   registerNativeSystemProvider,
 } from './providers/register-native';
 
+import {
+  CapabilityResolution,
+} from './capability-resolver';
+
+
 export interface KernelBridgeOptions {
   initializeNativeProviders?: boolean;
 }
@@ -40,7 +45,7 @@ export class MARKKernelBridge {
       !this.initialized &&
       options.initializeNativeProviders !== false
     ) {
-      registerNativeSystemProvider();
+      registerNativeSystemProvider(this.kernel);
       await this.kernel.discover();
       this.initialized = true;
     }
@@ -63,6 +68,10 @@ export class MARKKernelBridge {
         .map(tool => tool.id),
     };
   }
+
+  resolveCapability(goal: string): CapabilityResolution {
+  return this.kernel.resolveCapability(goal);
+}
 
   listTools(): ToolDescriptor[] {
     return this.kernel.listTools();
