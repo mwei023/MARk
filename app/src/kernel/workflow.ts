@@ -2,7 +2,6 @@ import {
   ActionRequest,
   ActionResult,
   ExecutionContext,
-  KernelId,
   WorkflowDefinition,
   WorkflowResult,
   WorkflowStep,
@@ -32,17 +31,74 @@ export class WorkflowEngine {
   ): Promise<WorkflowResult> {
     const startedAt = new Date().toISOString();
     const startedTime = Date.now();
+
     const stepResults: WorkflowStepResult[] = [];
+    const actionResults: ActionResult[] = [];
+    const completedSteps: string[] = [];
+    const failedSteps: string[] = [];
+    const observations = [];
 
     for (const step of input.workflow.steps) {
+      if (!step.action) {
+        failedSteps.push(step.id);
+
+        const errorResult: ActionResult = {
+          actionId: createKernelId('action'),
+          status: 'failed',
+          error: `Workflow step "${step.id}" does not contain an action.`,
+          observations: [],
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+        };
+
+        actionResults.push(errorResult);
+
+        const stepResult: WorkflowStepResult = {
+          step,
+          action: {
+            id: errorResult.actionId,
+            toolId: 'unknown',
+            input: {},
+            requestedBy: input.workflow.requestedBy,
+            reason: `Invalid workflow step: ${step.id}`,
+            createdAt: new Date().toISOString(),
+          },
+          result: errorResult,
+        };
+
+        stepResults.push(stepResult);
+
+        if (!step.optional) {
+          return {
+            workflowId: input.workflow.id,
+            status: 'failed',
+            completedSteps,
+            failedSteps,
+            actionResults,
+            observations,
+            startedAt,
+            completedAt: new Date().toISOString(),
+            error: errorResult.error,
+          };
+        }
+
+        continue;
+      }
+
       const action: ActionRequest = {
-        id: createKernelId('action'),
-        toolId: step.toolId,
-        input: step.input,
-        requestedBy: input.context.sessionId,
-        reason: step.description,
-        createdAt: new Date().toISOString(),
+        ...step.action,
+        id: step.action.id || createKernelId('action'),
+        workflowId: input.workflow.id,
+        parentActionId:
+          step.action.parentActionId ?? input.context.parentActionId,
+        requestedBy:
+          step.action.requestedBy || input.workflow.requestedBy,
+        createdAt:
+          step.action.createdAt || new Date().toISOString(),
+        timeoutMs:
+          step.timeoutMs ?? step.action.timeoutMs,
         metadata: {
+          ...step.action.metadata,
           workflowId: input.workflow.id,
           stepId: step.id,
         },
@@ -59,17 +115,28 @@ export class WorkflowEngine {
         result,
       });
 
+      actionResults.push(result);
+      observations.push(...result.observations);
+
+      if (result.status === 'succeeded') {
+        completedSteps.push(step.id);
+      } else {
+        failedSteps.push(step.id);
+      }
+
       if (
         result.status !== 'succeeded' &&
-        step.continueOnFailure !== true
+        !step.optional
       ) {
         return {
           workflowId: input.workflow.id,
           status: result.status,
-          stepResults,
+          completedSteps,
+          failedSteps,
+          actionResults,
+          observations,
           startedAt,
           completedAt: new Date().toISOString(),
-          durationMs: Date.now() - startedTime,
           error: `Workflow stopped at step "${step.id}": ${
             result.error ?? result.status
           }`,
@@ -83,16 +150,18 @@ export class WorkflowEngine {
 
     return {
       workflowId: input.workflow.id,
-      status: failedStep ? failedStep.result.status : 'succeeded',
-      stepResults,
+      status: failedStep
+        ? failedStep.result.status
+        : 'succeeded',
+      completedSteps,
+      failedSteps,
+      actionResults,
+      observations,
       startedAt,
       completedAt: new Date().toISOString(),
-      durationMs: Date.now() - startedTime,
-      error: failedStep
-        ? `Workflow completed with a non-successful step: ${
-            failedStep.step.id
-          }`
-        : undefined,
+      summary: failedStep
+        ? 'Workflow completed with one or more non-successful steps.'
+        : 'Workflow completed successfully.',
     };
   }
 }

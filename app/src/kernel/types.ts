@@ -19,6 +19,7 @@
 export type KernelId = string;
 
 export type ResourceKind =
+  | 'system'
   | 'application'
   | 'window'
   | 'process'
@@ -115,6 +116,7 @@ export interface ToolDescriptor {
   supportedResourceKinds: ResourceKind[];
   reversible: boolean;
   available: boolean;
+  capabilities?: string[];
   metadata: Record<string, unknown>;
 }
 

@@ -14,6 +14,10 @@ import { Gateway, gateway } from './gateway';
 import { CapabilityRegistry, capabilityRegistry } from '../runtime/capabilities/registry';
 import { LocalHostCapability } from '../runtime/capabilities/shell';
 import { GitAgent } from '../agents/git-agent';
+import { MARKKernelBridge } from '../kernel';
+import {
+  markKernelBridge,
+} from '../kernel/bridge';
 
 export interface Reasoner {
   respond(input: string, userId: string): Promise<string>;
@@ -25,6 +29,7 @@ export interface MarkRuntimeDependencies {
   agents?: AgentRuntime;
   capabilities?: CapabilityRegistry;
   reasoner?: Reasoner;
+  kernelBridge?: MARKKernelBridge;
 }
 
 export interface CommandResult {
@@ -53,6 +58,7 @@ export class MarkRuntime {
   private readonly agents: AgentRuntime;
   private readonly capabilities: CapabilityRegistry;
   private readonly reasoner: Reasoner;
+  private readonly kernelBridge: MARKKernelBridge;
 
   constructor(dependencies: MarkRuntimeDependencies = {}) {
     this.bus = dependencies.eventBus ?? eventBus;
@@ -60,6 +66,7 @@ export class MarkRuntime {
     this.agents = dependencies.agents ?? agentRuntime;
     this.capabilities = dependencies.capabilities ?? capabilityRegistry;
     this.reasoner = dependencies.reasoner ?? legacyJarvisReasoner;
+    this.kernelBridge = dependencies.kernelBridge ?? markKernelBridge;
 
     if (!this.capabilities.list().some(capability => capability.id === 'host.local')) {
       this.capabilities.register(new LocalHostCapability());
@@ -136,6 +143,18 @@ export class MarkRuntime {
     if (event.type === 'user.command.received') return;
     const decision = this.router.classify(event);
     if (decision.path === 'agent') await this.agents.handleEvent(event);
+  }
+
+    async initializeKernel() {
+    return this.kernelBridge.initialize();
+  }
+
+  listKernelTools() {
+    return this.kernelBridge.listTools();
+  }
+
+  kernelStatus() {
+    return this.kernelBridge.status();
   }
 }
 

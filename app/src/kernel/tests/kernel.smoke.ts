@@ -28,7 +28,7 @@ async function main(): Promise<void> {
       required: ['message'],
     },
     capabilities: ['testing', 'echo'],
-    resourceKinds: ['output'],
+    supportedResourceKinds: ['output'],
     provider: 'kernel-smoke-test',
   };
 

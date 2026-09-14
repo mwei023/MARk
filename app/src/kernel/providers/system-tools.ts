@@ -26,7 +26,10 @@ export const systemMachineInfoTool: ToolDescriptor = {
     'machine-diagnostics',
     'local-environment',
   ],
-  resourceKinds: ['system', 'device'],
+  supportedResourceKinds: ['system', 'device'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
   provider: 'native.system',
 };
 
@@ -100,6 +103,8 @@ export const nativeSystemDiscoveryProvider: DiscoveryProvider = {
         name: os.hostname(),
         state: 'available',
         provider: 'native.system',
+        capabilities: ['system-information', 'machine-diagnostics'],
+        discoveredAt: new Date().toISOString(),
         metadata: {
           platform: process.platform,
           architecture: process.arch,
