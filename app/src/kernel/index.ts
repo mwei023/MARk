@@ -76,3 +76,15 @@ export type {
   KernelDependencies,
   KernelDiscoverySummary,
 } from './kernel';
+
+export {
+  systemMachineInfoTool,
+  systemMachineInfoImplementation,
+  nativeSystemTools,
+  nativeSystemImplementations,
+  nativeSystemDiscoveryProvider,
+} from './providers/system-tools';
+
+export {
+  registerNativeSystemProvider,
+} from './providers/register-native';
