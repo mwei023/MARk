@@ -14,8 +14,8 @@ import { Gateway, gateway } from './gateway';
 import { CapabilityRegistry, capabilityRegistry } from '../runtime/capabilities/registry';
 import { LocalHostCapability } from '../runtime/capabilities/shell';
 import { GitAgent } from '../agents/git-agent';
-import { MARKKernelBridge } from '../kernel';
 import {
+  MARKKernelBridge,
   markKernelBridge,
 } from '../kernel/bridge';
 
@@ -145,7 +145,7 @@ export class MarkRuntime {
     if (decision.path === 'agent') await this.agents.handleEvent(event);
   }
 
-    async initializeKernel() {
+  async initializeKernel() {
     return this.kernelBridge.initialize();
   }
 
