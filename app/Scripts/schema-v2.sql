@@ -16,22 +16,22 @@ CREATE TABLE IF NOT EXISTS incidents (
   
   trigger_event VARCHAR(255) NOT NULL,
   trigger_event_id VARCHAR(255) NOT NULL,
-  correlation_id VARCHAR(255) NOT NULL, -- Links related events
+  correlation_id VARCHAR(255) NOT NULL,
   
   assigned_agent VARCHAR(255) NOT NULL,
-  tags JSONB DEFAULT '[]',
-  context JSONB DEFAULT '{}',
+  tags JSONB DEFAULT '[]'::jsonb,
+  context JSONB DEFAULT '{}'::jsonb,
   
   investigation JSONB,
   resolved_at TIMESTAMP,
   resolution JSONB,
-  ai_analysis JSONB,
-  
-  INDEX idx_status (status),
-  INDEX idx_assigned_agent (assigned_agent),
-  INDEX idx_correlation_id (correlation_id),
-  INDEX idx_created_at (created_at)
+  ai_analysis JSONB
 );
+
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
+CREATE INDEX IF NOT EXISTS idx_incidents_assigned_agent ON incidents (assigned_agent);
+CREATE INDEX IF NOT EXISTS idx_incidents_correlation_id ON incidents (correlation_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_created_at ON incidents (created_at);
 
 -- Incident actions: audit trail of what was tried
 CREATE TABLE IF NOT EXISTS incident_actions (
@@ -39,16 +39,16 @@ CREATE TABLE IF NOT EXISTS incident_actions (
   incident_id VARCHAR(255) NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
   timestamp TIMESTAMP NOT NULL,
   
-  agent VARCHAR(255) NOT NULL, -- Which agent performed this
-  action VARCHAR(255) NOT NULL, -- What was done
-  tool VARCHAR(255) NOT NULL, -- Which tool was used
-  args JSONB DEFAULT '{}',
-  result VARCHAR(20) NOT NULL CHECK (result IN ('success', 'failure')), -- Outcome
-  details TEXT NOT NULL,
-  
-  INDEX idx_incident_id (incident_id),
-  INDEX idx_timestamp (timestamp)
+  agent VARCHAR(255) NOT NULL,
+  action VARCHAR(255) NOT NULL,
+  tool VARCHAR(255) NOT NULL,
+  args JSONB DEFAULT '{}'::jsonb,
+  result VARCHAR(20) NOT NULL CHECK (result IN ('success', 'failure')),
+  details TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_incident_actions_incident_id ON incident_actions (incident_id);
+CREATE INDEX IF NOT EXISTS idx_incident_actions_timestamp ON incident_actions (timestamp);
 
 -- Event log: audit trail of all events (sampling)
 CREATE TABLE IF NOT EXISTS event_log (
@@ -58,12 +58,12 @@ CREATE TABLE IF NOT EXISTS event_log (
   type VARCHAR(255) NOT NULL,
   severity VARCHAR(20) NOT NULL,
   correlation_id VARCHAR(255),
-  data JSONB DEFAULT '{}',
-  
-  INDEX idx_type (type),
-  INDEX idx_timestamp (timestamp),
-  INDEX idx_correlation_id (correlation_id)
+  data JSONB DEFAULT '{}'::jsonb
 );
+
+CREATE INDEX IF NOT EXISTS idx_event_log_type ON event_log (type);
+CREATE INDEX IF NOT EXISTS idx_event_log_timestamp ON event_log (timestamp);
+CREATE INDEX IF NOT EXISTS idx_event_log_correlation_id ON event_log (correlation_id);
 
 -- Approval requests: track what needed user sign-off
 CREATE TABLE IF NOT EXISTS approval_requests (
@@ -73,8 +73,27 @@ CREATE TABLE IF NOT EXISTS approval_requests (
   action VARCHAR(1024) NOT NULL,
   reason TEXT NOT NULL,
   approved BOOLEAN,
-  approved_at TIMESTAMP,
-  
-  INDEX idx_incident_id (incident_id),
-  INDEX idx_approved (approved)
+  approved_at TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_approval_requests_incident_id ON approval_requests (incident_id);
+CREATE INDEX IF NOT EXISTS idx_approval_requests_approved ON approval_requests (approved);
+
+-- Repositories table: tracks which GitHub repositories are monitored
+CREATE TABLE IF NOT EXISTS monitored_repositories (
+  id VARCHAR(255) PRIMARY KEY,
+  provider VARCHAR(50) NOT NULL DEFAULT 'github',
+  owner VARCHAR(255) NOT NULL,
+  name VARCHAR(255) NOT NULL,
+  full_name VARCHAR(255) NOT NULL UNIQUE,
+  local_path TEXT,
+  default_branch VARCHAR(255) NOT NULL DEFAULT 'main',
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  source VARCHAR(50) NOT NULL DEFAULT 'config',
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_monitored_repositories_provider ON monitored_repositories (provider);
+CREATE INDEX IF NOT EXISTS idx_monitored_repositories_enabled ON monitored_repositories (enabled);
+CREATE INDEX IF NOT EXISTS idx_monitored_repositories_full_name ON monitored_repositories (full_name);

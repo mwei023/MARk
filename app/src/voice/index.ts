@@ -1,7 +1,7 @@
 // src/voice/index.ts
 import { transcribe } from './stt';
 import { speak, playAudio } from './tts';
-import { runAgent } from '../agent';
+import { markRuntime } from '../core/mark-runtime';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -13,8 +13,9 @@ export const voiceCommand = async (audioPath: string, userId: string = 'mwei'): 
     console.log(`🗣️  You: "${text}"`);
     
     // 2. Process with agent
-    const response = await runAgent(text, userId);
-    console.log(`🤖 Jarvis: ${response}`);
+    const result = await markRuntime.executeCommand(text, userId, 'voice');
+    const response = result.response;
+    console.log(`🤖 MARK: ${response}`);
     
     // 3. Speak response aloud
     const outputPath = join(tmpdir(), `jarvis_response_${Date.now()}.wav`);

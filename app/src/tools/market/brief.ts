@@ -1,7 +1,7 @@
 // src/tools/market/brief.ts
 import { z } from "zod";
 import { createTool } from "../toolFactory";
-import { getModel } from "../../llm";
+import { getLLMProviderCached, Message } from "../../llm";
 
 // CoinGecko API helper
 const fetchCoinData = async (coinId: string) => {
@@ -94,15 +94,11 @@ Data for ${args.symbol.toUpperCase()}:
 Your 3-sentence brief + disclaimer:
 `.trim();
 
-      // 5. Generate with LLM
-      const model = await getModel();
-      const response = await model.invoke([{ role: "user", content: prompt }]);
-      let brief = typeof response.content === 'string' 
-        ? response.content.trim() 
-        : JSON.stringify(response.content);
-
-      // 6. Clean and validate output
-      brief = brief.replace(/^```(?:markdown)?\n?|\n?```$/g, '').trim();
+      // 5. Generate with LLM provider
+      const provider = await getLLMProviderCached();
+      const messages: Message[] = [{ role: "user", content: prompt }];
+      const response = await provider.chat(messages);
+      let brief = response.content;
       if (!brief.includes("Not financial advice.")) {
         brief += "\nNot financial advice.";
       }

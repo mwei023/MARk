@@ -7,7 +7,7 @@ import { promisify } from 'util';
 import { unlink } from 'fs/promises';
 import { transcribe } from './stt';
 import { speak, playAudio } from './tts';
-import { runAgent } from '../agent';
+import { markRuntime } from '../core/mark-runtime';
 import * as readline from 'readline';
 import { runHealthChecks, logAlert, type Alert, type CommandKey } from '../monitoring/proactive';
 
@@ -123,11 +123,11 @@ const continuousLoop = async () => {
         if (lower.includes('yes') || lower.includes('sure') || lower.includes('go ahead')) {
           let actionResponse = '';
           if (alert.type === 'disk' && alert.suggestion?.includes('large files')) {
-            actionResponse = await runAgent('find large files', userId);
+            actionResponse = (await markRuntime.executeCommand('find large files', userId, 'voice')).response;
           } else if (alert.type === 'memory' && alert.suggestion?.includes('processes')) {
-            actionResponse = await runAgent('show top processes', userId);
+            actionResponse = (await markRuntime.executeCommand('show top processes', userId, 'voice')).response;
           } else if (alert.type === 'cloudflared' && alert.suggestion?.includes('restart')) {
-            actionResponse = await runAgent('restart cloudflared', userId);
+            actionResponse = (await markRuntime.executeCommand('restart cloudflared', userId, 'voice')).response;
           } else {
             actionResponse = "I can help with that — what would you like to do?";
           }
@@ -152,7 +152,7 @@ const continuousLoop = async () => {
         const lower = text.toLowerCase();
 
         if (lower.includes('yes')) {
-          response = await runAgent(`execute ${command}`, userId);
+          response = (await markRuntime.executeCommand(`execute ${command}`, userId, 'voice')).response;
           awaitingConfirmation = null;
         } else {
           response = "🚫 Command cancelled.";
@@ -161,10 +161,7 @@ const continuousLoop = async () => {
       }
       // 🧠 Normal flow: run agent
       else {
-        const agentResult = await runAgent(text, 'mwei');
-        response = typeof agentResult === 'string'
-          ? agentResult
-          : (agentResult as any)?.messages?.[0] || response;
+        response = (await markRuntime.executeCommand(text, 'mwei', 'voice')).response;
 
         // Check if agent wants confirmation for a command
         if (typeof response === 'string' && response.includes('Say "yes') && response.includes('to confirm')) {
