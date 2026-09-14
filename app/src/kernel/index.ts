@@ -88,3 +88,8 @@ export {
 export {
   registerNativeSystemProvider,
 } from './providers/register-native';
+
+export {
+  MARKKernelBridge,
+  markKernelBridge,
+} from './bridge';
