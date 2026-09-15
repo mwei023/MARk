@@ -26,6 +26,7 @@ import {
 
 import {
   ExecutionPlan,
+  PlanExecutionReport,
   PlanExecutionResult,
   PlanValidationResult,
 } from './planner';
@@ -151,6 +152,19 @@ export class MARKKernelBridge {
     const context = this.createContext(contextInput);
 
     return this.kernel.executePlan(plan, context);
+  }
+
+  /**
+   * Executes a plan with structured data flow between steps and returns the
+   * full structured report, including skipped steps and final outputs.
+   */
+  async executePlanWithReport(
+    plan: ExecutionPlan,
+    contextInput: Parameters<MARKKernel['createContext']>[0],
+  ): Promise<PlanExecutionReport> {
+    const context = this.createContext(contextInput);
+
+    return this.kernel.executePlanWithReport(plan, context);
   }
 }
 

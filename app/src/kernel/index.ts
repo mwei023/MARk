@@ -135,5 +135,33 @@ export type {
   PlanValidationError,
   PlanValidationResult,
   PlanExecutionResult,
+  PlanStepStatus,
+  PlanStepResult,
+  PlanExecutionStatus,
+  PlanExecutionReport,
   PlannerDependencies,
 } from './planner';
+
+export {
+  resolveInputReferences,
+  isStepReference,
+  parseStepReference,
+  collectStepReferences,
+  StepReferenceError,
+} from './step-references';
+
+export type {
+  StepReferenceErrorCode,
+  StepReferenceTarget,
+  StepResultSnapshot,
+  StepResultLookup,
+} from './step-references';
+
+export {
+  executeStructuredPlan,
+  toPlanExecutionResult,
+} from './plan-execution';
+
+export type {
+  ExecuteStructuredPlanInput,
+} from './plan-execution';

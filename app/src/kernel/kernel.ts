@@ -59,10 +59,15 @@ import {
 import {
   ExecutionPlan,
   KernelPlanner,
+  PlanExecutionReport,
   PlanExecutionResult,
   PlanValidationResult,
-  sortPlanSteps,
 } from './planner';
+
+import {
+  executeStructuredPlan,
+  toPlanExecutionResult,
+} from './plan-execution';
 
 export interface KernelDependencies {
   toolRegistry?: ToolRegistry;
@@ -237,6 +242,7 @@ export class MARKKernel {
     context: ExecutionContext,
   ): Promise<PlanExecutionResult> {
     const validation = this.validatePlan(plan);
+
     if (!validation.valid) {
       return {
         planId: plan.id,
@@ -249,56 +255,32 @@ export class MARKKernel {
       };
     }
 
-    const orderedSteps = sortPlanSteps(plan.steps);
-    const stepResults: PlanExecutionResult['stepResults'] = [];
-    const observations = [];
-
-    for (const step of orderedSteps) {
-      const action: ActionRequest = {
-        id: `ACT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        toolId: step.toolId,
-        input: step.input,
-        requestedBy: context.userId,
-        createdAt: new Date().toISOString(),
-        metadata: {
-          source: 'plan-execution',
-          planId: plan.id,
-          stepId: step.id,
-        },
-      };
-
-      const result = await this.executor.execute(action, context);
-
-      stepResults.push({
-        stepId: step.id,
-        toolId: step.toolId,
-        action,
-        result,
-      });
-
-      observations.push(...result.observations);
-
-      if (result.status !== 'succeeded') {
-        return {
-          planId: plan.id,
-          goal: plan.goal,
-          status: result.status,
-          validation,
-          stepResults,
-          observations,
-          error: `Plan execution failed at step "${step.id}": ${result.error ?? result.status}`,
-        };
-      }
-    }
-
-    return {
-      planId: plan.id,
-      goal: plan.goal,
-      status: 'succeeded',
+    const report = await executeStructuredPlan({
+      plan,
+      context,
       validation,
-      stepResults,
-      observations,
-    };
+      executeStep: (action, executionContext) =>
+        this.executor.execute(action, executionContext),
+    });
+
+    return toPlanExecutionResult(report);
+  }
+
+  /**
+   * Executes a plan with structured data flow between steps and returns the
+   * full structured report, including skipped steps and final outputs.
+   */
+  async executePlanWithReport(
+    plan: ExecutionPlan,
+    context: ExecutionContext,
+  ): Promise<PlanExecutionReport> {
+    return executeStructuredPlan({
+      plan,
+      context,
+      validation: this.validatePlan(plan),
+      executeStep: (action, executionContext) =>
+        this.executor.execute(action, executionContext),
+    });
   }
 
   async executeGoal(

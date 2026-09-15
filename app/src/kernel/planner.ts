@@ -11,6 +11,11 @@ import { CapabilityResolver } from './capability-resolver';
 import { TaskBinder } from './task-binder';
 import { createKernelId } from './execution-context';
 
+import {
+  collectStepReferences,
+  isStepReference,
+} from './step-references';
+
 export interface PlanStep {
   id: KernelId;
   toolId: KernelId;
@@ -60,6 +65,66 @@ export interface PlanExecutionResult {
     result?: ActionResult;
   }>;
   observations: Observation[];
+  error?: string;
+}
+
+/**
+ * Execution status of an individual plan step.
+ *
+ * `skipped` marks steps that never ran because a required dependency did not
+ * succeed. All statuses are plan-level concepts, distinct from ActionStatus,
+ * which describes a single action execution.
+ */
+export type PlanStepStatus =
+  | 'pending'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'skipped';
+
+/**
+ * Stored result of one plan step.
+ *
+ * `resolvedInput` is the input after step-output references were resolved
+ * immediately before execution. `output` carries the successful tool output;
+ * `result` preserves the full ActionResult from the executor for tools that
+ * produce no dedicated output.
+ */
+export interface PlanStepResult {
+  stepId: KernelId;
+  toolId: KernelId;
+  status: PlanStepStatus;
+  input: Record<string, unknown>;
+  resolvedInput?: Record<string, unknown>;
+  action?: ActionRequest;
+  output?: unknown;
+  result?: ActionResult;
+  observations: Observation[];
+  startedAt?: string;
+  completedAt?: string;
+  error?: string;
+}
+
+/** Overall status of a plan execution. */
+export type PlanExecutionStatus = 'succeeded' | 'failed' | 'partial';
+
+/**
+ * Structured report for a complete plan execution.
+ *
+ * `steps` preserves the plan's declared step order so callers can read the
+ * report back in the order the plan author wrote, including steps that were
+ * skipped; `stepResults` remains in execution order for compatibility.
+ */
+export interface PlanExecutionReport {
+  planId: KernelId;
+  goal: string;
+  status: PlanExecutionStatus;
+  startedAt?: string;
+  completedAt?: string;
+  steps: PlanStepResult[];
+  finalOutputs: Record<string, unknown>;
+  observations: Observation[];
+  validation?: PlanValidationResult;
   error?: string;
 }
 
@@ -196,15 +261,35 @@ export function validatePlan(
         );
 
         if (missing.length > 0) {
-          errors.push({
-            stepId: step.id,
-            code: 'MISSING_REQUIRED_INPUT',
-            message: `Step "${step.id}" for tool "${tool.id}" is missing required input(s): ${missing.join(', ')}.`,
-          });
+          // Inputs that are step-output references are computed at execution
+          // time, so they cannot be checked against the tool schema here.
+          const providesReference = (
+            field: string,
+          ): boolean =>
+            isStepReference(step.input[field]) ||
+            collectStepReferences(step.input[field]).length > 0;
+
+          const unresolved = missing.filter(
+            field => !providesReference(field),
+          );
+
+          if (unresolved.length > 0) {
+            errors.push({
+              stepId: step.id,
+              code: 'MISSING_REQUIRED_INPUT',
+              message: `Step "${step.id}" for tool "${tool.id}" is missing required input(s): ${unresolved.join(', ')}.`,
+            });
+          }
         }
 
+        // A required input that is provided by a step-output reference is
+        // unknown at validation time, so type checks only apply to static
+        // values.
         const properties = tool.inputSchema?.properties ?? {};
         for (const [field, value] of Object.entries(step.input)) {
+          if (isStepReference(value) || collectStepReferences(value).length > 0) {
+            continue;
+          }
           const propDef = properties[field];
           if (propDef?.type && value !== undefined && value !== null) {
             if (propDef.type === 'number' && typeof value !== 'number') {
