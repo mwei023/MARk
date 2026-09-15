@@ -174,15 +174,25 @@ export class MarkRuntime {
   }
 
   async executeKernelGoal(
-  goal: string,
-  userId = 'mwei',
-  source: 'api' | 'voice' | 'cli' = 'api',
-) {
-  return this.kernelBridge.executeGoal(goal, {
-    userId,
-    source,
-  });
-}
+    goal: string,
+    userId = 'mwei',
+    source: 'api' | 'voice' | 'cli' = 'api',
+  ) {
+    return this.kernelBridge.executeGoal(goal, {
+      userId,
+      source,
+    });
+  }
+
+  planKernelGoal(goal: string) {
+    return this.kernelBridge.planGoal(goal);
+  }
+
+  validateKernelPlan(
+    plan: Parameters<MARKKernelBridge['validatePlan']>[0],
+  ) {
+    return this.kernelBridge.validatePlan(plan);
+  }
 }
 
 export const markRuntime = new MarkRuntime();

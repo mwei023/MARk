@@ -120,3 +120,20 @@ export type {
   TaskBinding,
   TaskBinderDependencies,
 } from './task-binder';
+
+export {
+  KernelPlanner,
+  Planner,
+  validatePlan,
+  sortPlanSteps,
+} from './planner';
+
+export type {
+  PlanStep,
+  ExecutionPlan,
+  PlanValidationErrorCode,
+  PlanValidationError,
+  PlanValidationResult,
+  PlanExecutionResult,
+  PlannerDependencies,
+} from './planner';

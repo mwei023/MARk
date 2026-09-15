@@ -14,10 +14,21 @@ import {
   TaskBinding,
 } from './task-binder';
 
+import {
+  ExecutionPlan,
+  PlanValidationResult,
+} from './planner';
+
+export interface GoalExecutionOptions {
+  usePlanner?: boolean;
+}
+
 export interface GoalExecutionResult {
   goal: string;
   resolution: CapabilityResolution;
   binding?: TaskBinding;
+  plan?: ExecutionPlan;
+  validation?: PlanValidationResult;
   action?: ActionRequest;
   result?: ActionResult;
 }
@@ -32,6 +43,8 @@ export interface GoalExecutionDependencies {
     action: ActionRequest,
     context: ExecutionContext,
   ) => Promise<ActionResult>;
+  planGoal?: (goal: string) => ExecutionPlan;
+  validatePlan?: (plan: ExecutionPlan) => PlanValidationResult;
 }
 
 export class GoalExecutor {
@@ -42,13 +55,25 @@ export class GoalExecutor {
   async executeGoal(
     goal: string,
     context: ExecutionContext,
+    options: GoalExecutionOptions = {},
   ): Promise<GoalExecutionResult> {
+    const plan = this.dependencies.planGoal
+      ? this.dependencies.planGoal(goal)
+      : undefined;
+
+    const validation =
+      plan && this.dependencies.validatePlan
+        ? this.dependencies.validatePlan(plan)
+        : undefined;
+
     const resolution = this.dependencies.resolveCapability(goal);
 
     if (!resolution.tool) {
       return {
         goal,
         resolution,
+        plan,
+        validation,
       };
     }
 
@@ -62,6 +87,8 @@ export class GoalExecutor {
         goal,
         resolution,
         binding,
+        plan,
+        validation,
       };
     }
 
@@ -77,6 +104,7 @@ export class GoalExecutor {
         resolutionScore: resolution.score,
         matchedTerms: resolution.matchedTerms,
         matchedInputFields: binding.matchedFields,
+        ...(plan ? { planId: plan.id } : {}),
       },
     };
 
@@ -89,6 +117,8 @@ export class GoalExecutor {
       goal,
       resolution,
       binding,
+      plan,
+      validation,
       action,
       result,
     };

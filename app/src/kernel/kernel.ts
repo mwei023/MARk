@@ -51,9 +51,18 @@ import {
 } from './task-binder';
 
 import {
+  GoalExecutionOptions,
   GoalExecutionResult,
   GoalExecutor,
 } from './goal-execution';
+
+import {
+  ExecutionPlan,
+  KernelPlanner,
+  PlanExecutionResult,
+  PlanValidationResult,
+  sortPlanSteps,
+} from './planner';
 
 export interface KernelDependencies {
   toolRegistry?: ToolRegistry;
@@ -76,6 +85,7 @@ export class MARKKernel {
   readonly workflows: WorkflowEngine;
   readonly capabilityResolver: CapabilityResolver;
   readonly taskBinder: TaskBinder;
+  readonly planner: KernelPlanner;
   readonly goalExecutor: GoalExecutor;
 
   constructor(
@@ -107,6 +117,12 @@ export class MARKKernel {
 
     this.taskBinder = new TaskBinder();
 
+    this.planner = new KernelPlanner({
+      toolRegistry: this.toolRegistry,
+      capabilityResolver: this.capabilityResolver,
+      taskBinder: this.taskBinder,
+    });
+
     this.goalExecutor = new GoalExecutor({
       resolveCapability: goal =>
         this.capabilityResolver.resolve(goal),
@@ -116,6 +132,12 @@ export class MARKKernel {
 
       execute: (action, context) =>
         this.executor.execute(action, context),
+
+      planGoal: goal =>
+        this.planner.plan(goal),
+
+      validatePlan: plan =>
+        this.planner.validate(plan, this.toolRegistry),
     });
   }
 
@@ -198,13 +220,96 @@ export class MARKKernel {
     return this.toolRegistry.listAvailable();
   }
 
+  planGoal(
+    goal: string,
+  ): ExecutionPlan {
+    return this.planner.plan(goal);
+  }
+
+  validatePlan(
+    plan: ExecutionPlan,
+  ): PlanValidationResult {
+    return this.planner.validate(plan, this.toolRegistry);
+  }
+
+  async executePlan(
+    plan: ExecutionPlan,
+    context: ExecutionContext,
+  ): Promise<PlanExecutionResult> {
+    const validation = this.validatePlan(plan);
+    if (!validation.valid) {
+      return {
+        planId: plan.id,
+        goal: plan.goal,
+        status: 'failed',
+        validation,
+        stepResults: [],
+        observations: [],
+        error: `Plan validation failed: ${validation.errors.map(e => e.message).join('; ')}`,
+      };
+    }
+
+    const orderedSteps = sortPlanSteps(plan.steps);
+    const stepResults: PlanExecutionResult['stepResults'] = [];
+    const observations = [];
+
+    for (const step of orderedSteps) {
+      const action: ActionRequest = {
+        id: `ACT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        toolId: step.toolId,
+        input: step.input,
+        requestedBy: context.userId,
+        createdAt: new Date().toISOString(),
+        metadata: {
+          source: 'plan-execution',
+          planId: plan.id,
+          stepId: step.id,
+        },
+      };
+
+      const result = await this.executor.execute(action, context);
+
+      stepResults.push({
+        stepId: step.id,
+        toolId: step.toolId,
+        action,
+        result,
+      });
+
+      observations.push(...result.observations);
+
+      if (result.status !== 'succeeded') {
+        return {
+          planId: plan.id,
+          goal: plan.goal,
+          status: result.status,
+          validation,
+          stepResults,
+          observations,
+          error: `Plan execution failed at step "${step.id}": ${result.error ?? result.status}`,
+        };
+      }
+    }
+
+    return {
+      planId: plan.id,
+      goal: plan.goal,
+      status: 'succeeded',
+      validation,
+      stepResults,
+      observations,
+    };
+  }
+
   async executeGoal(
     goal: string,
     context: ExecutionContext,
+    options?: GoalExecutionOptions,
   ): Promise<GoalExecutionResult> {
     return this.goalExecutor.executeGoal(
       goal,
       context,
+      options,
     );
   }
 }

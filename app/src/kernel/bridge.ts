@@ -24,6 +24,12 @@ import {
   GoalExecutionResult,
 } from './goal-execution';
 
+import {
+  ExecutionPlan,
+  PlanExecutionResult,
+  PlanValidationResult,
+} from './planner';
+
 
 export interface KernelBridgeOptions {
   initializeNativeProviders?: boolean;
@@ -122,13 +128,30 @@ export class MARKKernelBridge {
   }
 
   async executeGoal(
-  goal: string,
-  contextInput: Parameters<MARKKernel['createContext']>[0],
-): Promise<GoalExecutionResult> {
-  const context = this.createContext(contextInput);
+    goal: string,
+    contextInput: Parameters<MARKKernel['createContext']>[0],
+  ): Promise<GoalExecutionResult> {
+    const context = this.createContext(contextInput);
 
-  return this.kernel.executeGoal(goal, context);
-}
+    return this.kernel.executeGoal(goal, context);
+  }
+
+  planGoal(goal: string): ExecutionPlan {
+    return this.kernel.planGoal(goal);
+  }
+
+  validatePlan(plan: ExecutionPlan): PlanValidationResult {
+    return this.kernel.validatePlan(plan);
+  }
+
+  async executePlan(
+    plan: ExecutionPlan,
+    contextInput: Parameters<MARKKernel['createContext']>[0],
+  ): Promise<PlanExecutionResult> {
+    const context = this.createContext(contextInput);
+
+    return this.kernel.executePlan(plan, context);
+  }
 }
 
 export const markKernelBridge = new MARKKernelBridge();

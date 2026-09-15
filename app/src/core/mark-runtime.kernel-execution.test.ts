@@ -33,10 +33,21 @@ const run = async (): Promise<void> => {
     'cli',
   );
 
+  if (result.status !== 'succeeded') {
+    console.error('Structured kernel execution failed:', result.error);
+    console.error('Action result:', result);
+  }
+
   assert.equal(result.status, 'succeeded');
   assert.equal(result.actionId.startsWith('ACT-'), true);
   assert.ok(result.output);
-  assert.match(result.output ?? '', /platform/i);
+  assert.equal(typeof result.output, 'object');
+
+  const machineInfo = result.output as Record<string, unknown>;
+
+  assert.equal(machineInfo.platform, 'linux');
+  assert.equal(machineInfo.hostname, 'kali23');
+  assert.equal(typeof machineInfo.cpuCount, 'number');
   assert.ok(result.observations.length >= 1);
   assert.equal(result.observations[0].kind, 'system');
 
