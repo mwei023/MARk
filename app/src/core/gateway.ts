@@ -121,6 +121,17 @@ export class Gateway {
     }
 
     if (routeLocally(command)) {
+      // Storage-hog questions need measured directory sizes, not a df
+      // snapshot. Route them past the fast local path so the kernel answers
+      // from data. One concept-level rule — not one per situation.
+      if (/\b(eat|eating|eats|hog|hogs|hogging|largest|biggest|filling|using up)\b/i.test(command)) {
+        return {
+          path: 'reasoning',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: 'Storage-hog question. Prefer kernel measurement over a df snapshot.',
+        };
+      }
       return {
         path: 'deterministic',
         needsLLM: false,

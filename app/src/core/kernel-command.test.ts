@@ -1,0 +1,61 @@
+import assert from 'node:assert/strict';
+
+import { EventBus } from './event-bus';
+import { Gateway } from './gateway';
+import { MarkRuntime, Reasoner } from './mark-runtime';
+import { AgentRuntime } from './agent-runtime';
+import { CapabilityRegistry } from '../runtime/capabilities/registry';
+import { LocalHostCapability } from '../runtime/capabilities/shell';
+import { MarkStatusCapability } from '../runtime/capabilities/mark-status';
+
+/**
+ * Kernel-first command routing: actionable goals must resolve to executed
+ * capabilities with honest outcomes — never to a chat model roleplaying
+ * actions it did not perform.
+ */
+async function main(): Promise<void> {
+  const capabilities = new CapabilityRegistry();
+  capabilities.register(new LocalHostCapability());
+  capabilities.register(new MarkStatusCapability());
+  const reasoner: Reasoner = {
+    respond: async input => `reasoned: ${input}`,
+  };
+  const runtime = new MarkRuntime({
+    eventBus: new EventBus(),
+    gateway: new Gateway(),
+    agents: new AgentRuntime(),
+    capabilities,
+    reasoner,
+  });
+
+  // 1. Fast local path untouched.
+  const disk = await runtime.executeCommand('check disk space', 'test-user', 'cli');
+  assert.equal(disk.route, 'capability');
+
+  // 2. "open vlc" acts: reversible launch pauses for approval, with an id.
+  const open = await runtime.executeCommand('open vlc', 'test-user', 'cli');
+  assert.equal(open.route, 'kernel', `expected kernel route, got [${open.route}] ${open.response}`);
+  assert.match(open.response, /approval|confirmation/i);
+
+  // 3. Hog question measures instead of dumping df.
+  const hogs = await runtime.executeCommand('whats eating my disk', 'test-user', 'cli');
+  assert.equal(hogs.route, 'kernel', `expected kernel route, got [${hogs.route}] ${hogs.response}`);
+  assert.match(hogs.response, /largest|Measured/i);
+
+  // 4. Music search reports real tracks, never "playing".
+  const music = await runtime.executeCommand('play some music', 'test-user', 'cli');
+  assert.equal(music.route, 'kernel', `expected kernel route, got [${music.route}] ${music.response}`);
+  assert.ok(!/playing music/i.test(music.response), 'must not claim playback it did not perform');
+
+  // 5. True unknowns still reach reasoning.
+  const unknown = await runtime.executeCommand('help me understand neural networks', 'test-user', 'cli');
+  assert.equal(unknown.route, 'reasoning');
+
+  console.log('PASS: kernel-first commands (act honestly, chat only unknowns)');
+}
+
+main().catch(error => {
+  console.error('FAIL: kernel-first commands');
+  console.error(error);
+  process.exitCode = 1;
+});

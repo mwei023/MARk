@@ -995,8 +995,117 @@ export const containerRestartFamilyImplementation: ToolImplementation = {
   },
 };
 
-export const systemContainerListTool: ToolDescriptor = {
-  id: 'system.container_list',
+export const fsDirectorySizesTool: ToolDescriptor = {
+  id: 'fs.directory_sizes',
+  name: 'Directory sizes',
+  description:
+    'Reports the largest immediate subdirectories of a directory to find what is eating disk space.',
+  version: '1.0.0',
+  domain: 'filesystem',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Directory to measure. Defaults to the working directory.',
+      },
+      limit: {
+        type: 'number',
+        description: 'Maximum entries to return (1-50, default 20).',
+      },
+    },
+    required: [],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      count: { type: 'number' },
+      truncated: { type: 'boolean' },
+      entries: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            path: { type: 'string' },
+            sizeKB: { type: 'number' },
+          },
+          required: ['path', 'sizeKB'],
+        },
+      },
+      capturedAt: { type: 'string' },
+    },
+    required: ['path', 'count', 'truncated', 'entries', 'capturedAt'],
+  },
+  capabilities: ['storage-diagnostics', 'disk-usage', 'local-environment'],
+  supportedResourceKinds: ['directory'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const fsDirectorySizesImplementation: ToolImplementation = {
+  toolId: fsDirectorySizesTool.id,
+
+  async execute({ action, context }) {
+    // Sizes only, never contents: any absolute path is safe to measure.
+    const rawPath =
+      typeof action.input.path === 'string' && action.input.path.length > 0
+        ? String(action.input.path)
+        : context.workingDirectory ?? process.cwd();
+    const requested = typeof action.input.limit === 'number' ? Math.floor(action.input.limit) : 20;
+    const limit = Math.min(Math.max(requested, 1), 50);
+    const resolved = path.resolve(rawPath);
+
+    const names = (await fs.readdir(resolved)).slice(0, 200);
+    const targets = names.map(name => path.join(resolved, name));
+    // Fixed flags only; measured paths are operands, never a command string.
+    const { stdout } = await execFileAsync('du', ['-sk', '-x', '--', ...targets], { timeout: 60000 });
+    const entries = stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => {
+        const tab = line.indexOf('\t');
+        return {
+          path: tab >= 0 ? line.slice(tab + 1) : line,
+          sizeKB: Number(tab >= 0 ? line.slice(0, tab) : NaN),
+        };
+      })
+      .filter(entry => entry.path && Number.isFinite(entry.sizeKB))
+      .sort((a, b) => b.sizeKB - a.sizeKB);
+    const sliced = entries.slice(0, limit);
+
+    const output = {
+      path: resolved,
+      count: sliced.length,
+      truncated: entries.length > sliced.length,
+      entries: sliced,
+      capturedAt: new Date().toISOString(),
+    };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'file',
+          source: 'native.system',
+          subject: resolved,
+          summary: `Measured ${entries.length} entries under ${resolved}; largest is ${sliced[0]?.path ?? 'unknown'} (${sliced[0]?.sizeKB ?? 0} KB).`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const systemContainerListTool: ToolDescriptor = {  id: 'system.container_list',
   name: 'Container list',
   description: 'Lists Docker containers and their status without modifying anything.',
   version: '1.0.0',
@@ -1101,6 +1210,7 @@ export const nativeSystemTools: ToolDescriptor[] = [
   fsFileWriteTool,
   systemContainerRestartTool,
   systemContainerListTool,
+  fsDirectorySizesTool,
 ];
 
 export const nativeSystemImplementations: ToolImplementation[] = [
@@ -1115,6 +1225,7 @@ export const nativeSystemImplementations: ToolImplementation[] = [
   fsFileWriteImplementation,
   systemContainerRestartImplementation,
   systemContainerListImplementation,
+  fsDirectorySizesImplementation,
 ];
 
 export const nativeSystemDiscoveryProvider: DiscoveryProvider = {

@@ -98,7 +98,7 @@ function resolveLibraryArchive(rawArchive: string): string {
 export const mediaFindTracksTool: ToolDescriptor = {
   id: 'media.find_tracks',
   name: 'Find music tracks',
-  description: 'Searches the local music library for playable audio tracks, including tracks inside zip archives.',
+  description: 'Finds music tracks to play from the local music library, including tracks inside zip archives.',
   version: '1.0.0',
   domain: 'media',
   risk: 'read',
@@ -122,6 +122,9 @@ export const mediaFindTracksTool: ToolDescriptor = {
           properties: {
             kind: { type: 'string' },
             name: { type: 'string' },
+            path: { type: 'string' },
+            archive: { type: 'string' },
+            entry: { type: 'string' },
           },
           required: ['kind', 'name'],
         },
@@ -149,7 +152,13 @@ export const mediaFindTracksImplementation: ToolImplementation = {
     const tracks = await findTracks(MUSIC_LIBRARY, query, limit);
     const output = {
       count: tracks.length,
-      tracks: tracks.map(track => ({ kind: track.kind, name: track.name })),
+      tracks: tracks.map(track => ({
+        kind: track.kind,
+        name: track.name,
+        ...(track.path ? { path: track.path } : {}),
+        ...(track.archive ? { archive: track.archive } : {}),
+        ...(track.entry ? { entry: track.entry } : {}),
+      })),
       capturedAt: new Date().toISOString(),
     };
     return {

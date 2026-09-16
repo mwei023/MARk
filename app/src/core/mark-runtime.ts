@@ -34,7 +34,7 @@ export interface MarkRuntimeDependencies {
 
 export interface CommandResult {
   response: string;
-  route: 'capability' | 'agent' | 'reasoning' | 'unavailable';
+  route: 'capability' | 'agent' | 'reasoning' | 'kernel' | 'unavailable';
   eventId: string;
 }
 
@@ -106,24 +106,40 @@ export class MarkRuntime {
       result = response
         ? { response, route: 'capability', eventId: event.id }
         : { response: 'That local capability is unavailable on this host.', route: 'unavailable', eventId: event.id };
-    } else if (decision.path === 'agent' && decision.agent) {
-      const response = await this.agents.handleCommand(event, this.capabilities);
-      result = response
-        ? { response, route: 'agent', eventId: event.id }
-        : { response: `The ${decision.agent} capability is not available on this host.`, route: 'unavailable', eventId: event.id };
-    } else if (decision.path === 'reasoning' && decision.needsLLM) {
-      try {
-        result = { response: await this.reasoner.respond(command, userId), route: 'reasoning', eventId: event.id };
-      } catch (error: any) {
-        const detail = error instanceof Error ? error.message : String(error);
-        result = {
-          response: `Reasoning is unavailable right now: ${detail}`,
-          route: 'unavailable',
-          eventId: event.id,
-        };
-      }
     } else {
-      result = { response: 'MARK cannot safely route that request yet.', route: 'unavailable', eventId: event.id };
+      // The kernel goes before the LLM: when MARK can resolve a discovered
+      // capability it must act (or report the real outcome), never hand an
+      // actionable goal to a chat model that can only talk. Specialists keep
+      // priority on their own turf — the kernel is the fallback, not a hijack.
+      if (decision.path === 'agent' && decision.agent) {
+        const response = await this.agents.handleCommand(event, this.capabilities);
+        if (response) {
+          result = { response, route: 'agent', eventId: event.id };
+        } else {
+          const kernelResult = await this.tryKernelCommand(command, userId, source);
+          result = kernelResult
+            ? { ...kernelResult, eventId: event.id }
+            : { response: `The ${decision.agent} capability is not available on this host.`, route: 'unavailable', eventId: event.id };
+        }
+      } else {
+        const kernelResult = await this.tryKernelCommand(command, userId, source);
+        if (kernelResult) {
+          result = { ...kernelResult, eventId: event.id };
+        } else if (decision.path === 'reasoning' && decision.needsLLM) {
+          try {
+            result = { response: await this.reasoner.respond(command, userId), route: 'reasoning', eventId: event.id };
+          } catch (error: any) {
+            const detail = error instanceof Error ? error.message : String(error);
+            result = {
+              response: `Reasoning is unavailable right now: ${detail}`,
+              route: 'unavailable',
+              eventId: event.id,
+            };
+          }
+        } else {
+          result = { response: 'MARK cannot safely route that request yet.', route: 'unavailable', eventId: event.id };
+        }
+      }
     }
 
     await this.bus.emit({
@@ -138,8 +154,59 @@ export class MarkRuntime {
     return result;
   }
 
-  /** Handles non-command operational events received through the same bus. */
-  async handleEvent(event: Event): Promise<void> {
+  /**
+   * Attempts a command through the execution kernel. Returns a result only
+   * when the kernel actually resolved and ran a capability; otherwise
+   * undefined so the caller falls through to agents or reasoning. The
+   * kernel must never break chat: every failure mode degrades to undefined.
+   */
+  private async tryKernelCommand(
+    command: string,
+    userId: string,
+    source: 'api' | 'voice' | 'cli',
+  ): Promise<{ response: string; route: 'kernel' } | undefined> {
+    let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
+    try {
+      await this.kernelBridge.initialize();
+      outcome = await this.kernelBridge.executeGoal(command, {
+        userId,
+        source,
+        authorityProfile: source === 'cli' ? 'workspace' : 'default',
+      });
+    } catch {
+      return undefined;
+    }
+
+    if (!outcome.action || !outcome.result) return undefined;
+
+    const { result } = outcome;
+    const toolId = outcome.action.toolId;
+
+    if (result.status === 'succeeded') {
+      const summary =
+        result.observations.map(entry => entry.summary).filter(Boolean).pop() ??
+        `Executed ${toolId}.`;
+      return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel' };
+    }
+
+    const metadata = (result.metadata ?? {}) as Record<string, unknown>;
+    const confirmationId = typeof metadata.confirmationId === 'string' ? metadata.confirmationId : undefined;
+
+    if (result.status === 'blocked' && confirmationId) {
+      return {
+        response:
+          `⏳ "${command}" needs approval (${toolId}): ${result.error} ` +
+          `Approve with confirmation ${confirmationId}.`,
+        route: 'kernel',
+      };
+    }
+    if (result.status === 'blocked') {
+      return { response: `Blocked by policy (${toolId}): ${result.error}`, route: 'kernel' };
+    }
+    return { response: `Failed (${toolId}): ${result.error ?? 'unknown error'}`, route: 'kernel' };
+  }
+
+  /** Handles non-command operational events received through the same bus. */  async handleEvent(event: Event): Promise<void> {
     if (event.type === 'user.command.received') return;
     const decision = this.router.classify(event);
     if (decision.path === 'agent') await this.agents.handleEvent(event);
@@ -196,3 +263,13 @@ export class MarkRuntime {
 }
 
 export const markRuntime = new MarkRuntime();
+
+function compactKernelOutput(output: unknown): string {
+  if (output === undefined) return '(no output)';
+  try {
+    const text = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
+    return text.length > 800 ? `${text.slice(0, 800)}\n… (output truncated)` : text;
+  } catch {
+    return String(output);
+  }
+}

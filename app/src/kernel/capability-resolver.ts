@@ -13,6 +13,15 @@ export interface CapabilityResolverDependencies {
 }
 
 /**
+ * Minimum score for a capability to count as resolved. Discovery made the
+ * catalog large (100+ desktop apps), so bare substring hits ("help" inside
+ * "yelp", a country inside a profile hash) must not route chat to tools.
+ * Roughly: at least half the goal terms must match. Not per-situation —
+ * one relevance floor for every tool equally.
+ */
+export const MIN_RESOLUTION_SCORE = 0.5;
+
+/**
  * Resolves a natural-language goal against currently discovered
  * capabilities.
  *
@@ -77,7 +86,7 @@ export class CapabilityResolver {
 
     return tools
       .map(tool => this.scoreTool(tool, terms))
-      .filter(candidate => candidate.score > 0)
+      .filter(candidate => candidate.score >= MIN_RESOLUTION_SCORE)
       .sort((left, right) => right.score - left.score);
   }
 
@@ -116,17 +125,23 @@ export class CapabilityResolver {
      *
      * Exact capability vocabulary gets more weight than generic
      * words such as "the", "what", "can", etc.
+     *
+     * Coverage outranks bonuses: a tool matching every goal term beats
+     * one matching half the terms, no matter the bonuses. This keeps
+     * specific tools (directory sizes for "eating disk") ahead of
+     * general ones (disk usage) without any per-situation tuning.
      */
     const uniqueMatches = [...new Set(matchedTerms)];
 
-    let score = uniqueMatches.length / Math.max(terms.length, 1);
+    const coverage = uniqueMatches.length / Math.max(terms.length, 1);
+    let score = coverage;
 
     if (
       uniqueMatches.some(term =>
         this.normalize(tool.id).includes(term),
       )
     ) {
-      score += 0.35;
+      score += 0.35 * coverage;
     }
 
     if (
@@ -134,7 +149,7 @@ export class CapabilityResolver {
         this.normalize(tool.name).includes(term),
       )
     ) {
-      score += 0.2;
+      score += 0.2 * coverage;
     }
 
     if (
@@ -142,7 +157,7 @@ export class CapabilityResolver {
         this.normalize(tool.domain).includes(term),
       )
     ) {
-      score += 0.1;
+      score += 0.1 * coverage;
     }
 
     return {

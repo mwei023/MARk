@@ -101,6 +101,8 @@ export {
   systemContainerRestartImplementation,
   systemContainerListTool,
   systemContainerListImplementation,
+  fsDirectorySizesTool,
+  fsDirectorySizesImplementation,
   containerRestartFamilyImplementation,
   containerRestartTool,
   CONTAINER_RESTART_PREFIX,
