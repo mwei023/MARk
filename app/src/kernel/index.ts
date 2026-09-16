@@ -38,6 +38,7 @@ export {
   AuthorityManager,
   authorityManager,
   defaultAuthorityProfile,
+  workspaceAuthorityProfile,
 } from './authority';
 
 export type {
@@ -92,6 +93,10 @@ export {
   systemDiskUsageImplementation,
   netNetworkInterfacesTool,
   netNetworkInterfacesImplementation,
+  fsDirectoryCreateTool,
+  fsDirectoryCreateImplementation,
+  fsFileWriteTool,
+  fsFileWriteImplementation,
   nativeSystemTools,
   nativeSystemImplementations,
   nativeSystemDiscoveryProvider,
@@ -104,6 +109,10 @@ export type { OutputValidationResult } from './output-contracts';
 export { scoreCompatibility, resolveSchemaPath, listSchemaLeafPaths } from './compatibility';
 
 export type { CompatibilityScore, SchemaLeafPath } from './compatibility';
+
+export { ConfirmationManager, confirmationManager } from './confirmations';
+
+export type { ConfirmationRecord, ConfirmationStatus } from './confirmations';
 
 export {
   registerNativeSystemProvider,

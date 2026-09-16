@@ -101,6 +101,22 @@ export class MARKKernelBridge {
     return this.kernel.execute(action, context);
   }
 
+  resolveConfirmation(confirmationId: string, approved: boolean) {
+    return this.kernel.resolveConfirmation(confirmationId, approved);
+  }
+
+  listPendingConfirmations() {
+    return this.kernel.listPendingConfirmations();
+  }
+
+  async executeConfirmed(
+    action: ActionRequest,
+    context: ExecutionContext,
+    confirmationId: string,
+  ): Promise<ActionResult> {
+    return this.kernel.executeConfirmed(action, context, confirmationId);
+  }
+
   async executeTool(
     toolId: string,
     input: Record<string, unknown>,

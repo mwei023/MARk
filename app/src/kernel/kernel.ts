@@ -190,6 +190,22 @@ export class MARKKernel {
     return this.executor.execute(action, context);
   }
 
+  resolveConfirmation(confirmationId: string, approved: boolean) {
+    return this.executor.resolveConfirmation(confirmationId, approved);
+  }
+
+  listPendingConfirmations() {
+    return this.executor.listPendingConfirmations();
+  }
+
+  async executeConfirmed(
+    action: ActionRequest,
+    context: ExecutionContext,
+    confirmationId: string,
+  ): Promise<ActionResult> {
+    return this.executor.executeConfirmed(action, context, confirmationId);
+  }
+
   async executeWorkflow(
     workflow: WorkflowDefinition,
     context: ExecutionContext,

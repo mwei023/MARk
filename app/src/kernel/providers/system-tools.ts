@@ -682,14 +682,187 @@ export const netNetworkInterfacesImplementation: ToolImplementation = {
   },
 };
 
-export const nativeSystemTools: ToolDescriptor[] = [
-  systemMachineInfoTool,
+/**
+ * Resolves a caller-supplied path inside the working-directory jail.
+ * Throws when the resolved path escapes the jail.
+ */
+function resolveJailedPath(rawPath: string, workingDirectory: string | undefined): { base: string; resolved: string } {
+  if (!rawPath) throw new Error('A path is required.');
+  const base = path.resolve(workingDirectory ?? process.cwd());
+  const resolved = path.resolve(base, rawPath);
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+    throw new Error(`Refused: "${rawPath}" escapes the working directory.`);
+  }
+  return { base, resolved };
+}
+
+const FILE_WRITE_MAX_BYTES = 50 * 1024;
+const FILE_WRITE_SENSITIVE = [...SENSITIVE_PATH_PATTERNS, '.env'];
+
+export const fsDirectoryCreateTool: ToolDescriptor = {
+  id: 'fs.directory_create',
+  name: 'Directory create',
+  description:
+    'Creates a directory inside the working directory without touching anything outside it. Fails when the directory already exists.',
+  version: '1.0.0',
+  domain: 'filesystem',
+  risk: 'reversible',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Directory to create, relative to the working directory or absolute inside it.',
+      },
+    },
+    required: ['path'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      created: { type: 'boolean' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['path', 'created', 'capturedAt'],
+  },
+  capabilities: ['filesystem-writing', 'local-environment'],
+  supportedResourceKinds: ['directory'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const fsDirectoryCreateImplementation: ToolImplementation = {
+  toolId: fsDirectoryCreateTool.id,
+
+  async execute({ action, context }) {
+    const { resolved } = resolveJailedPath(String(action.input.path ?? ''), context.workingDirectory);
+    await fs.mkdir(resolved);
+    const output = { path: resolved, created: true, capturedAt: new Date().toISOString() };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'file',
+          source: 'native.system',
+          subject: resolved,
+          summary: `Created directory ${resolved} (confirmation granted).`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const fsFileWriteTool: ToolDescriptor = {
+  id: 'fs.file_write',
+  name: 'File write',
+  description:
+    'Writes text content to a file inside the working directory. Refuses credential paths and never overwrites unless explicitly allowed.',
+  version: '1.0.0',
+  domain: 'filesystem',
+  risk: 'mutating',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'File to write, relative to the working directory or absolute inside it.',
+      },
+      content: { type: 'string', description: 'Text content to write (max 50KB).' },
+      overwrite: { type: 'boolean', description: 'Allow overwriting an existing file (default false).' },
+    },
+    required: ['path', 'content'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      bytesWritten: { type: 'number' },
+      overwritten: { type: 'boolean' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['path', 'bytesWritten', 'overwritten', 'capturedAt'],
+  },
+  capabilities: ['filesystem-writing', 'local-environment'],
+  supportedResourceKinds: ['file'],
+  requiredPermissions: [],
+  reversible: false,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const fsFileWriteImplementation: ToolImplementation = {
+  toolId: fsFileWriteTool.id,
+
+  async execute({ action, context }) {
+    const rawPath = String(action.input.path ?? '');
+    const lowered = rawPath.toLowerCase();
+    if (FILE_WRITE_SENSITIVE.some(pattern => lowered.includes(pattern))) {
+      throw new Error(`Refused: "${rawPath}" looks like a credential path.`);
+    }
+    const { resolved } = resolveJailedPath(rawPath, context.workingDirectory);
+
+    const content = String(action.input.content ?? '');
+    if (Buffer.byteLength(content, 'utf8') > FILE_WRITE_MAX_BYTES) {
+      throw new Error(`Refused: content exceeds ${FILE_WRITE_MAX_BYTES} bytes.`);
+    }
+
+    let existed = false;
+    try {
+      const stats = await fs.stat(resolved);
+      existed = stats.isFile();
+    } catch {
+      existed = false;
+    }
+    if (existed && action.input.overwrite !== true) {
+      throw new Error(`Refused: "${resolved}" exists and overwrite was not allowed.`);
+    }
+
+    await fs.mkdir(path.dirname(resolved), { recursive: true });
+    await fs.writeFile(resolved, content, 'utf8');
+    const output = {
+      path: resolved,
+      bytesWritten: Buffer.byteLength(content, 'utf8'),
+      overwritten: existed,
+      capturedAt: new Date().toISOString(),
+    };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'file',
+          source: 'native.system',
+          subject: resolved,
+          summary: `Wrote ${output.bytesWritten} bytes to ${resolved} (confirmation granted).`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const nativeSystemTools: ToolDescriptor[] = [  systemMachineInfoTool,
   systemProcessSummaryTool,
   fsDirectoryListTool,
   fsFileReadTool,
   systemProcessListTool,
   systemDiskUsageTool,
   netNetworkInterfacesTool,
+  fsDirectoryCreateTool,
+  fsFileWriteTool,
 ];
 
 export const nativeSystemImplementations: ToolImplementation[] = [
@@ -700,6 +873,8 @@ export const nativeSystemImplementations: ToolImplementation[] = [
   systemProcessListImplementation,
   systemDiskUsageImplementation,
   netNetworkInterfacesImplementation,
+  fsDirectoryCreateImplementation,
+  fsFileWriteImplementation,
 ];
 
 export const nativeSystemDiscoveryProvider: DiscoveryProvider = {

@@ -175,3 +175,27 @@ export const defaultAuthorityProfile: AuthorityProfile = {
 export const authorityManager = new AuthorityManager();
 
 authorityManager.registerProfile(defaultAuthorityProfile);
+
+/**
+ * Delegated-trust profile for workspace operation.
+ *
+ * Read-only and diagnostic work stays automatic, reversible and mutating
+ * workspace writes pause for explicit confirmation, and privileged or
+ * financial actions remain denied. Nothing here weakens the default
+ * profile; callers opt in per context.
+ */
+export const workspaceAuthorityProfile: AuthorityProfile = {
+  id: 'workspace',
+  name: 'Workspace delegated trust',
+  description: 'Confirmation-gated workspace writes; destructive levels stay denied.',
+  rules: [
+    { risk: 'read', decision: 'allow' },
+    { risk: 'diagnostic', decision: 'allow' },
+    { risk: 'reversible', decision: 'require_confirmation' },
+    { risk: 'mutating', decision: 'require_confirmation' },
+    { risk: 'privileged', decision: 'deny' },
+    { risk: 'financial', decision: 'deny' },
+  ],
+};
+
+authorityManager.registerProfile(workspaceAuthorityProfile);
