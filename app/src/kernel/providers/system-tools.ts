@@ -854,7 +854,243 @@ export const fsFileWriteImplementation: ToolImplementation = {
   },
 };
 
-export const nativeSystemTools: ToolDescriptor[] = [  systemMachineInfoTool,
+export const systemContainerRestartTool: ToolDescriptor = {
+  id: 'system.container_restart',
+  name: 'Container restart',
+  description:
+    'Restarts a Docker container by name. The container must be allowlisted by policy.',
+  version: '1.0.0',
+  domain: 'containers',
+  risk: 'reversible',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      container: {
+        type: 'string',
+        description: 'Name of the container to restart.',
+      },
+    },
+    required: ['container'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      container: { type: 'string' },
+      restarted: { type: 'boolean' },
+      detail: { type: 'string' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['container', 'restarted', 'detail', 'capturedAt'],
+  },
+  capabilities: ['container-restart', 'service-management'],
+  supportedResourceKinds: ['service', 'application'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const CONTAINER_RESTART_PREFIX = 'container.restart.';
+
+/**
+ * POLICY (not a catalog): only these compose services may be restarted.
+ * Which containers exist right now is discovered live from the daemon —
+ * this list decides which of them MARK is allowed to touch.
+ */
+const CONTAINER_RESTART_ALLOWLIST = ['jarvis-db', 'jarvis-cache', 'jarvis-api'];
+
+/** One restart tool per running container, generated from live daemon data. */
+export function containerRestartTool(container: DockerContainer): ToolDescriptor {
+  const serviceSuffix = container.service ? ` (compose service ${container.service})` : '';
+  return {
+    id: `${CONTAINER_RESTART_PREFIX}${container.name}`,
+    name: `Restart ${container.name}`,
+    description: `Restart the ${container.name} container (${container.image}${serviceSuffix}).`,
+    version: '1.0.0',
+    domain: 'containers',
+    risk: 'reversible',
+    available: true,
+    inputSchema: { type: 'object', properties: {}, required: [] },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        container: { type: 'string' },
+        restarted: { type: 'boolean' },
+        detail: { type: 'string' },
+        capturedAt: { type: 'string' },
+      },
+      required: ['container', 'restarted', 'detail', 'capturedAt'],
+    },
+    capabilities: [
+      'container-restart',
+      'service-management',
+      ...(container.service ? [`service-${container.service}`] : []),
+    ],
+    supportedResourceKinds: ['service', 'application'],
+    requiredPermissions: [],
+    reversible: true,
+    metadata: { container: container.name, image: container.image, service: container.service },
+    provider: 'native.system',
+  };
+}
+
+async function restartContainer(container: string): Promise<{ restarted: boolean; detail: string }> {
+  if (!container) throw new Error('Refused: container name is required.');
+  if (!CONTAINER_RESTART_ALLOWLIST.includes(container)) {
+    throw new Error(
+      `Refused by policy: "${container}" is not restartable (allowlisted: ${CONTAINER_RESTART_ALLOWLIST.join(', ')}).`,
+    );
+  }
+  const { stdout, stderr } = await execFileAsync('docker', ['restart', container], { timeout: 30000 });
+  return { restarted: true, detail: (stdout || stderr || 'Container restart completed.').trim() };
+}
+
+function containerRestartObservation(container: string, restarted: boolean, detail: string, capturedAt: string) {
+  return {
+    id: `observation-${Date.now()}`,
+    kind: 'system' as const,
+    source: 'native.system',
+    subject: container,
+    summary: `Restarted container ${container} (confirmation granted).`,
+    data: { container, restarted, detail, capturedAt },
+    confidence: 1,
+    observedAt: capturedAt,
+    relatedResourceIds: [],
+  };
+}
+
+export const systemContainerRestartImplementation: ToolImplementation = {
+  toolId: systemContainerRestartTool.id,
+
+  async execute({ action }) {
+    const container = String(action.input.container ?? '').trim();
+    const { restarted, detail } = await restartContainer(container);
+    const capturedAt = new Date().toISOString();
+    const output = { container, restarted, detail, capturedAt };
+    return {
+      output,
+      observations: [containerRestartObservation(container, restarted, detail, capturedAt)],
+    };
+  },
+};
+
+export const containerRestartFamilyImplementation: ToolImplementation = {
+  toolId: CONTAINER_RESTART_PREFIX,
+
+  async execute({ action }) {
+    const container = String(action.toolId).slice(CONTAINER_RESTART_PREFIX.length);
+    // Re-resolve against the live daemon: never restart from a stale catalog.
+    const live = await listDockerContainers();
+    if (!live.some(entry => entry.name === container)) {
+      throw new Error(`Container "${container}" is not running (stale catalog entry; re-run discovery).`);
+    }
+    const { restarted, detail } = await restartContainer(container);
+    const capturedAt = new Date().toISOString();
+    const output = { container, restarted, detail, capturedAt };
+    return {
+      output,
+      observations: [containerRestartObservation(container, restarted, detail, capturedAt)],
+    };
+  },
+};
+
+export const systemContainerListTool: ToolDescriptor = {
+  id: 'system.container_list',
+  name: 'Container list',
+  description: 'Lists Docker containers and their status without modifying anything.',
+  version: '1.0.0',
+  domain: 'containers',
+  risk: 'read',
+  available: true,
+  inputSchema: { type: 'object', properties: {}, required: [] },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      count: { type: 'number' },
+      containers: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            status: { type: 'string' },
+            image: { type: 'string' },
+            service: { type: 'string' },
+          },
+          required: ['name', 'status', 'image'],
+        },
+      },
+      capturedAt: { type: 'string' },
+    },
+    required: ['count', 'containers', 'capturedAt'],
+  },
+  capabilities: ['container-listing', 'service-management'],
+  supportedResourceKinds: ['service', 'application'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export interface DockerContainer {
+  name: string;
+  status: string;
+  image: string;
+  service?: string;
+}
+
+/** Live container inventory. Throws when the Docker daemon is unreachable. */
+export async function listDockerContainers(): Promise<DockerContainer[]> {
+  // Fixed arguments only: no shell, no caller-controlled command string.
+  const { stdout } = await execFileAsync(
+    'docker',
+    ['ps', '--format', '{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Label "com.docker.compose.service"}}'],
+    { timeout: 15000 },
+  );
+  return stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [name, status, image, service] = line.split('\t');
+      return {
+        name: name ?? '',
+        status: status ?? '',
+        image: image ?? '',
+        service: service?.trim() ? service.trim() : undefined,
+      };
+    })
+    .filter(entry => entry.name);
+}
+
+export const systemContainerListImplementation: ToolImplementation = {
+  toolId: systemContainerListTool.id,
+
+  async execute() {
+    const containers = await listDockerContainers();
+    const output = { count: containers.length, containers, capturedAt: new Date().toISOString() };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'system',
+          source: 'native.system',
+          subject: 'local-containers',
+          summary: `Listed ${containers.length} containers.`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const nativeSystemTools: ToolDescriptor[] = [
+  systemMachineInfoTool,
   systemProcessSummaryTool,
   fsDirectoryListTool,
   fsFileReadTool,
@@ -863,6 +1099,8 @@ export const nativeSystemTools: ToolDescriptor[] = [  systemMachineInfoTool,
   netNetworkInterfacesTool,
   fsDirectoryCreateTool,
   fsFileWriteTool,
+  systemContainerRestartTool,
+  systemContainerListTool,
 ];
 
 export const nativeSystemImplementations: ToolImplementation[] = [
@@ -875,6 +1113,8 @@ export const nativeSystemImplementations: ToolImplementation[] = [
   netNetworkInterfacesImplementation,
   fsDirectoryCreateImplementation,
   fsFileWriteImplementation,
+  systemContainerRestartImplementation,
+  systemContainerListImplementation,
 ];
 
 export const nativeSystemDiscoveryProvider: DiscoveryProvider = {
@@ -907,6 +1147,12 @@ export const nativeSystemDiscoveryProvider: DiscoveryProvider = {
   },
 
   async discoverTools(): Promise<ToolDescriptor[]> {
-    return nativeSystemTools;
+    let perContainer: ToolDescriptor[] = [];
+    try {
+      perContainer = (await listDockerContainers()).map(containerRestartTool);
+    } catch {
+      perContainer = []; // daemon unreachable: static tools only
+    }
+    return [...nativeSystemTools, ...perContainer];
   },
 };

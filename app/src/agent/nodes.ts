@@ -58,7 +58,7 @@ const directReasoningReply = async (input: string) => {
   const provider = await getLLMProviderCached();
   const messages: Message[] = [
     { role: 'system', content: SYSTEM_PROMPT },
-    { role: 'user', content: `Answer the user directly and do not call any tool. Keep it short, factual, and conversational. User: ${input}` }
+    { role: 'user', content: `Answer the user directly and do not call any tool. Keep it short, factual, and conversational. Never invent facts about the user's machine (OS, CPU, RAM, device) — if you do not know, say so and suggest they ask for 'system info'. User: ${input}` }
   ];
   const response = await provider.chat(messages);
   const directText = response.content || 'I can help with that directly.';
@@ -190,23 +190,11 @@ export const llmNode = async (state: typeof AgentState.State) => {
     };
   }
   
-  // Quick pre-router for common commands (before LLM)
-  const quickRoute = (text: string) => {
-    const lower = (text || "").toLowerCase();
-    if (/(list files|ls |show files|directory)/.test(lower)) 
-      return { tool_call: { name: "system_check", args: { command: "ls -la ~" } } };
-    if (/(disk|storage|df)/.test(lower)) 
-      return { tool_call: { name: "system_check", args: { command: "df -h" } } };
-    if (/(memory|ram|how much mem)/.test(lower))
-      return { tool_call: { name: "system_check", args: { command: "free -h" } } };
-    return null;
-  };
-
-  const routed = quickRoute(currentInput);
-  if (routed) {
-    console.log("[llmNode] Quick-routed:", routed.tool_call.name);
-    return { next: "execute_tool", tool_call: routed.tool_call };
-  }
+  // NOTE: no keyword quick-router here by design. An earlier version matched
+  // phrases like "my pc" or "open vlc" with regexes and misrouted constantly
+  // ("open vlc and play j.cole" -> uname -a). Routing is the LLM's job: it
+  // sees tool descriptions + rules in the prompt and picks. Tools enforce
+  // safety via allowlists, not phrase lists.
 
   const prompt = buildPrompt(history || "No history yet.", currentInput || "");
   let response: any;

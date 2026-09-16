@@ -10,7 +10,9 @@
     "typecheck:mark": "tsc --noEmit -p tsconfig.mark.json",
     "test": "ts-node --transpile-only src/core/mark-runtime.test.ts",
     "test:mark": "ts-node --transpile-only src/core/mark-runtime.test.ts",
-    "test:llm": "ts-node --transpile-only src/llm/llm.test.ts"
+    "test:llm": "ts-node --transpile-only src/llm/llm.test.ts",
+    "test:like-me": "ts-node --transpile-only src/core/like-me-loop.test.ts",
+    "chat": "ts-node --transpile-only src/repl.ts"
   },
   "keywords": [],
   "author": "",

@@ -18,7 +18,7 @@ export { embeddings } from './embeddings';
 
 // System prompt for reasoning
 export const SYSTEM_PROMPT = `
-You are Jarvis, a private voice assistant with access to the user's personal knowledge base.
+You are MARK, Mwei's local operations assistant with real tools: system checks (disk, memory, cpu, files, machine info), desktop app launching (vlc, mpv, browser, libreoffice), memory notes, and market data.
 
 🔍 TOOL USAGE RULES:
 1. ALWAYS call "rag_query" when the user asks about:
@@ -33,6 +33,8 @@ You are Jarvis, a private voice assistant with access to the user's personal kno
    - rag_query returns no results (then say: "I don't have notes on that yet")
 
 3. If unsure, CALL rag_query first — it's better to check than to guess.
+
+4. NEVER claim you lack an ability you have tools for. If a tool call fails, report the specific error and suggest an alternative. Never invent machine facts (OS, CPU, RAM) — check first or say you don't know.
 
 🗣️ RESPONSE STYLE:
 - Keep answers concise, friendly, and conversational

@@ -55,6 +55,16 @@ export class KernelExecutor {
     string,
     ToolImplementation
   >();
+  /**
+   * Family implementations for descriptor-per-instance tools (e.g.
+   * `desktop.open.<app>`). The descriptor catalog is discovered data that
+   * can go stale; the family implementation re-resolves the instance at
+   * execution time and fails loudly when it is gone.
+   */
+  private readonly familyImplementations: Array<{
+    prefix: string;
+    implementation: ToolImplementation;
+  }> = [];
   private readonly confirmations: ConfirmationManager;
 
   constructor(
@@ -75,7 +85,34 @@ export class KernelExecutor {
   }
 
   hasImplementation(toolId: string): boolean {
-    return this.implementations.has(toolId);
+    return (
+      this.implementations.has(toolId) ||
+      this.familyImplementations.some(({ prefix }) => toolId.startsWith(prefix))
+    );
+  }
+
+  /**
+   * Registers one implementation for a whole family of discovered tool IDs.
+   * The implementation derives the instance (app, container, ...) from the
+   * action's tool ID and must re-resolve it live — never trust that the
+   * discovered catalog is still current.
+   */
+  registerFamilyImplementation(prefix: string, implementation: ToolImplementation): void {
+    this.familyImplementations.push({ prefix, implementation });
+  }
+
+  private findImplementation(toolId: string): ToolImplementation | undefined {
+    const exact = this.implementations.get(toolId);
+    if (exact) return exact;
+    let best: ToolImplementation | undefined;
+    let bestLength = -1;
+    for (const { prefix, implementation } of this.familyImplementations) {
+      if (toolId.startsWith(prefix) && prefix.length > bestLength) {
+        best = implementation;
+        bestLength = prefix.length;
+      }
+    }
+    return best;
   }
 
   async execute(
@@ -134,7 +171,7 @@ export class KernelExecutor {
       );
     }
 
-    const implementation = this.implementations.get(action.toolId);
+    const implementation = this.findImplementation(action.toolId);
 
     if (!implementation) {
       return this.finishFailure(
@@ -228,7 +265,7 @@ export class KernelExecutor {
       );
     }
 
-    const implementation = this.implementations.get(action.toolId);
+    const implementation = this.findImplementation(action.toolId);
     if (!implementation) {
       return this.finishFailure(
         action,

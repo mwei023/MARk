@@ -97,10 +97,44 @@ export {
   fsDirectoryCreateImplementation,
   fsFileWriteTool,
   fsFileWriteImplementation,
+  systemContainerRestartTool,
+  systemContainerRestartImplementation,
+  systemContainerListTool,
+  systemContainerListImplementation,
+  containerRestartFamilyImplementation,
+  containerRestartTool,
+  CONTAINER_RESTART_PREFIX,
+  listDockerContainers,
   nativeSystemTools,
   nativeSystemImplementations,
   nativeSystemDiscoveryProvider,
 } from './providers/system-tools';
+
+export {
+  scanDesktopEntries,
+  desktopOpenTool,
+  desktopCloseTool,
+  desktopListAppsTool,
+  desktopListAppsImplementation,
+  desktopOpenFamilyImplementation,
+  desktopCloseFamilyImplementation,
+  desktopDiscoveryProvider,
+  DESKTOP_OPEN_PREFIX,
+  DESKTOP_CLOSE_PREFIX,
+} from './providers/desktop';
+
+export type { DesktopEntry } from './providers/desktop';
+
+export {
+  findTracks,
+  mediaFindTracksTool,
+  mediaFindTracksImplementation,
+  mediaExtractTrackTool,
+  mediaExtractTrackImplementation,
+  mediaNativeTools,
+  mediaNativeImplementations,
+  mediaDiscoveryProvider,
+} from './providers/media';
 
 export { validateOutput } from './output-contracts';
 
