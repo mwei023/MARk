@@ -51,6 +51,13 @@ import {
 } from './task-binder';
 
 import {
+  LearnedWorkflow,
+  ReusedPlan,
+  WorkflowMemory,
+  workflowMemory,
+} from './workflow-memory';
+
+import {
   GoalExecutionOptions,
   GoalExecutionResult,
   GoalExecutor,
@@ -92,6 +99,7 @@ export class MARKKernel {
   readonly taskBinder: TaskBinder;
   readonly planner: KernelPlanner;
   readonly goalExecutor: GoalExecutor;
+  readonly workflowMemory: WorkflowMemory;
 
   constructor(
     dependencies: KernelDependencies = {},
@@ -144,6 +152,8 @@ export class MARKKernel {
       validatePlan: plan =>
         this.planner.validate(plan, this.toolRegistry),
     });
+
+    this.workflowMemory = workflowMemory;
   }
 
   registerTool(tool: ToolDescriptor): void {
@@ -251,6 +261,22 @@ export class MARKKernel {
     plan: ExecutionPlan,
   ): PlanValidationResult {
     return this.planner.validate(plan, this.toolRegistry);
+  }
+
+  saveWorkflow(plan: ExecutionPlan): LearnedWorkflow {
+    return this.workflowMemory.save(plan);
+  }
+
+  recallWorkflows(goal: string, limit?: number): LearnedWorkflow[] {
+    return this.workflowMemory.recall(goal, limit);
+  }
+
+  reuseWorkflow(goal: string): ReusedPlan | undefined {
+    return this.workflowMemory.reuse(goal);
+  }
+
+  recordWorkflowOutcome(workflowId: string, succeeded: boolean): void {
+    this.workflowMemory.recordOutcome(workflowId, succeeded);
   }
 
   async executePlan(

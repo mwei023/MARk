@@ -161,6 +161,22 @@ export class MARKKernelBridge {
     return this.kernel.validatePlan(plan);
   }
 
+  saveWorkflow(plan: ExecutionPlan) {
+    return this.kernel.saveWorkflow(plan);
+  }
+
+  recallWorkflows(goal: string, limit?: number) {
+    return this.kernel.recallWorkflows(goal, limit);
+  }
+
+  reuseWorkflow(goal: string) {
+    return this.kernel.reuseWorkflow(goal);
+  }
+
+  recordWorkflowOutcome(workflowId: string, succeeded: boolean) {
+    return this.kernel.recordWorkflowOutcome(workflowId, succeeded);
+  }
+
   async executePlan(
     plan: ExecutionPlan,
     contextInput: Parameters<MARKKernel['createContext']>[0],
