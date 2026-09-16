@@ -31,8 +31,11 @@ const printHelp = () => {
     '  /plan <goal>        preview a like-me plan (never executes mutating steps)',
     '  /build <goal>       execute a like-me plan (confirmation-gated)',
     '  /pending            list pending kernel confirmations',
-    '  /approve <id>       approve a confirmation',
-    '  /deny <id>          deny a confirmation',
+    '  /approve <id>       approve (id, action id, prefix, or app words)',
+    '  /deny <id>          deny (same matching)',
+    '  /trust <tool...>    always approve a tool (exact id or id prefix)',
+    '  /untrust <tool...>  remove standing trust',
+    '  /trustlist          show standing trust grants',
     '  /trace on|off       show what MARK did per command (default on)',
     '  /help               this help',
     "  quit | exit         leave ('Ciao, Mwei.')",
@@ -109,11 +112,43 @@ const repl = async () => {
       } else if (input === '/pending') {
         const pending = likeMeLoop.listPending();
         output = pending.length === 0 ? '(no pending confirmations)' : pending.map(p => `${p.id} tool=${p.toolId} input=${JSON.stringify(p.input)} reason=${p.reason}`).join('\n');
+      } else if (input === '/approve' || input === '/deny') {
+        const pending = likeMeLoop.listPending();
+        output = pending.length === 0
+          ? 'Nothing pending. (Approvals do not survive restarts — if you pasted an id from an earlier session, ask again and approve fresh.)'
+          : `Pending:\n${pending.map(p => `  ${p.id} tool=${p.toolId}`).join('\n')}\nSay /approve <id or app words>.`;
       } else if (input.startsWith('/approve ') || input.startsWith('/deny ')) {
         const approved = input.startsWith('/approve ');
-        const id = input.split(/\s+/)[1];
-        const record = likeMeLoop.approve(id, approved);
-        output = record ? `${record.id} -> ${record.status}` : 'confirmation not found or already decided';
+        const text = input.replace(/^\/(approve|deny)\s+/, '').trim();
+        const verdict = likeMeLoop.resolveApproval(text);
+        if (verdict.kind === 'record') {
+          const record = likeMeLoop.approve(verdict.record.id, approved);
+          output = record
+            ? `${approved ? 'approved' : 'denied'} ${record.toolId} (${record.id})`
+            : 'confirmation not found or already decided';
+        } else if (verdict.kind === 'ambiguous') {
+          output = `Several match "${text}":\n${verdict.candidates.map(c => `  ${c.id} tool=${c.toolId}`).join('\n')}\nBe more specific.`;
+        } else {
+          output = verdict.pending.length === 0
+            ? 'Nothing pending. (Approvals do not survive restarts — if you pasted an id from an earlier session, ask again and approve fresh.)'
+            : `No match for "${text}". Pending:\n${verdict.pending.map(p => `  ${p.id} tool=${p.toolId}`).join('\n')}`;
+        }
+      } else if (input === '/trustlist') {
+        const grants = likeMeLoop.listTrusted();
+        output = grants.length === 0
+          ? '(no standing trust — every gated tool asks each time)'
+          : grants.map(g => `  ${g.pattern} (since ${g.grantedAt})`).join('\n');
+      } else if (input.startsWith('/trust ') || input.startsWith('/untrust ')) {
+        const untrusting = input.startsWith('/untrust ');
+        const pattern = input.replace(/^\/(un)?trust\s+/, '').trim();
+        if (!pattern) {
+          output = untrusting ? 'Usage: /untrust <tool id or prefix>' : 'Usage: /trust <tool id or prefix> (e.g. /trust desktop.open.vlc)';
+        } else if (untrusting) {
+          output = likeMeLoop.untrust(pattern) ? `untrusted ${pattern}` : `no trust grant for ${pattern}`;
+        } else {
+          likeMeLoop.trust(pattern);
+          output = `trusted ${pattern} — matching tools auto-approve from now on (persists across restarts; denied risks stay denied).`;
+        }
       } else if (input.startsWith('/trace')) {
         const arg = input.split(/\s+/)[1];
         if (arg === 'off') showTrace = false;

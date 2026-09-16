@@ -58,6 +58,10 @@ import {
 } from './workflow-memory';
 
 import {
+  TrustStore,
+} from './trust';
+
+import {
   GoalExecutionOptions,
   GoalExecutionResult,
   GoalExecutor,
@@ -81,6 +85,7 @@ export interface KernelDependencies {
   toolDiscovery?: ToolDiscovery;
   authorityManager?: AuthorityManager;
   observationStore?: ObservationStore;
+  trustStore?: TrustStore;
 }
 
 export interface KernelDiscoverySummary {
@@ -120,6 +125,7 @@ export class MARKKernel {
       toolRegistry: this.toolRegistry,
       authorityManager: this.authorityManager,
       observationStore: this.observationStore,
+      ...(dependencies.trustStore ? { trustStore: dependencies.trustStore } : {}),
     });
 
     this.workflows = new WorkflowEngine(this.executor);
@@ -202,6 +208,26 @@ export class MARKKernel {
 
   resolveConfirmation(confirmationId: string, approved: boolean) {
     return this.executor.resolveConfirmation(confirmationId, approved);
+  }
+
+  findConfirmation(reference: string) {
+    return this.executor.findConfirmation(reference);
+  }
+
+  searchPendingConfirmations(text: string) {
+    return this.executor.searchPendingConfirmations(text);
+  }
+
+  trustTool(pattern: string, grantedBy = 'user') {
+    return this.executor.trustTool(pattern, grantedBy);
+  }
+
+  untrustTool(pattern: string) {
+    return this.executor.untrustTool(pattern);
+  }
+
+  listTrustedTools() {
+    return this.executor.listTrustedTools();
   }
 
   listPendingConfirmations() {

@@ -6,6 +6,8 @@ export type ConfirmationStatus = 'pending' | 'approved' | 'denied';
 export interface ConfirmationRecord {
   id: KernelId;
   toolId: KernelId;
+  /** The blocked action this confirmation gates (stable across sessions in logs). */
+  actionId: KernelId;
   input: Record<string, unknown>;
   requestedBy: string;
   reason: string;
@@ -29,6 +31,7 @@ export class ConfirmationManager {
     const record: ConfirmationRecord = {
       id: createKernelId('confirm'),
       toolId: action.toolId,
+      actionId: action.id,
       input: { ...action.input },
       requestedBy: action.requestedBy,
       reason,
@@ -61,6 +64,30 @@ export class ConfirmationManager {
 
   listPending(): ConfirmationRecord[] {
     return Array.from(this.records.values()).filter(r => r.status === 'pending');
+  }
+
+  /** Finds a confirmation by the blocked action id (users paste those). */
+  findByAction(actionId: string): ConfirmationRecord | undefined {
+    const needle = actionId.trim().toLowerCase();
+    if (!needle) return undefined;
+    for (const record of this.records.values()) {
+      if (record.actionId.toLowerCase() === needle || record.id.toLowerCase() === needle) {
+        return record;
+      }
+    }
+    // Forgiving prefix match: "confirm_mu4n" is enough when unambiguous.
+    const prefixed = Array.from(this.records.values()).filter(
+      record =>
+        record.id.toLowerCase().startsWith(needle) || record.actionId.toLowerCase().startsWith(needle),
+    );
+    return prefixed.length === 1 ? prefixed[0] : undefined;
+  }
+
+  /** Pending confirmations whose tool id or name contains the given text. */
+  searchPending(text: string): ConfirmationRecord[] {
+    const needle = text.toLowerCase().trim();
+    if (!needle) return [];
+    return this.listPending().filter(record => record.toolId.toLowerCase().includes(needle));
   }
 }
 

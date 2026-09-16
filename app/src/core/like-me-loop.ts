@@ -257,6 +257,45 @@ export class LikeMeLoop {
     return this.confirmations.resolve(confirmationId as never, approved);
   }
 
+  trust(pattern: string) {
+    return this.bridge.trustTool(pattern, 'mwei');
+  }
+
+  untrust(pattern: string) {
+    return this.bridge.untrustTool(pattern);
+  }
+
+  listTrusted() {
+    return this.bridge.listTrustedTools();
+  }
+
+  /**
+   * Forgiving approval lookup: exact confirmation id, blocked action id,
+   * id prefix, tool-name substring, or — when exactly one confirmation is
+   * pending — that one. Users paste whatever the transcript showed them.
+   */
+  resolveApproval(text: string):
+    | { kind: 'record'; record: NonNullable<ReturnType<ConfirmationManager['get']>> }
+    | { kind: 'ambiguous'; candidates: ReturnType<ConfirmationManager['listPending']> }
+    | { kind: 'none'; pending: ReturnType<ConfirmationManager['listPending']> } {
+    const pending = this.confirmations.listPending();
+    const needle = (text ?? '').trim();
+    if (!needle) return { kind: 'none', pending };
+
+    const exact = this.confirmations.get(needle as never);
+    if (exact) return { kind: 'record', record: exact };
+
+    const byAction = this.confirmations.findByAction(needle);
+    if (byAction) return { kind: 'record', record: byAction };
+
+    const searched = this.confirmations.searchPending(needle);
+    if (searched.length === 1) return { kind: 'record', record: searched[0] };
+    if (searched.length > 1) return { kind: 'ambiguous', candidates: searched };
+
+    if (pending.length === 1) return { kind: 'record', record: pending[0] };
+    return { kind: 'none', pending };
+  }
+
   recentHistory() {
     return [...this.history];
   }

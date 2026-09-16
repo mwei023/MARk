@@ -995,8 +995,24 @@ export const containerRestartFamilyImplementation: ToolImplementation = {
   },
 };
 
-export const fsDirectorySizesTool: ToolDescriptor = {
-  id: 'fs.directory_sizes',
+/** Measures paths with du. Fixed flags only; paths are operands, never a command string. */
+async function duSizes(targets: string[]): Promise<Array<{ path: string; sizeKB: number }>> {
+  const { stdout } = await execFileAsync('du', ['-sk', '-x', '--', ...targets], { timeout: 60000 });
+  return stdout
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const tab = line.indexOf('\t');
+      return {
+        path: tab >= 0 ? line.slice(tab + 1) : line,
+        sizeKB: Number(tab >= 0 ? line.slice(0, tab).trim() : NaN),
+      };
+    })
+    .filter(entry => entry.path && Number.isFinite(entry.sizeKB));
+}
+
+export const fsDirectorySizesTool: ToolDescriptor = {  id: 'fs.directory_sizes',
   name: 'Directory sizes',
   description:
     'Reports the largest immediate subdirectories of a directory to find what is eating disk space.',
@@ -1063,19 +1079,21 @@ export const fsDirectorySizesImplementation: ToolImplementation = {
     const resolved = path.resolve(rawPath);
 
     const names = (await fs.readdir(resolved)).slice(0, 200);
-    // One du per child: virtual filesystems (/proc, /sys) make a single
-    // combined du exit non-zero, so per-child failures are skipped, not fatal.
-    const measured: Array<{ path: string; sizeKB: number }> = [];
-    for (const name of names) {
-      const target = path.join(resolved, name);
-      try {
-        // Fixed flags only; measured paths are operands, never a command string.
-        const { stdout } = await execFileAsync('du', ['-sk', '-x', '--', target], { timeout: 60000 });
-        const tab = stdout.indexOf('\t');
-        const sizeKB = Number(tab >= 0 ? stdout.slice(0, tab).trim() : NaN);
-        if (Number.isFinite(sizeKB)) measured.push({ path: target, sizeKB });
-      } catch {
-        continue;
+    const targets = names.map(name => path.join(resolved, name));
+    // One combined du is fast (a 99%-full disk took 41s as 20 spawns);
+    // virtual filesystems (/proc, /sys) make combined du exit non-zero, so
+    // per-child failures are skipped individually on fallback, not fatal.
+    let measured: Array<{ path: string; sizeKB: number }>;
+    try {
+      measured = await duSizes(targets);
+    } catch {
+      measured = [];
+      for (const target of targets) {
+        try {
+          measured.push(...(await duSizes([target])));
+        } catch {
+          continue;
+        }
       }
     }
     const entries = measured.sort((a, b) => b.sizeKB - a.sizeKB);

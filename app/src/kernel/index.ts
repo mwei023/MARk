@@ -150,6 +150,10 @@ export { ConfirmationManager, confirmationManager } from './confirmations';
 
 export type { ConfirmationRecord, ConfirmationStatus } from './confirmations';
 
+export { TrustStore, trustStore } from './trust';
+
+export type { TrustGrant } from './trust';
+
 export { WorkflowMemory, workflowMemory } from './workflow-memory';
 
 export type { LearnedWorkflow, ReusedPlan } from './workflow-memory';

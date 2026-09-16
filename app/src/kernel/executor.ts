@@ -26,6 +26,11 @@ import {
   ConfirmationRecord,
 } from './confirmations';
 
+import {
+  TrustStore,
+  trustStore,
+} from './trust';
+
 export interface ToolExecutionInput {
   action: ActionRequest;
   tool: ToolDescriptor;
@@ -48,6 +53,7 @@ export interface ExecutorDependencies {
   authorityManager: AuthorityManager;
   observationStore: ObservationStore;
   confirmationManager?: ConfirmationManager;
+  trustStore?: TrustStore;
 }
 
 export class KernelExecutor {
@@ -66,11 +72,13 @@ export class KernelExecutor {
     implementation: ToolImplementation;
   }> = [];
   private readonly confirmations: ConfirmationManager;
+  private readonly trust: TrustStore;
 
   constructor(
     private readonly dependencies: ExecutorDependencies,
   ) {
     this.confirmations = dependencies.confirmationManager ?? confirmationManager;
+    this.trust = dependencies.trustStore ?? trustStore;
   }
 
   registerImplementation(implementation: ToolImplementation): void {
@@ -150,6 +158,23 @@ export class KernelExecutor {
 
     if (authority.decision !== 'allow') {
       if (authority.decision === 'require_confirmation') {
+        // Persistent trust auto-approves here — deny levels below never do.
+        const grant = this.trust.isTrusted(tool.id);
+        if (grant) {
+          const implementation = this.findImplementation(action.toolId);
+          if (!implementation) {
+            return this.finishFailure(
+              action,
+              `No implementation is registered for tool "${action.toolId}".`,
+              startedAt,
+              startedTime,
+            );
+          }
+          return this.runImplementation(action, tool, implementation, context, startedAt, startedTime, {
+            trusted: true,
+            trustPattern: grant.pattern,
+          });
+        }
         const record = this.confirmations.request(
           action,
           `Tool "${tool.id}" (${tool.risk} risk) requires explicit confirmation: ${authority.reason}`,
@@ -182,59 +207,7 @@ export class KernelExecutor {
       );
     }
 
-    try {
-      const execution = await implementation.execute({
-        action,
-        tool,
-        context,
-      });
-
-      if (tool.outputSchema) {
-        const contract = validateOutput(execution.output, tool.outputSchema);
-        if (!contract.valid) {
-          return this.finishFailure(
-            action,
-            `Tool "${tool.id}" output failed contract validation: ${contract.errors.join(' ')}`,
-            startedAt,
-            startedTime,
-          );
-        }
-      }
-
-      const result: ActionResult = {
-        actionId: action.id,
-        status: 'succeeded',
-        output: execution.output,
-        observations: execution.observations ?? [],
-        startedAt,
-        completedAt: new Date().toISOString(),
-        durationMs: Date.now() - startedTime,
-        metadata: execution.metadata,
-      };
-
-      for (const observation of result.observations) {
-        this.dependencies.observationStore.record({
-          kind: observation.kind,
-          source: observation.source,
-          subject: observation.subject,
-          summary: observation.summary,
-          data: observation.data,
-          confidence: observation.confidence,
-          relatedActionId: observation.relatedActionId ?? action.id,
-          relatedResourceIds: observation.relatedResourceIds,
-          metadata: observation.metadata,
-        });
-      }
-
-      return result;
-    } catch (error) {
-      return this.finishFailure(
-        action,
-        this.describeError(error),
-        startedAt,
-        startedTime,
-      );
-    }
+    return this.runImplementation(action, tool, implementation, context, startedAt, startedTime);
   }
 
   /**
@@ -275,6 +248,25 @@ export class KernelExecutor {
       );
     }
 
+    return this.runImplementation(action, tool, implementation, context, startedAt, startedTime, {
+      confirmationId,
+    });
+  }
+
+  /**
+   * Shared implementation runner: executes, validates the output contract,
+   * and records observations. Trusted auto-approvals are announced in the
+   * observation stream so they stay auditable.
+   */
+  private async runImplementation(
+    action: ActionRequest,
+    tool: ToolDescriptor,
+    implementation: ToolImplementation,
+    context: ExecutionContext,
+    startedAt: string,
+    startedTime: number,
+    metadataExtra?: { confirmationId?: string; trusted?: boolean; trustPattern?: string },
+  ): Promise<ActionResult> {
     try {
       const execution = await implementation.execute({ action, tool, context });
 
@@ -290,15 +282,31 @@ export class KernelExecutor {
         }
       }
 
+      const observations = [...(execution.observations ?? [])];
+      if (metadataExtra?.trusted) {
+        observations.push({
+          id: `observation-${Date.now()}`,
+          kind: 'output',
+          source: 'kernel.authority',
+          subject: tool.id,
+          summary: `Auto-approved by standing trust ("${metadataExtra.trustPattern}"); no confirmation was requested.`,
+          data: { trustPattern: metadataExtra.trustPattern },
+          confidence: 1,
+          observedAt: new Date().toISOString(),
+          relatedActionId: action.id,
+          relatedResourceIds: [],
+        });
+      }
+
       const result: ActionResult = {
         actionId: action.id,
         status: 'succeeded',
         output: execution.output,
-        observations: execution.observations ?? [],
+        observations,
         startedAt,
         completedAt: new Date().toISOString(),
         durationMs: Date.now() - startedTime,
-        metadata: { confirmationId },
+        metadata: { ...(execution.metadata ?? {}), ...(metadataExtra ?? {}) },
       };
 
       for (const observation of result.observations) {
@@ -323,6 +331,26 @@ export class KernelExecutor {
 
   resolveConfirmation(confirmationId: string, approved: boolean): ConfirmationRecord | undefined {
     return this.confirmations.resolve(confirmationId, approved);
+  }
+
+  findConfirmation(reference: string): ConfirmationRecord | undefined {
+    return this.confirmations.findByAction(reference);
+  }
+
+  searchPendingConfirmations(text: string): ConfirmationRecord[] {
+    return this.confirmations.searchPending(text);
+  }
+
+  trustTool(pattern: string, grantedBy = 'user') {
+    return this.trust.trust(pattern, grantedBy);
+  }
+
+  untrustTool(pattern: string): boolean {
+    return this.trust.untrust(pattern);
+  }
+
+  listTrustedTools() {
+    return this.trust.list();
   }
 
   listPendingConfirmations(): ConfirmationRecord[] {

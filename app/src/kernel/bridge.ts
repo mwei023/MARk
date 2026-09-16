@@ -105,6 +105,26 @@ export class MARKKernelBridge {
     return this.kernel.resolveConfirmation(confirmationId, approved);
   }
 
+  findConfirmation(reference: string) {
+    return this.kernel.findConfirmation(reference);
+  }
+
+  searchPendingConfirmations(text: string) {
+    return this.kernel.searchPendingConfirmations(text);
+  }
+
+  trustTool(pattern: string, grantedBy = 'user') {
+    return this.kernel.trustTool(pattern, grantedBy);
+  }
+
+  untrustTool(pattern: string) {
+    return this.kernel.untrustTool(pattern);
+  }
+
+  listTrustedTools() {
+    return this.kernel.listTrustedTools();
+  }
+
   listPendingConfirmations() {
     return this.kernel.listPendingConfirmations();
   }
