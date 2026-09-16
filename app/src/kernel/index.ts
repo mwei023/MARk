@@ -80,10 +80,18 @@ export type {
 export {
   systemMachineInfoTool,
   systemMachineInfoImplementation,
+  systemProcessSummaryTool,
+  systemProcessSummaryImplementation,
+  fsDirectoryListTool,
+  fsDirectoryListImplementation,
   nativeSystemTools,
   nativeSystemImplementations,
   nativeSystemDiscoveryProvider,
 } from './providers/system-tools';
+
+export { validateOutput } from './output-contracts';
+
+export type { OutputValidationResult } from './output-contracts';
 
 export {
   registerNativeSystemProvider,

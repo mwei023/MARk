@@ -91,7 +91,7 @@ export interface ResourceDescriptor {
 export interface ToolParameterSchema {
   type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'unknown';
   description?: string;
-  required?: boolean;
+  required?: boolean | string[];
   enum?: string[];
   properties?: Record<string, ToolParameterSchema>;
   items?: ToolParameterSchema;
@@ -111,6 +111,7 @@ export interface ToolDescriptor {
   version?: string;
   provider: string;
   inputSchema: ToolInputSchema;
+  outputSchema?: ToolInputSchema;
   risk: ToolRisk;
   requiredPermissions: string[];
   supportedResourceKinds: ResourceKind[];

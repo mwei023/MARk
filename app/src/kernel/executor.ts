@@ -18,6 +18,8 @@ import {
   observationFromActionResult,
 } from './observations';
 
+import { validateOutput } from './output-contracts';
+
 export interface ToolExecutionInput {
   action: ActionRequest;
   tool: ToolDescriptor;
@@ -128,6 +130,18 @@ export class KernelExecutor {
         tool,
         context,
       });
+
+      if (tool.outputSchema) {
+        const contract = validateOutput(execution.output, tool.outputSchema);
+        if (!contract.valid) {
+          return this.finishFailure(
+            action,
+            `Tool "${tool.id}" output failed contract validation: ${contract.errors.join(' ')}`,
+            startedAt,
+            startedTime,
+          );
+        }
+      }
 
       const result: ActionResult = {
         actionId: action.id,
