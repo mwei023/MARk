@@ -54,6 +54,16 @@ async function main(): Promise<void> {
   const unknown = await runtime.executeCommand('help me understand neural networks', 'test-user', 'cli');
   assert.equal(unknown.route, 'reasoning');
 
+  // 6. Experience loop: a repeated read-only success reuses memory.
+  const firstList = await runtime.executeCommand('list desktop apps', 'test-user', 'cli');
+  assert.equal(firstList.route, 'kernel');
+  const secondList = await runtime.executeCommand('list desktop apps', 'test-user', 'cli');
+  assert.equal(secondList.route, 'kernel');
+  assert.ok(
+    secondList.trace?.some(line => line.includes('reused workflow')),
+    `second run should reuse memory, trace was: ${(secondList.trace ?? []).join(' | ')}`,
+  );
+
   console.log('PASS: kernel-first commands (act honestly, chat only unknowns)');
 }
 

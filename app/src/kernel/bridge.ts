@@ -185,8 +185,8 @@ export class MARKKernelBridge {
     return this.kernel.saveWorkflow(plan);
   }
 
-  recallWorkflows(goal: string, limit?: number) {
-    return this.kernel.recallWorkflows(goal, limit);
+  recallWorkflows(goal: string, limit?: number, minScore?: number) {
+    return this.kernel.recallWorkflows(goal, limit, minScore);
   }
 
   reuseWorkflow(goal: string) {

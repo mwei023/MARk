@@ -185,14 +185,45 @@ export class MarkRuntime {
     userId: string,
     source: 'api' | 'voice' | 'cli',
   ): Promise<{ response: string; route: 'kernel'; trace: string[] } | undefined> {
-    let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
     try {
       await this.kernelBridge.initialize();
-      outcome = await this.kernelBridge.executeGoal(command, {
-        userId,
-        source,
-        authorityProfile: source === 'cli' ? 'workspace' : 'default',
-      });
+    } catch {
+      return undefined;
+    }
+    const contextInput = {
+      userId,
+      source,
+      authorityProfile: source === 'cli' ? 'workspace' : 'default',
+    } as const;
+
+    // Experience before reasoning: a saved workflow with strong goal overlap
+    // runs as-is. Outcomes are recorded so memory learns what keeps working.
+    try {
+      const reused = this.kernelBridge.reuseWorkflow(command);
+      if (reused) {
+        const report = await this.kernelBridge.executePlanWithReport(reused.plan, { ...contextInput });
+        const succeeded = report.status === 'succeeded';
+        this.kernelBridge.recordWorkflowOutcome(reused.workflowId, succeeded);
+        const stepSummary = report.steps.map(step => `${step.stepId.slice(0, 18)}…:${step.status}`).join(', ');
+        return {
+          response: succeeded
+            ? `⚙️ Reused a known procedure (${report.steps.length} steps, all succeeded).`
+            : `Reused procedure ${reused.workflowId} ended ${report.status}: ${stepSummary}`,
+          route: 'kernel',
+          trace: [
+            `memory → reused workflow ${reused.workflowId}`,
+            `memory → execution ${report.status}: ${stepSummary}`,
+            `memory → outcome recorded (${succeeded ? 'success' : 'not a success'})`,
+          ],
+        };
+      }
+    } catch {
+      // Memory must never break fresh planning.
+    }
+
+    let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
+    try {
+      outcome = await this.kernelBridge.executeGoal(command, contextInput);
     } catch {
       return undefined;
     }
@@ -206,6 +237,7 @@ export class MarkRuntime {
           `Say it explicitly, e.g. with "name: value".`,
         route: 'kernel',
         trace: [
+          'memory → no saved workflow with strong overlap; planning fresh',
           `kernel → resolve: ${outcome.resolution.tool.id} (score ${outcome.resolution.score.toFixed(2)})`,
           `kernel → bind: incomplete, missing ${(outcome.binding?.missingRequired ?? []).join(', ')}`,
         ],
@@ -223,7 +255,12 @@ export class MarkRuntime {
       const summary =
         result.observations.map(entry => entry.summary).filter(Boolean).pop() ??
         `Executed ${toolId}.`;
-      return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel', trace: head };
+      const trace = [...head];
+      // Learn read-only successes for next time. Writes are never
+      // auto-saved: a stale write input replayed later could harm.
+      const savedId = this.maybeSaveSuccess(command, outcome.plan);
+      if (savedId) trace.push(`memory → saved workflow ${savedId} (read-only success)`);
+      return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel', trace };
     }
 
     const metadata = (result.metadata ?? {}) as Record<string, unknown>;
@@ -250,6 +287,30 @@ export class MarkRuntime {
       route: 'kernel',
       trace: [...head, `kernel → error: ${result.error ?? 'unknown error'}`],
     };
+  }
+
+    /**
+   * Saves a succeeded plan to workflow memory when it is safe to replay:
+   * every step is read-only and no near-duplicate goal is already saved.
+   * Returns the saved workflow id, or undefined when nothing was saved.
+   */
+  private maybeSaveSuccess(
+    command: string,
+    plan: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>['plan'],
+  ): string | undefined {
+    try {
+      if (!plan || plan.steps.length === 0) return undefined;
+      const risks = new Map(this.kernelBridge.listTools().map(tool => [tool.id, tool.risk] as const));
+      const allReadOnly = plan.steps.every(step => {
+        const risk = risks.get(step.toolId);
+        return risk === 'read' || risk === 'diagnostic';
+      });
+      if (!allReadOnly) return undefined;
+      if (this.kernelBridge.recallWorkflows(command, 1, 0.9).length > 0) return undefined;
+      return this.kernelBridge.saveWorkflow(plan).id;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Handles non-command operational events received through the same bus. */  async handleEvent(event: Event): Promise<void> {

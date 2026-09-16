@@ -32,7 +32,7 @@ export interface ReusedPlan {
 export class WorkflowMemory {
   private readonly workflows = new Map<KernelId, LearnedWorkflow>();
 
-  save(plan: ExecutionPlan): LearnedWorkflow {
+  save(plan: ExecutionPlan, maxWorkflows = 100): LearnedWorkflow {
     const workflow: LearnedWorkflow = {
       id: createKernelId('workflow'),
       goal: plan.goal,
@@ -48,23 +48,39 @@ export class WorkflowMemory {
       createdAt: new Date().toISOString(),
     };
     this.workflows.set(workflow.id, workflow);
+    while (this.workflows.size > maxWorkflows) {
+      // Evict the least recently used workflow first.
+      let oldest: LearnedWorkflow | undefined;
+      for (const candidate of this.workflows.values()) {
+        if (!oldest || (candidate.lastUsedAt ?? candidate.createdAt) < (oldest.lastUsedAt ?? oldest.createdAt)) {
+          oldest = candidate;
+        }
+      }
+      if (!oldest) break;
+      this.workflows.delete(oldest.id);
+    }
     return workflow;
   }
 
-  recall(goal: string, limit = 3): LearnedWorkflow[] {
+  recall(goal: string, limit = 3, minScore = 0): LearnedWorkflow[] {
     const terms = extractTerms(goal);
     if (terms.length === 0) return [];
 
     return Array.from(this.workflows.values())
       .map(workflow => ({ workflow, score: scoreOverlap(terms, extractTerms(workflow.goal)) }))
-      .filter(candidate => candidate.score > 0)
+      .filter(candidate => candidate.score >= minScore && candidate.score > 0)
       .sort((left, right) => right.score - left.score)
       .slice(0, limit)
       .map(candidate => candidate.workflow);
   }
 
-  reuse(goal: string): ReusedPlan | undefined {
-    const workflow = this.recall(goal, 1)[0];
+  /**
+   * Acting on memory needs stronger overlap than browsing it: 0.6 means a
+   * clear majority of the goal's terms match the saved goal. Below that,
+   * plan fresh — a wrong reused plan is worse than a slow correct one.
+   */
+  reuse(goal: string, minScore = 0.6): ReusedPlan | undefined {
+    const workflow = this.recall(goal, 1, minScore)[0];
     if (!workflow) return undefined;
 
     const idMap = new Map<string, string>();

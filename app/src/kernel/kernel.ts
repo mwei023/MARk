@@ -293,8 +293,8 @@ export class MARKKernel {
     return this.workflowMemory.save(plan);
   }
 
-  recallWorkflows(goal: string, limit?: number): LearnedWorkflow[] {
-    return this.workflowMemory.recall(goal, limit);
+  recallWorkflows(goal: string, limit?: number, minScore?: number): LearnedWorkflow[] {
+    return this.workflowMemory.recall(goal, limit, minScore);
   }
 
   reuseWorkflow(goal: string): ReusedPlan | undefined {
