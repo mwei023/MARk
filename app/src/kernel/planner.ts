@@ -17,7 +17,7 @@ import {
   parseStepReference,
 } from './step-references';
 
-import { resolveSchemaPath } from './compatibility';
+import { resolveSchemaPath, scoreCompatibility, listSchemaLeafPaths } from './compatibility';
 
 export interface PlanStep {
   id: KernelId;
@@ -32,6 +32,7 @@ export interface ExecutionPlan {
   goal: string;
   steps: PlanStep[];
   successCriteria: string[];
+  explanation?: string;
 }
 
 export type PlanValidationErrorCode =
@@ -569,6 +570,130 @@ export class KernelPlanner {
     availableTools?: ToolDescriptor[],
   ): ExecutionPlan {
     return this.plan(goal, availableTools);
+  }
+
+  /**
+   * Assisted workflow composition: proposes a 2-step plan where the
+   * consumer's input is fed by the producer's declared output.
+   *
+   * Connections are derived only from declared input/output schemas and
+   * type compatibility — never from hardcoded knowledge of individual
+   * tools. Returns a single-step plan (via plan()) when no compatible
+   * chain scores highly enough, so callers always get something usable.
+   */
+  planComposed(
+    goal: string,
+    availableTools?: ToolDescriptor[],
+  ): ExecutionPlan {
+    const normalizedGoal = goal.trim();
+    if (!normalizedGoal) {
+      return { id: createKernelId('plan'), goal, steps: [], successCriteria: [] };
+    }
+
+    let registry = this.toolRegistry;
+    if (availableTools) {
+      const reg = new ToolRegistry();
+      reg.registerMany(availableTools);
+      registry = reg;
+    }
+    if (!registry) return this.plan(goal, availableTools);
+
+    const resolver = new CapabilityResolver({ toolRegistry: registry });
+    const ranked = resolver.resolveAll(normalizedGoal).slice(0, 4);
+    if (ranked.length < 2) return this.plan(goal, availableTools);
+
+    let best: {
+      producer: ToolDescriptor;
+      consumer: ToolDescriptor;
+      field: string;
+      producerPath: string[];
+      compatScore: number;
+      total: number;
+    } | null = null;
+
+    for (const consumer of ranked) {
+      const consumerProps = consumer.tool.inputSchema?.properties ?? {};
+      const consumerFields = Object.keys(consumerProps);
+      if (consumerFields.length === 0) continue;
+
+      for (const producer of ranked) {
+        if (producer.tool.id === consumer.tool.id) continue;
+        const leaves = listSchemaLeafPaths(producer.tool.outputSchema);
+        if (leaves.length === 0) continue;
+
+        for (const field of consumerFields) {
+          const consumerFieldSchema = consumerProps[field];
+          for (const leaf of leaves) {
+            const compat = scoreCompatibility(leaf.schema, consumerFieldSchema);
+            if (!compat.compatible || compat.score < 0.5) continue;
+            const total = consumer.score + producer.score + compat.score;
+            if (!best || total > best.total) {
+              best = {
+                producer: producer.tool,
+                consumer: consumer.tool,
+                field,
+                producerPath: leaf.path,
+                compatScore: compat.score,
+                total,
+              };
+            }
+          }
+        }
+      }
+    }
+
+    if (!best) return this.plan(goal, availableTools);
+
+    const producerBinding = this.taskBinder.bind(normalizedGoal, best.producer);
+    const consumerBinding = this.taskBinder.bind(normalizedGoal, best.consumer);
+
+    // Producer must be executable on its own (our native tools take no
+    // required inputs, so this holds; the check keeps the method honest
+    // as new tools with required inputs arrive).
+    if (producerBinding.missingRequired.length > 0) return this.plan(goal, availableTools);
+
+    const producerStepId = createKernelId('step');
+    const consumerStepId = createKernelId('step');
+    const reference = `$steps.${producerStepId}.output.${best.producerPath.join('.')}`;
+
+    const consumerInput: Record<string, unknown> = {
+      ...consumerBinding.input,
+      [best.field]: reference,
+    };
+
+    const candidate: ExecutionPlan = {
+      id: createKernelId('plan'),
+      goal,
+      steps: [
+        {
+          id: producerStepId,
+          toolId: best.producer.id,
+          input: producerBinding.input,
+          dependsOn: [],
+          expectedOutcome: best.producer.description || `Execute "${best.producer.id}"`,
+        },
+        {
+          id: consumerStepId,
+          toolId: best.consumer.id,
+          input: consumerInput,
+          dependsOn: [producerStepId],
+          expectedOutcome: best.consumer.description || `Execute "${best.consumer.id}"`,
+        },
+      ],
+      successCriteria: [
+        `Capability "${best.producer.id}" executes successfully.`,
+        `Capability "${best.consumer.id}" executes successfully using the producer output to satisfy "${goal}".`,
+      ],
+      explanation:
+        `Producer "${best.producer.id}" outputs "${best.producerPath.join('.')}" ` +
+        `which is type-compatible with consumer "${best.consumer.id}" input "${best.field}" ` +
+        `(compatibility ${best.compatScore}). Connected as ${reference}.`,
+    };
+
+    const validation = validatePlan(candidate, registry);
+    if (!validation.valid) return this.plan(goal, availableTools);
+
+    return candidate;
   }
 
   validate(

@@ -93,9 +93,9 @@ export { validateOutput } from './output-contracts';
 
 export type { OutputValidationResult } from './output-contracts';
 
-export { scoreCompatibility, resolveSchemaPath } from './compatibility';
+export { scoreCompatibility, resolveSchemaPath, listSchemaLeafPaths } from './compatibility';
 
-export type { CompatibilityScore } from './compatibility';
+export type { CompatibilityScore, SchemaLeafPath } from './compatibility';
 
 export {
   registerNativeSystemProvider,
@@ -113,6 +113,7 @@ export {
 export type {
   CapabilityResolution,
   CapabilityResolverDependencies,
+  RankedCapability,
 } from './capability-resolver';
 
 export {

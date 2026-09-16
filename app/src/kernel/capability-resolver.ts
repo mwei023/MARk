@@ -19,41 +19,36 @@ export interface CapabilityResolverDependencies {
  * This deliberately knows nothing about individual tools.
  * It operates only on ToolDescriptor metadata.
  */
+export interface RankedCapability {
+  tool: ToolDescriptor;
+  score: number;
+  matchedTerms: string[];
+}
+
 export class CapabilityResolver {
   constructor(
     private readonly dependencies: CapabilityResolverDependencies,
   ) {}
 
   resolve(goal: string): CapabilityResolution {
-    const normalizedGoal = this.normalize(goal);
-
-    if (!normalizedGoal) {
-      return {
-        score: 0,
-        matchedTerms: [],
-        reason: 'The requested goal is empty.',
-      };
-    }
-
-    const terms = this.extractTerms(normalizedGoal);
-    const tools = this.dependencies.toolRegistry.listAvailable();
-
-    if (tools.length === 0) {
-      return {
-        score: 0,
-        matchedTerms: [],
-        reason: 'No available capabilities have been discovered.',
-      };
-    }
-
-    const candidates = tools
-      .map(tool => this.scoreTool(tool, terms))
-      .filter(candidate => candidate.score > 0)
-      .sort((left, right) => right.score - left.score);
-
-    const best = candidates[0];
+    const best = this.resolveAll(goal)[0];
 
     if (!best) {
+      if (!goal.trim()) {
+        return {
+          score: 0,
+          matchedTerms: [],
+          reason: 'The requested goal is empty.',
+        };
+      }
+      const tools = this.dependencies.toolRegistry.listAvailable();
+      if (tools.length === 0) {
+        return {
+          score: 0,
+          matchedTerms: [],
+          reason: 'No available capabilities have been discovered.',
+        };
+      }
       return {
         score: 0,
         matchedTerms: [],
@@ -67,6 +62,23 @@ export class CapabilityResolver {
       matchedTerms: best.matchedTerms,
       reason: `Selected discovered capability "${best.tool.id}" from its declared metadata.`,
     };
+  }
+
+  /** Ranked candidates, best first. Empty for empty goals or no matches. */
+  resolveAll(goal: string): RankedCapability[] {
+    const normalizedGoal = this.normalize(goal);
+
+    if (!normalizedGoal) return [];
+
+    const terms = this.extractTerms(normalizedGoal);
+    const tools = this.dependencies.toolRegistry.listAvailable();
+
+    if (tools.length === 0) return [];
+
+    return tools
+      .map(tool => this.scoreTool(tool, terms))
+      .filter(candidate => candidate.score > 0)
+      .sort((left, right) => right.score - left.score);
   }
 
   private scoreTool(

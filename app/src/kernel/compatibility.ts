@@ -61,8 +61,7 @@ export function scoreCompatibility(
  * Numeric segments step into array items. Returns the terminal schema node,
  * or null when the path is not declared.
  */
-export function resolveSchemaPath(
-  schema: ToolInputSchema | undefined,
+export function resolveSchemaPath(  schema: ToolInputSchema | undefined,
   path: string[],
 ): ToolParameterSchema | null {
   if (!schema) return null;
@@ -88,4 +87,48 @@ export function resolveSchemaPath(
   }
 
   return current ?? null;
+}
+
+export interface SchemaLeafPath {
+  path: string[];
+  schema: ToolParameterSchema;
+}
+
+/**
+ * Enumerates every declared leaf path of an output schema, e.g.
+ * ["hostname"], ["memory","totalBytes"], ["entries","name"].
+ * Array items are traversed without consuming a path segment for the index;
+ * callers address items by property name (validation accepts numeric
+ * segments at execution depth).
+ */
+export function listSchemaLeafPaths(
+  schema: ToolInputSchema | undefined,
+): SchemaLeafPath[] {
+  if (!schema?.properties) return [];
+  const leaves: SchemaLeafPath[] = [];
+
+  const visit = (node: ToolParameterSchema, path: string[]): void => {
+    if (node.type === 'object' && node.properties) {
+      const keys = Object.keys(node.properties);
+      if (keys.length === 0) {
+        leaves.push({ path, schema: node });
+        return;
+      }
+      for (const [key, child] of Object.entries(node.properties)) {
+        visit(child, [...path, key]);
+      }
+      return;
+    }
+    if (node.type === 'array' && node.items) {
+      visit(node.items, path);
+      return;
+    }
+    leaves.push({ path, schema: node });
+  };
+
+  for (const [key, child] of Object.entries(schema.properties)) {
+    visit(child, [key]);
+  }
+
+  return leaves;
 }
