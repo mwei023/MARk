@@ -36,6 +36,8 @@ export interface CommandResult {
   response: string;
   route: 'capability' | 'agent' | 'reasoning' | 'kernel' | 'unavailable';
   eventId: string;
+  /** Step-by-step account of what MARK did with the command. */
+  trace?: string[];
 }
 
 /** Preserves the existing LangGraph assistant behind MARK's reasoning boundary. */
@@ -99,6 +101,9 @@ export class MarkRuntime {
     // The event is emitted before handling, so observers see every command.
     await this.bus.emit(event);
     const decision = this.router.classify(event);
+    const trace = [
+      `gateway → ${decision.path}${decision.agent ? ` (${decision.agent})` : ''}: ${decision.reasoning ?? ''}`.trim(),
+    ];
     let result: CommandResult;
 
     if (decision.path === 'deterministic') {
@@ -106,6 +111,11 @@ export class MarkRuntime {
       result = response
         ? { response, route: 'capability', eventId: event.id }
         : { response: 'That local capability is unavailable on this host.', route: 'unavailable', eventId: event.id };
+      trace.push(
+        response
+          ? 'capability → answered locally, no kernel or LLM involved'
+          : 'capability → no local handler matched',
+      );
     } else {
       // The kernel goes before the LLM: when MARK can resolve a discovered
       // capability it must act (or report the real outcome), never hand an
@@ -115,19 +125,26 @@ export class MarkRuntime {
         const response = await this.agents.handleCommand(event, this.capabilities);
         if (response) {
           result = { response, route: 'agent', eventId: event.id };
+          trace.push(`agent → ${decision.agent} handled the command`);
         } else {
           const kernelResult = await this.tryKernelCommand(command, userId, source);
-          result = kernelResult
-            ? { ...kernelResult, eventId: event.id }
-            : { response: `The ${decision.agent} capability is not available on this host.`, route: 'unavailable', eventId: event.id };
+          if (kernelResult) {
+            result = { ...kernelResult, eventId: event.id };
+            trace.push(...kernelResult.trace);
+          } else {
+            result = { response: `The ${decision.agent} capability is not available on this host.`, route: 'unavailable', eventId: event.id };
+            trace.push('agent → no handler; kernel → no matching capability');
+          }
         }
       } else {
         const kernelResult = await this.tryKernelCommand(command, userId, source);
         if (kernelResult) {
           result = { ...kernelResult, eventId: event.id };
+          trace.push(...kernelResult.trace);
         } else if (decision.path === 'reasoning' && decision.needsLLM) {
           try {
             result = { response: await this.reasoner.respond(command, userId), route: 'reasoning', eventId: event.id };
+            trace.push('kernel → no matching capability; reasoning → LLM answered (words only, no tools ran)');
           } catch (error: any) {
             const detail = error instanceof Error ? error.message : String(error);
             result = {
@@ -135,9 +152,11 @@ export class MarkRuntime {
               route: 'unavailable',
               eventId: event.id,
             };
+            trace.push('kernel → no matching capability; reasoning → unavailable');
           }
         } else {
           result = { response: 'MARK cannot safely route that request yet.', route: 'unavailable', eventId: event.id };
+          trace.push('kernel → no matching capability; nothing else claimed it');
         }
       }
     }
@@ -151,6 +170,7 @@ export class MarkRuntime {
       correlationId: event.correlationId,
       data: { commandEventId: event.id, route: result.route, success: result.route !== 'unavailable' },
     } as Event);
+    result.trace = trace;
     return result;
   }
 
@@ -164,7 +184,7 @@ export class MarkRuntime {
     command: string,
     userId: string,
     source: 'api' | 'voice' | 'cli',
-  ): Promise<{ response: string; route: 'kernel' } | undefined> {
+  ): Promise<{ response: string; route: 'kernel'; trace: string[] } | undefined> {
     let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
     try {
       await this.kernelBridge.initialize();
@@ -177,16 +197,33 @@ export class MarkRuntime {
       return undefined;
     }
 
-    if (!outcome.action || !outcome.result) return undefined;
+    if (!outcome.action || !outcome.result) {
+      if (!outcome.resolution.tool) return undefined;
+      return {
+        response:
+          `Found ${outcome.resolution.tool.id} but could not bind inputs ` +
+          `(${(outcome.binding?.missingRequired ?? []).join(', ') || 'no values in request'}). ` +
+          `Say it explicitly, e.g. with "name: value".`,
+        route: 'kernel',
+        trace: [
+          `kernel → resolve: ${outcome.resolution.tool.id} (score ${outcome.resolution.score.toFixed(2)})`,
+          `kernel → bind: incomplete, missing ${(outcome.binding?.missingRequired ?? []).join(', ')}`,
+        ],
+      };
+    }
 
     const { result } = outcome;
     const toolId = outcome.action.toolId;
+    const head = [
+      `kernel → resolve: ${toolId} (score ${outcome.resolution.score.toFixed(2)}, matched: ${outcome.resolution.matchedTerms.join(', ') || 'none'})`,
+      `kernel → execute: ${toolId} → ${result.status}${result.durationMs !== undefined ? ` in ${result.durationMs}ms` : ''}`,
+    ];
 
     if (result.status === 'succeeded') {
       const summary =
         result.observations.map(entry => entry.summary).filter(Boolean).pop() ??
         `Executed ${toolId}.`;
-      return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel' };
+      return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel', trace: head };
     }
 
     const metadata = (result.metadata ?? {}) as Record<string, unknown>;
@@ -198,12 +235,21 @@ export class MarkRuntime {
           `⏳ "${command}" needs approval (${toolId}): ${result.error} ` +
           `Approve with confirmation ${confirmationId}.`,
         route: 'kernel',
+        trace: [...head, `kernel → authority: confirmation required (${confirmationId})`],
       };
     }
     if (result.status === 'blocked') {
-      return { response: `Blocked by policy (${toolId}): ${result.error}`, route: 'kernel' };
+      return {
+        response: `Blocked by policy (${toolId}): ${result.error}`,
+        route: 'kernel',
+        trace: [...head, 'kernel → authority: denied, no confirmation possible'],
+      };
     }
-    return { response: `Failed (${toolId}): ${result.error ?? 'unknown error'}`, route: 'kernel' };
+    return {
+      response: `Failed (${toolId}): ${result.error ?? 'unknown error'}`,
+      route: 'kernel',
+      trace: [...head, `kernel → error: ${result.error ?? 'unknown error'}`],
+    };
   }
 
   /** Handles non-command operational events received through the same bus. */  async handleEvent(event: Event): Promise<void> {

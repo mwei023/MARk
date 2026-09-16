@@ -36,11 +36,14 @@ async function main(): Promise<void> {
   const open = await runtime.executeCommand('open vlc', 'test-user', 'cli');
   assert.equal(open.route, 'kernel', `expected kernel route, got [${open.route}] ${open.response}`);
   assert.match(open.response, /approval|confirmation/i);
+  assert.ok(open.trace?.some(line => line.includes('desktop.open.vlc')), 'trace must name the resolved tool');
+  assert.ok(open.trace?.some(line => line.includes('confirmation required')), 'trace must show the authority decision');
 
-  // 3. Hog question measures instead of dumping df.
+  // 3. Hog question measures the disk root instead of dumping df.
   const hogs = await runtime.executeCommand('whats eating my disk', 'test-user', 'cli');
   assert.equal(hogs.route, 'kernel', `expected kernel route, got [${hogs.route}] ${hogs.response}`);
   assert.match(hogs.response, /largest|Measured/i);
+  assert.ok(!hogs.trace?.some(line => line.includes('reasoning → LLM')), 'must not fall through to chat');
 
   // 4. Music search reports real tracks, never "playing".
   const music = await runtime.executeCommand('play some music', 'test-user', 'cli');

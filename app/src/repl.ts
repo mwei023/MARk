@@ -27,12 +27,13 @@ const animateThinking = () => {
 const printHelp = () => {
   console.log([
     'Commands:',
-    '  <text>              chat / route via MarkRuntime (capability, agent, reasoning)',
+    '  <text>              chat / route via MarkRuntime (capability, agent, kernel, reasoning)',
     '  /plan <goal>        preview a like-me plan (never executes mutating steps)',
     '  /build <goal>       execute a like-me plan (confirmation-gated)',
     '  /pending            list pending kernel confirmations',
     '  /approve <id>       approve a confirmation',
     '  /deny <id>          deny a confirmation',
+    '  /trace on|off       show what MARK did per command (default on)',
     '  /help               this help',
     "  quit | exit         leave ('Ciao, Mwei.')",
     '',
@@ -66,6 +67,7 @@ const repl = async () => {
   await likeMeLoop.ensureInit();
   console.log("MARK interactive. Type /help for commands, 'quit' to stop.\n");
 
+  let showTrace = true;
   const readline = await import('readline');
   const rl = readline.createInterface({
     input: process.stdin,
@@ -112,9 +114,17 @@ const repl = async () => {
         const id = input.split(/\s+/)[1];
         const record = likeMeLoop.approve(id, approved);
         output = record ? `${record.id} -> ${record.status}` : 'confirmation not found or already decided';
+      } else if (input.startsWith('/trace')) {
+        const arg = input.split(/\s+/)[1];
+        if (arg === 'off') showTrace = false;
+        else if (arg === 'on') showTrace = true;
+        output = `trace ${showTrace ? 'on' : 'off'}`;
       } else {
         const result = await markRuntime.executeCommand(input, 'mwei', 'cli');
         output = `[${result.route}] ${result.response}`;
+        if (showTrace && result.trace?.length) {
+          output += `\n  ⎿ ${result.trace.join('\n  ⎿ ')}`;
+        }
       }
       stopThinking();
       if (output) console.log(`MARK: ${output}\n`);

@@ -1009,7 +1009,7 @@ export const fsDirectorySizesTool: ToolDescriptor = {
     properties: {
       path: {
         type: 'string',
-        description: 'Directory to measure. Defaults to the working directory.',
+        description: 'Directory to measure. Defaults to / (the whole disk).',
       },
       limit: {
         type: 'number',
@@ -1050,33 +1050,35 @@ export const fsDirectorySizesTool: ToolDescriptor = {
 export const fsDirectorySizesImplementation: ToolImplementation = {
   toolId: fsDirectorySizesTool.id,
 
-  async execute({ action, context }) {
+  async execute({ action }) {
     // Sizes only, never contents: any absolute path is safe to measure.
+    // Default is the filesystem root — this tool answers "what is eating
+    // my disk", not "what is in this folder" (that is directory_list).
     const rawPath =
       typeof action.input.path === 'string' && action.input.path.length > 0
         ? String(action.input.path)
-        : context.workingDirectory ?? process.cwd();
+        : '/';
     const requested = typeof action.input.limit === 'number' ? Math.floor(action.input.limit) : 20;
     const limit = Math.min(Math.max(requested, 1), 50);
     const resolved = path.resolve(rawPath);
 
     const names = (await fs.readdir(resolved)).slice(0, 200);
-    const targets = names.map(name => path.join(resolved, name));
-    // Fixed flags only; measured paths are operands, never a command string.
-    const { stdout } = await execFileAsync('du', ['-sk', '-x', '--', ...targets], { timeout: 60000 });
-    const entries = stdout
-      .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean)
-      .map(line => {
-        const tab = line.indexOf('\t');
-        return {
-          path: tab >= 0 ? line.slice(tab + 1) : line,
-          sizeKB: Number(tab >= 0 ? line.slice(0, tab) : NaN),
-        };
-      })
-      .filter(entry => entry.path && Number.isFinite(entry.sizeKB))
-      .sort((a, b) => b.sizeKB - a.sizeKB);
+    // One du per child: virtual filesystems (/proc, /sys) make a single
+    // combined du exit non-zero, so per-child failures are skipped, not fatal.
+    const measured: Array<{ path: string; sizeKB: number }> = [];
+    for (const name of names) {
+      const target = path.join(resolved, name);
+      try {
+        // Fixed flags only; measured paths are operands, never a command string.
+        const { stdout } = await execFileAsync('du', ['-sk', '-x', '--', target], { timeout: 60000 });
+        const tab = stdout.indexOf('\t');
+        const sizeKB = Number(tab >= 0 ? stdout.slice(0, tab).trim() : NaN);
+        if (Number.isFinite(sizeKB)) measured.push({ path: target, sizeKB });
+      } catch {
+        continue;
+      }
+    }
+    const entries = measured.sort((a, b) => b.sizeKB - a.sizeKB);
     const sliced = entries.slice(0, limit);
 
     const output = {
