@@ -93,6 +93,10 @@ export { validateOutput } from './output-contracts';
 
 export type { OutputValidationResult } from './output-contracts';
 
+export { scoreCompatibility, resolveSchemaPath } from './compatibility';
+
+export type { CompatibilityScore } from './compatibility';
+
 export {
   registerNativeSystemProvider,
 } from './providers/register-native';

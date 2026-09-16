@@ -438,15 +438,17 @@ async function run() {
       context,
     );
 
+    // Since Milestone B, unknown-step references are rejected at validation
+    // time (fail fast) instead of executing and failing at runtime.
     assert.equal(report.status, 'failed');
+    assert.ok(report.validation && !report.validation.valid);
+    assert.ok(
+      report.validation.errors.some(e => e.code === 'MISSING_DEPENDENCY'),
+      'Expected a MISSING_DEPENDENCY validation error',
+    );
 
     const consumer = stepReport(report, 'consumer');
-    assert.equal(consumer.status, 'failed');
-    assert.match(
-      consumer.error ?? '',
-      /does not exist in the plan|has not executed yet/,
-      'Expected a clear missing-reference error',
-    );
+    assert.equal(consumer.status, 'skipped');
 
     // The resolver alone behaves identically.
     assert.throws(

@@ -14,7 +14,10 @@ import { createKernelId } from './execution-context';
 import {
   collectStepReferences,
   isStepReference,
+  parseStepReference,
 } from './step-references';
+
+import { resolveSchemaPath } from './compatibility';
 
 export interface PlanStep {
   id: KernelId;
@@ -38,7 +41,8 @@ export type PlanValidationErrorCode =
   | 'MISSING_DEPENDENCY'
   | 'DEPENDENCY_CYCLE'
   | 'MISSING_REQUIRED_INPUT'
-  | 'INVALID_INPUT';
+  | 'INVALID_INPUT'
+  | 'UNDECLARED_OUTPUT_PATH';
 
 export interface PlanValidationError {
   stepId?: KernelId;
@@ -318,6 +322,76 @@ export function validatePlan(
               });
             }
           }
+        }
+      }
+    }
+
+    // 5. Validate step-output references against producer output contracts.
+    // Refs are resolved at execution time, but the referenced path should be
+    // declared in the producer's outputSchema when one exists. Tools without
+    // a schema get a warning, not an error, for backward compatibility.
+    for (const step of plan.steps) {
+      const references = collectStepReferences(step.input);
+      for (const reference of references) {
+        const target = parseStepReference(reference);
+        if (!target) {
+          errors.push({
+            stepId: step.id,
+            code: 'INVALID_INPUT',
+            message: `Step "${step.id}" contains malformed step reference "${reference}".`,
+          });
+          continue;
+        }
+
+        if (target.stepId === step.id) {
+          errors.push({
+            stepId: step.id,
+            code: 'DEPENDENCY_CYCLE',
+            message: `Step "${step.id}" references its own output ("${reference}").`,
+          });
+          continue;
+        }
+
+        const producerStep = stepMap.get(target.stepId);
+        if (!producerStep) {
+          errors.push({
+            stepId: step.id,
+            code: 'MISSING_DEPENDENCY',
+            message: `Step "${step.id}" references unknown step "${target.stepId}" ("${reference}").`,
+          });
+          continue;
+        }
+
+        if (!(step.dependsOn ?? []).includes(target.stepId)) {
+          warnings.push(
+            `Step "${step.id}" references "${target.stepId}" but does not list it in dependsOn.`,
+          );
+        }
+
+        const producerTool = toolRegistry.get(producerStep.toolId);
+        if (!producerTool) continue; // NONEXISTENT_TOOL already reported
+
+        const head = target.path[0];
+        if (target.path.length === 0) continue; // whole-output ref: always allowed
+        if (head === 'result' || head === 'resolvedInput') continue; // runtime-only roots
+
+        const effectivePath =
+          head === 'output' ? target.path.slice(1) : target.path;
+        if (effectivePath.length === 0) continue;
+
+        if (!producerTool.outputSchema) {
+          warnings.push(
+            `Step "${step.id}" references "${reference}" but tool "${producerTool.id}" declares no outputSchema; path cannot be verified.`,
+          );
+          continue;
+        }
+
+        if (!resolveSchemaPath(producerTool.outputSchema, effectivePath)) {
+          errors.push({
+            stepId: step.id,
+            code: 'UNDECLARED_OUTPUT_PATH',
+            message: `Step "${step.id}" references "${reference}" but tool "${producerTool.id}" does not declare output path "${effectivePath.join('.')}".`,
+          });
         }
       }
     }
