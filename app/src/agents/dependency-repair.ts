@@ -6,7 +6,7 @@
  * code, and upgrades the plugin within its declared major range.
  */
 import { execFile } from 'child_process';
-import { readFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { promisify } from 'util';
 
 const execFilePromise = promisify(execFile);
@@ -114,4 +114,65 @@ export function declaredRange(repoPath: string, pkg: string): string | null {
   } catch {
     return null;
   }
+}
+
+export interface IgnoresRepairResult {
+  applied: boolean;
+  configFile: string;
+  added: string[];
+  /** Remaining "was not found" rule errors after repair (0 = fixed). */
+  staleRuleErrorsAfter: number;
+  notes: string[];
+}
+
+/**
+ * Stop linting vendored/bundled output (dev-dist/, dist/): third-party
+ * bundles carry disable-comments for rules outside the project's plugin
+ * set, which eslint reports as "Definition for rule X was not found".
+ * Deterministic text edit on the flat-config ignores block, verified by
+ * recount. Reverts on verification failure.
+ */
+export async function ensureEslintIgnores(repoPath: string, dirs: string[] = ['dev-dist/']): Promise<IgnoresRepairResult> {
+  const notes: string[] = [];
+  const cfg = `${repoPath}/eslint.config.js`;
+  let original: string;
+  try {
+    original = readFileSync(cfg, 'utf8');
+  } catch {
+    return { applied: false, configFile: cfg, added: [], staleRuleErrorsAfter: -1, notes: ['No eslint.config.js found.'] };
+  }
+  const countStale = async (): Promise<number> => {
+    try {
+      await execFilePromise('npx', ['--no-install', 'eslint', '.'], { cwd: repoPath, timeout: 180000 });
+      return 0;
+    } catch (err) {
+      const out = String((err as { stdout?: unknown }).stdout ?? '');
+      return (out.match(/Definition for rule '[^']+' was not found/g) ?? []).length;
+    }
+  };
+  const before = await countStale();
+  notes.push(`Stale-rule errors before repair: ${before}.`);
+  if (before === 0) {
+    return { applied: false, configFile: cfg, added: [], staleRuleErrorsAfter: 0, notes: [...notes, 'Nothing to fix.'] };
+  }
+
+  const m = original.match(/ignores:\s*\[([^\]]*)\]/);
+  if (!m) {
+    return { applied: false, configFile: cfg, added: [], staleRuleErrorsAfter: before, notes: [...notes, 'No ignores block found in config; refusing to guess structure.'] };
+  }
+  const have = m[1];
+  const added = dirs.filter(d => !have.includes(`"${d}"`) && !have.includes(`'${d}'`));
+  if (added.length === 0) {
+    return { applied: false, configFile: cfg, added: [], staleRuleErrorsAfter: before, notes: [...notes, 'Directories already ignored; stale rules have another source.'] };
+  }
+  const quote = have.includes('"') ? '"' : "'";
+  const updated = original.replace(m[0], `ignores: [${have.trimEnd().replace(/,?\s*$/, '')}, ${added.map(d => `${quote}${d}${quote}`).join(', ')}]`);
+  writeFileSync(cfg, updated);
+  const after = await countStale();
+  notes.push(`Stale-rule errors after repair: ${after}.`);
+  if (after >= before) {
+    writeFileSync(cfg, original);
+    return { applied: false, configFile: cfg, added: [], staleRuleErrorsAfter: before, notes: [...notes, 'No improvement; config reverted.'] };
+  }
+  return { applied: true, configFile: cfg, added, staleRuleErrorsAfter: after, notes };
 }
