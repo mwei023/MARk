@@ -59,6 +59,9 @@ export class CodeAgent extends Agent {
     }
 
     const maxErrors = Number.isFinite(Number(data.maxErrors)) ? Number(data.maxErrors) : config.markRepairMaxErrors;
+    // Snapshot user dirt BEFORE repairs: a fixed file the user also touched
+    // is excluded from push (co-authored work stays theirs, noted).
+    const preexisting = await this.snapshotDirtyFiles(repoPath);
     // Consolidation requests merge fix branches with evidence-decided
     // conflicts instead of repairing. Same agent, same audit trail.
     if (Array.isArray(data.branches) && data.branches.length > 0) {
@@ -121,7 +124,7 @@ export class CodeAgent extends Agent {
       // (plus dry-run off). Pushed branches are the audit trail.
       let pushedBranch: string | null = null;
       if (fixed > 0 && data.push === true && !config.markDryRun) {
-        pushedBranch = await this.pushFixes(repoPath, incidentId, outcomes.filter((o) => o.fixed));
+        pushedBranch = await this.pushFixes(repoPath, incidentId, outcomes.filter((o) => o.fixed), preexisting);
       }
       await find(
         done
@@ -154,28 +157,45 @@ export class CodeAgent extends Agent {
     }
   }
 
+  private async snapshotDirtyFiles(repoPath: string): Promise<Set<string>> {
+    try {
+      const { stdout } = await execFilePromise('git', ['-C', repoPath, 'status', '--porcelain'], { timeout: 15000 });
+      return new Set(stdout.split('\n').map(l => l.slice(3).trim().split(' -> ').pop() as string).filter(Boolean));
+    } catch {
+      return new Set();
+    }
+  }
+
   /**
    * Commit verified fixes on their own branch and push. Only files with a
    * verified fix are staged — never the whole tree. Failures are findings,
    * never silent.
    */
-  private async pushFixes(repoPath: string, incidentId: string | undefined, fixed: RepairOutcome[]): Promise<string | null> {
+  private async pushFixes(repoPath: string, incidentId: string | undefined, fixed: RepairOutcome[], preexisting: Set<string>): Promise<string | null> {
     const files = [...new Set(fixed.map((o) => o.target.file).filter(Boolean))];
     if (files.length === 0) return null;
     const branchName = `auto-fix/code-${Date.now()}`;
     const find = async (text: string): Promise<void> => {
       if (incidentId) await incidentStore.addFinding(incidentId, text);
     };
+    // Exclude files the user had already touched: co-authored work stays
+    // theirs. If nothing Mark-only remains, there is nothing safe to push.
+    const coauthored = files.filter(f => preexisting.has(f));
+    const own = files.filter(f => !preexisting.has(f));
+    if (coauthored.length > 0) {
+      await find(`Hygiene: excluded ${coauthored.length} co-authored file(s) from push (${coauthored.slice(0, 5).join(', ')}) — merge Mark's branch yourself to combine.`);
+    }
+    if (own.length === 0) return null;
     try {
       await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
-      await execFilePromise('git', ['-C', repoPath, 'add', '--', ...files], { timeout: 15000 });
+      await execFilePromise('git', ['-C', repoPath, 'add', '--', ...own], { timeout: 15000 });
       await execFilePromise(
         'git',
-        ['-C', repoPath, 'commit', '-m', `auto-fix: repair ${files.length} file(s) (${fixed.length} lint errors)`],
+        ['-C', repoPath, 'commit', '-m', `auto-fix: repair ${own.length} file(s) (${fixed.length} lint errors)`],
         { timeout: 15000 },
       );
       await execFilePromise('git', ['-C', repoPath, 'push', '-u', 'origin', branchName], { timeout: 120000 });
-      await find(`CodeAgent pushed ${branchName} with ${files.length} fixed file(s): ${files.slice(0, 5).join(', ')}.`);
+      await find(`CodeAgent pushed ${branchName} with ${own.length} fixed file(s): ${own.slice(0, 5).join(', ')}.`);
       return branchName;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

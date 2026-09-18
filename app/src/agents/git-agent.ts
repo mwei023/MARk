@@ -593,6 +593,7 @@ export class GitAgent extends Agent {
     // ── Deterministic diagnosis ──────────────────────────────────────────
     const ruleMatch = diagnosisText.match(/Error while loading rule '([^']+)'/);
     const missingMod = diagnosisText.match(/Cannot find module '([^']+)'/);
+    const unknownRule = diagnosisText.match(/Definition for rule '([^']+)' was not found/);
     let diagnosed = false;
     let repairOutcome: 'resolved' | 'repaired-open' | 'failed' | null = null;
 
@@ -643,6 +644,22 @@ export class GitAgent extends Agent {
         `Observation: working tree has uncommitted changes (${files}). ` +
         `These did not go through CI — commit or stash them, then re-run the failing command to isolate.`,
       );
+    }
+    if (unknownRule && !diagnosed) {
+      const rule = unknownRule[1];
+      let installed = '';
+      try {
+        const meta = JSON.parse(readFileSync(`${repoPath}/node_modules/@typescript-eslint/eslint-plugin/package.json`, 'utf8'));
+        installed = typeof meta?.version === 'string' ? ` (installed plugin: ${meta.version})` : '';
+      } catch { /* version unknown is itself informative */ }
+      await incidentStore.addFinding(
+        incidentId,
+        `Diagnosis: stale rule reference — config enables '${rule}' but the loaded plugin does not export it${installed}. ` +
+        `Rule IDs are renamed/removed across plugin majors (e.g. ban-types died in v8; no-unsafe-* need a type-aware parser). ` +
+        `Remedy (your steps): align plugin major with the config (upgrade @typescript-eslint or drop/rename the stale rule), ` +
+        `and stop linting bundled output (dev-dist/): add it to eslint ignores.`,
+      );
+      diagnosed = true;
     }
     if (!hasCheckScripts && !diagnosed) {
       await incidentStore.addFinding(
@@ -705,6 +722,45 @@ export class GitAgent extends Agent {
    * version repair, lint-exit verification, commit + push. Any failure lands
    * as a finding and the incident stays open — never a silent drop.
    */
+  /**
+   * Snapshot dirty files BEFORE Mark's work starts. At commit time, only
+   * files outside this set may be staged — the user's uncommitted work is
+   * never swept into an auto-fix commit.
+   */
+  private async snapshotDirtyFiles(repoPath: string): Promise<Set<string>> {
+    try {
+      const { stdout } = await execFilePromise('git', ['-C', repoPath, 'status', '--porcelain'], { timeout: 15000 });
+      return new Set(stdout.split('\n').map(l => l.slice(3).trim().split(' -> ').pop() as string).filter(Boolean));
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
+   * Stage only Mark's own changes: everything modified except the
+   * pre-existing dirty set, optionally restricted to an allow-list.
+   * Returns staged file list (empty = nothing real).
+   */
+  private async stageOwnChangesOnly(
+    repoPath: string, incidentId: string, preexisting: Set<string>, allowOnly?: string[],
+  ): Promise<string[]> {
+    const { stdout } = await execFilePromise('git', ['-C', repoPath, 'status', '--porcelain'], { timeout: 15000 });
+    const current = stdout.split('\n').map(l => l.slice(3).trim().split(' -> ').pop() as string).filter(Boolean);
+    const skippedUser = current.filter(f => preexisting.has(f));
+    let own = current.filter(f => !preexisting.has(f));
+    if (allowOnly) own = own.filter(f => allowOnly.includes(f));
+    if (skippedUser.length > 0) {
+      await incidentStore.addFinding(
+        incidentId,
+        `Hygiene: left ${skippedUser.length} pre-existing dirty file(s) unstaged (${skippedUser.slice(0, 5).join(', ')}) — your uncommitted work stays yours.`,
+      );
+    }
+    if (own.length > 0) {
+      await execFilePromise('git', ['-C', repoPath, 'add', '--', ...own], { timeout: 15000 });
+    }
+    return own;
+  }
+
   private async repairToolchainSkew(
     incidentId: string,
     eventData: Record<string, any>,
@@ -716,6 +772,7 @@ export class GitAgent extends Agent {
     const branchName = `auto-fix/deps-${Date.now()}`;
     try {
       await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
+      const preexisting = await this.snapshotDirtyFiles(repoPath);
       const result = await repairEslintTypescriptSkew(repoPath);
       await incidentStore.addAction(incidentId, {
         timestamp: new Date(),
@@ -737,7 +794,11 @@ export class GitAgent extends Agent {
         await incidentStore.addFinding(incidentId, `Toolchain repair ran on ${branchName} but produced no package changes.`);
         return 'failed';
       }
-      await execFilePromise('git', ['-C', repoPath, 'add', 'package.json', 'package-lock.json'], { timeout: 15000 });
+      const staged = await this.stageOwnChangesOnly(repoPath, incidentId, preexisting, ['package.json', 'package-lock.json']);
+      if (staged.length === 0) {
+        await incidentStore.addFinding(incidentId, `Toolchain repair on ${branchName} produced no committable package changes (user dirt excluded).`);
+        return 'failed';
+      }
       await execFilePromise('git', ['-C', repoPath, 'commit', '-m', 'auto-fix: align eslint toolchain versions'], { timeout: 15000 });
       await execFilePromise('git', ['-C', repoPath, 'push', '-u', 'origin', branchName], { timeout: 120000 });
       await incidentStore.addFinding(incidentId, `Toolchain repaired and pushed ${branchName} (lint exit ${result.lintExitAfter}).`);
@@ -848,6 +909,8 @@ export class GitAgent extends Agent {
       } else if (failureType === 'LINT_FAILURE') {
         const branchName = `auto-fix/lint-${Date.now()}`;
         await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
+        // Snapshot user dirt BEFORE Mark touches anything.
+        const lintPreexisting = await this.snapshotDirtyFiles(repoPath);
         // Repair readiness: lint tooling needs installed dependencies. Fill
         // the gap first (recorded) instead of failing mid-repair.
         const readiness = await assessWorldState(repoPath);
@@ -964,26 +1027,24 @@ export class GitAgent extends Agent {
           void repoBaseline.refresh(repositoryContext.fullName);
           return;
         }
-        await execFilePromise('git', ['-C', repoPath, 'add', '-A'], { timeout: 15000 });
-        // Lockfile churn is not a fix: unstage package-lock.json unless
+        const staged = await this.stageOwnChangesOnly(repoPath, incidentId, lintPreexisting);
+        // Lockfile churn is not a fix: discard package-lock.json unless
         // package.json changed alongside it (real dependency change).
-        try {
-          const { stdout: staged } = await execFilePromise('git', ['-C', repoPath, 'diff', '--cached', '--name-only'], { timeout: 15000 });
-          const names = staged.split('\n').map(s => s.trim());
-          if (names.includes('package-lock.json') && !names.includes('package.json')) {
+        if (staged.includes('package-lock.json') && !staged.includes('package.json')) {
+          try {
             await execFilePromise('git', ['-C', repoPath, 'restore', '--staged', 'package-lock.json'], { timeout: 15000 });
             await execFilePromise('git', ['-C', repoPath, 'checkout', '--', 'package-lock.json'], { timeout: 15000 });
-            await incidentStore.addFinding(incidentId, 'Hygiene: unstaged package-lock.json churn (installer version drift, not a fix).');
+            await incidentStore.addFinding(incidentId, 'Hygiene: discarded package-lock.json churn (installer version drift, not a fix).');
+          } catch {
+            // Best-effort hygiene; the emptiness check below still applies.
           }
-        } catch {
-          // Best-effort hygiene; the emptiness check below still applies.
         }
-        // If hygiene removed the only change, there is nothing real to commit.
+        // Nothing real to commit (no changes, only churn, or only user dirt).
         const { stdout: stagedAfter } = await execFilePromise('git', ['-C', repoPath, 'diff', '--cached', '--name-only'], { timeout: 15000 });
         if (!stagedAfter.trim()) {
           await incidentStore.addFinding(
             incidentId,
-            `Auto-fix on ${branchName} produced no source changes (only installer churn, now discarded). Remaining lint errors require manual fixes.`,
+            `Auto-fix on ${branchName} produced no committable source changes. Remaining lint errors require manual fixes.`,
           );
           await incidentStore.updateStatus(incidentId, 'open');
           return;
