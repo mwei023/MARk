@@ -7,7 +7,7 @@
  * Anything unverifiable becomes a structured handoff, not a silent skip.
  */
 import { execFile } from 'child_process';
-import { readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { promisify } from 'util';
 import { config } from '../config.js';
 import { getLLMProviderCached } from '../llm/index.js';
@@ -278,6 +278,23 @@ export function rawExcerpt(content: string): string {
   return content.replace(/\s+/g, ' ').trim().slice(0, 150);
 }
 
+/** Count TypeScript errors via the repo's own config. Null = tsc unavailable (gate skipped, noted). */
+async function tscErrorCount(repoPath: string): Promise<number | null> {
+  const cfg = existsSync(`${repoPath}/tsconfig.app.json`) ? 'tsconfig.app.json' : 'tsconfig.json';
+  if (!existsSync(`${repoPath}/${cfg}`)) return null;
+  try {
+    await execFilePromise('npx', ['--no-install', 'tsc', '--noEmit', '-p', cfg], { cwd: repoPath, timeout: 180000 });
+    return 0;
+  } catch (err) {
+    const out = String((err as { stdout?: unknown }).stdout ?? '') + String((err as { stderr?: unknown }).stderr ?? '');
+    if (/error TS\d+/.test(out)) {
+      return (out.match(/error TS\d+/g) ?? []).length;
+    }
+    // No TS diagnostics but nonzero exit: broken toolchain, not dirty code.
+    return null;
+  }
+}
+
 /** Repair a single error. Reverts on any verification failure. */
 export async function repairOneError(
   repoPath: string,
@@ -296,6 +313,9 @@ export async function repairOneError(
     return { target, fixed: false, skipped: 'file too large', detail: `${target.file} has ${lineCount} lines (budget ${opts.maxFileLines ?? 300}); needs human or windowed repair.` };
   }
   const before = await fileErrorCount(repoPath, target.file);
+  // Type baseline once, before any writes: the tsc gate later rejects
+  // proposals that silence eslint while breaking types.
+  const tscBase = await tscErrorCount(repoPath);
 
   let proposal: string | null = null;
   let via: 'local' | 'cloud' = 'local';
@@ -338,6 +358,17 @@ export async function repairOneError(
   }
   if (!proposal) {
     return { target, fixed: false, via: 'none', detail: `No verified fix (${lastNote.slice(0, 180)}).` };
+  }
+  // tsc gate: an eslint improvement that introduces type errors is not a
+  // fix. Unavailable tsc (null) skips the gate openly, never silently.
+  if (tscBase !== null) {
+    const tscNow = await tscErrorCount(repoPath);
+    if (tscNow === null) {
+      lastNote = 'tsc verification unavailable after edit; keeping eslint-verified fix';
+    } else if (tscNow > tscBase) {
+      writeFileSync(abs, original);
+      return { target, fixed: false, via: 'none', detail: `${target.file}: eslint improved but tsc regressed (${tscBase} → ${tscNow} type errors); reverted.` };
+    }
   }
   // Final recount guards against verifier flakiness between the tier check
   // and this return: only a recount-confirmed drop counts as fixed.
