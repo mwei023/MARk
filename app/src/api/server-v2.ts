@@ -561,6 +561,16 @@ app.get('/api/status/ops', async (_req: any, res: any) => {
 // Start Server
 // ─────────────────────────────────────────────────────────────
 const PORT = process.env.API_PORT || 3001;
+if (!config.databaseUrl) {
+  console.warn(
+    '[MARK] WARNING: DATABASE_URL is not set — incidents, memory, baselines, and confirmations ' +
+    'will silently no-op (in-memory only). Set it in .env to persist anything. ' +
+    'See app/Scripts/migrations + npm run db:migrate.',
+  );
+}
+if (config.markTestMode) {
+  console.warn('[MARK] WARNING: MARK_TEST_MODE is on — jail bypassed, confirmations auto-approved. Testing only.');
+}
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
     ╔═══════════════════════════════════════╗
