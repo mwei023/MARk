@@ -148,9 +148,11 @@ export class GitAgent extends Agent {
     // ── Fix verification: workflow succeeded after an auto-fix branch ────────
     // If a prior incident for this repo was resolved by an auto-fix, mark it verified.
     if (event.type === 'github.workflow.completed') {
-      void opsMemory.markVerified
-        ? this.verifyPriorFix(repositoryContext.fullName, data.branch)
-        : Promise.resolve();
+      // Awaited deliberately: fire-and-forget lets later reads race the
+      // write (proven live). One indexed query; correctness over 50ms.
+      // (Was: `void opsMemory.markVerified ? ...` — void on the condition
+      // made it always falsy, so verification never ran at all.)
+      await this.verifyPriorFix(repositoryContext.fullName, data.branch);
       return;
     }
 
