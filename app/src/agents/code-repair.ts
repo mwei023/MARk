@@ -95,7 +95,7 @@ async function fileErrorCount(repoPath: string, relFile: string): Promise<{ coun
   }
 }
 
-const REPAIR_SYSTEM = `You fix one ESLint error by replacing individual lines. Output ONLY the corrected lines, one per line, in the exact format N|corrected code where N is the original line number. Output nothing else: no fences, no prose, no unchanged lines. Change the fewest lines that resolve the reported error without breaking types or behavior. FORBIDDEN: eslint-disable comments, deleting exports or functions, changing lines unrelated to the error. If no small local change fixes it, output nothing.`;
+const REPAIR_SYSTEM = `You fix one ESLint error by replacing individual lines. Output ONLY the corrected lines, one per line, in the exact format N|corrected code where N is the original line number. To ADD a missing line (e.g. an import at the top), output +N|new code to insert after line N (+0|... inserts at the very top). Output nothing else: no fences, no prose, no unchanged lines. Change the fewest lines that resolve the reported error without breaking types or behavior. FORBIDDEN: eslint-disable comments, deleting exports or functions, changing lines unrelated to the error. If no small local change fixes it, output nothing.`;
 
 /**
  * Client-side chat timeout. The provider interface exposes no timeout and
@@ -210,29 +210,51 @@ function spliceLines(original: string, targetLine: number, response: string): { 
   const origLines = original.split('\n');
   const rejections: string[] = [];
   const updates = new Map<number, string>();
-    for (const raw of response.split('\n')) {
-      const line = raw.trim().replace(/^```[a-zA-Z]*|```$/g, '').trim();
-      const m = line.match(/^(\d+)\|(.*)$/);
-      if (!m) continue;
-      const n = parseInt(m[1], 10);
-      // Empty replacement = line deletion: rejected outright. Deletion shifts
-      // every later line number and routinely breaks references below (the
-      // interface is still used); a real fix replaces, not removes.
-      if (!m[2].trim()) {
-        rejections.push(`line ${n} deletion rejected`);
+  const insertions: Array<{ after: number; code: string }> = [];
+  for (const raw of response.split('\n')) {
+    const line = raw.trim().replace(/^```[a-zA-Z]*|```$/g, '').trim();
+    // Insertions (+N|code): new line after line N (N=0 = file top, for imports).
+    const ins = line.match(/^\+(\d+)\|(.*)$/);
+    if (ins) {
+      const at = parseInt(ins[1], 10);
+      if (!ins[2].trim()) {
+        rejections.push('empty insertion rejected');
         continue;
       }
-      if (!Number.isFinite(n) || n < 1 || n > origLines.length) {
-        rejections.push(`line ${m[1]} out of range`);
+      if (insertions.length >= 5) {
+        rejections.push('insertion budget (5) exceeded');
         continue;
       }
-      if (Math.abs(n - targetLine) > 30) {
-        rejections.push(`line ${n} outside repair radius`);
+      const inHead = at >= 0 && at <= 15;
+      const nearTarget = at >= 1 && Math.abs(at - targetLine) <= 30;
+      if (!inHead && !nearTarget) {
+        rejections.push(`insertion at ${at} outside repair zones`);
         continue;
       }
-      updates.set(n, m[2]);
+      insertions.push({ after: at, code: ins[2] });
+      continue;
+    }
+    const m = line.match(/^(\d+)\|(.*)$/);
+    if (!m) continue;
+    const n = parseInt(m[1], 10);
+    // Empty replacement = line deletion: rejected outright. Deletion shifts
+    // every later line number and routinely breaks references below (the
+    // interface is still used); a real fix replaces, not removes.
+    if (!m[2].trim()) {
+      rejections.push(`line ${n} deletion rejected`);
+      continue;
+    }
+    if (!Number.isFinite(n) || n < 1 || n > origLines.length) {
+      rejections.push(`line ${m[1]} out of range`);
+      continue;
+    }
+    if (Math.abs(n - targetLine) > 30) {
+      rejections.push(`line ${n} outside repair radius`);
+      continue;
+    }
+    updates.set(n, m[2]);
   }
-  if (updates.size === 0) return { proposal: null, rejections, reindented: [] };
+  if (updates.size === 0 && insertions.length === 0) return { proposal: null, rejections, reindented: [] };
   const next = origLines.slice();
   const reindented: number[] = [];
   for (const [n, code] of updates) {
@@ -243,6 +265,10 @@ function spliceLines(original: string, targetLine: number, response: string): { 
     const stripped = code.replace(/^\s*/, '');
     next[n - 1] = origIndent + stripped;
     if (stripped !== code) reindented.push(n);
+  }
+  // Apply insertions bottom-up so earlier line numbers stay valid.
+  for (const ins of insertions.sort((a, b) => b.after - a.after)) {
+    next.splice(ins.after, 0, ins.code);
   }
   return { proposal: next.join('\n'), rejections, reindented };
 }

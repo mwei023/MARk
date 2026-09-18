@@ -30,6 +30,7 @@ import { proposalStore } from '../core/proposal';
 import { DevOpsAgent } from '../agents/devops-agent';
 import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
+import { repositoryRegistry } from '../repositories/registry';
 
 // Load env: repo-root .env first (LLM keys), then app/.env fills gaps.
 import * as path from 'path';
@@ -385,6 +386,66 @@ app.get('/api/health', (req: any, res: any) => {
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
   });
+});
+
+/**
+ * GET /api/status/ops - Ops world-model snapshot: what MARK knows about its
+ * environment. Composes incident, memory, baseline, and registry state.
+ * Never 500s on a missing database: unavailable sections report degraded
+ * with null data instead of failing the whole snapshot.
+ */
+app.get('/api/status/ops', async (req: any, res: any) => {
+  const snapshot: Record<string, any> = { timestamp: new Date().toISOString(), degraded: [] as string[] };
+
+  try {
+    const open = await incidentStore.getOpenIncidents();
+    const bySeverity: Record<string, number> = {};
+    const byRepo: Record<string, number> = {};
+    for (const inc of open) {
+      bySeverity[inc.severity] = (bySeverity[inc.severity] ?? 0) + 1;
+      const repo = (inc.context as any)?.repository ?? 'unknown';
+      byRepo[repo] = (byRepo[repo] ?? 0) + 1;
+    }
+    snapshot.openIncidents = { total: open.length, bySeverity };
+    const baselines = await repoBaseline.list().catch(() => null);
+    if (!baselines) {
+      snapshot.degraded.push('baselines');
+    }
+    const repos = await repositoryRegistry.loadFromDatabase().catch(() => repositoryRegistry.list());
+    snapshot.monitoredRepos = repos.map(r => {
+      const base = baselines?.find(b => b.repository === r.fullName);
+      return {
+        fullName: r.fullName,
+        localPath: r.localPath ?? null,
+        openIncidents: byRepo[r.fullName] ?? 0,
+        totalIncidents: base?.totalIncidents ?? null,
+        avgIncidentsPerDay: base?.avgIncidentsPerDay ?? null,
+        avgResolutionMs: base?.avgResolutionMs ?? null,
+        mostCommonType: base?.mostCommonType ?? null,
+        baselineUpdatedAt: base?.updatedAt ?? null,
+      };
+    });
+  } catch {
+    snapshot.degraded.push('incidents');
+    snapshot.openIncidents = null;
+    snapshot.monitoredRepos = null;
+  }
+
+  try {
+    snapshot.autoFix = await opsMemory.overallFixRate(30);
+  } catch {
+    snapshot.degraded.push('autofix');
+    snapshot.autoFix = null;
+  }
+
+  try {
+    snapshot.mostCommonFailureThisWeek = await opsMemory.mostCommonFailureType(7);
+  } catch {
+    snapshot.degraded.push('failures');
+    snapshot.mostCommonFailureThisWeek = null;
+  }
+
+  res.json({ success: true, ops: snapshot });
 });
 
 /**
