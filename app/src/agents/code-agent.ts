@@ -22,6 +22,7 @@ import { promisify } from 'util';
 import { config } from '../config.js';
 import { repositoryRegistry } from '../repositories/registry';
 import { collectEslintErrors, repairLintErrors, repairOneError, LintError, RepairOutcome, RepairRunContext } from './code-repair';
+import { consolidateBranches } from './branch-consolidate';
 
 const execFilePromise = promisify(execFile);
 
@@ -58,6 +59,12 @@ export class CodeAgent extends Agent {
     }
 
     const maxErrors = Number.isFinite(Number(data.maxErrors)) ? Number(data.maxErrors) : config.markRepairMaxErrors;
+    // Consolidation requests merge fix branches with evidence-decided
+    // conflicts instead of repairing. Same agent, same audit trail.
+    if (Array.isArray(data.branches) && data.branches.length > 0) {
+      await this.handleConsolidation(event, fullName, repoPath, incidentId, data.branches as string[]);
+      return;
+    }
     // Targeted requests name exact error sites; otherwise repair the first
     // N errors found. Either way one shared cloud budget for the run.
     const ctx: RepairRunContext = { cloudCalls: 0, maxCloudCalls: config.markRepairMaxCloudCalls };
@@ -174,6 +181,61 @@ export class CodeAgent extends Agent {
       const msg = error instanceof Error ? error.message : String(error);
       await find(`CodeAgent push failed safely on ${branchName}: ${msg.slice(0, 200)}. Fixes remain committed locally on that branch.`);
       return null;
+    }
+  }
+
+  /**
+   * Consolidate fix branches: merge oldest-first, resolve conflicts by
+   * eslint-count evidence, verify the tree, push one branch. Every decision
+   * lands in the incident trail.
+   */
+  private async handleConsolidation(
+    event: Event,
+    fullName: string,
+    repoPath: string,
+    incidentId: string | undefined,
+    branches: string[],
+  ): Promise<void> {
+    const find = async (text: string): Promise<void> => {
+      if (incidentId) await incidentStore.addFinding(incidentId, text);
+    };
+    console.log(`[CodeAgent] Consolidating ${branches.length} branches for ${fullName}`);
+    try {
+      const result = await consolidateBranches(repoPath, branches);
+      await find(`Consolidation pushed ${result.branch}: merged ${result.merged.length} branch(es)` +
+        (result.conflicted.length > 0 ? `, evidence-resolved conflicts in ${result.conflicted.length}` : ', no conflicts') +
+        (result.skipped.length > 0 ? `, skipped ${result.skipped.length} (${result.skipped.join(', ')})` : '') +
+        `. Final lint: ${result.lintErrorsAfter} errors.`);
+      for (const r of result.resolutions.slice(0, 8)) {
+        await find(`Conflict ${r.file}: kept ${r.winner} (${r.oursErrors} vs ${r.theirsErrors} errors).`);
+      }
+      for (const note of result.notes.slice(-3)) await find(`Consolidation note: ${note.slice(0, 200)}`);
+      if (incidentId) {
+        await incidentStore.addAction(incidentId, {
+          timestamp: new Date(),
+          agent: this.name,
+          action: 'consolidate_branches',
+          tool: 'git',
+          result: 'success',
+          details: `Merged ${result.merged.length} branches into ${result.branch}; lint ${result.lintErrorsAfter} errors.`,
+        });
+        await incidentStore.resolveIncident(incidentId, {
+          action: 'Consolidated fix branches',
+          success: true,
+          details: `Pushed ${result.branch}`,
+        });
+      }
+      await this.complete(event, fullName, incidentId, true, `consolidated ${result.merged.length} branches into ${result.branch}`);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('[CodeAgent] Consolidation failed:', msg);
+      await find(`Consolidation failed safely: ${msg.slice(0, 200)}. Branches untouched on origin.`);
+      if (incidentId) await incidentStore.updateStatus(incidentId, 'escalated');
+      await this.complete(event, fullName, incidentId, false, `consolidation failed: ${msg.slice(0, 120)}`);
+    } finally {
+      try {
+        console.log(`[CodeAgent] Completed consolidation for ${fullName}`);
+      } catch { /* logging never fails a run */ }
     }
   }
 
