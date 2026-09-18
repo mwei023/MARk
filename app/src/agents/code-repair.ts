@@ -10,6 +10,7 @@ import { execFile } from 'child_process';
 import { readFileSync, writeFileSync } from 'fs';
 import { promisify } from 'util';
 import { config } from '../config.js';
+import { getLLMProviderCached } from '../llm/index.js';
 
 const execFilePromise = promisify(execFile);
 
@@ -25,6 +26,8 @@ export interface RepairOutcome {
   target: LintError;
   fixed: boolean;
   skipped?: string;
+  /** Which model tier produced the kept proposal: local, cloud, or none. */
+  via?: 'local' | 'cloud' | 'none';
   detail: string;
 }
 
@@ -99,48 +102,97 @@ const REPAIR_SYSTEM = `You fix one ESLint error by replacing individual lines. O
  * some implementations ignore per-call config, so the loop enforces its own
  * bound — a hung generation fails this error, never the whole run.
  */
-async function chatWithTimeout(
-  chat: () => Promise<{ content: string }>,
+async function chatWithTimeout<T>(
+  chat: () => Promise<T>,
   ms: number,
-): Promise<string> {
+): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error(`LLM generation exceeded ${Math.round(ms / 1000)}s budget`)), ms);
     });
-    return (await Promise.race([chat(), timeout])).content;
+    return await Promise.race([chat(), timeout]);
   } finally {
     if (timer) clearTimeout(timer);
   }
 }
 
 /**
- * Capped code completion via the local Ollama REST API.
+ * Capped code completion with a local-first, cloud-escalation ladder.
  *
- * Why not the MARK provider abstraction: repair needs a hard generation cap
- * (`num_predict`) so small-model rambling terminates, and the provider
- * interface exposes no per-call options. Temperature 0 for determinism;
- * the token cap scales with file size so the model always has room for the
- * full corrected file plus a small margin — and never room to ramble.
+ * Attempt 1 is always the local Ollama model via REST with a hard generation
+ * cap (`num_predict`) — free, private, and terminating. The MARK provider
+ * abstraction exposes no per-call options, so the cap needs REST.
+ *
+ * Attempt 2 (only when configured cloud keys exist and the run still has
+ * cloud budget) goes through the MARK provider chain (primary → fallbacks
+ * per LLM_PROVIDER / LLM_FALLBACK_PROVIDERS) with maxTokens + temperature 0.
+ * Every attempt is client-side bounded; a hung generation fails the error,
+ * never the run.
  */
-async function completeRepair(prompt: string, numPredict: number): Promise<{ content: string }> {
-  const res = await fetch(`${config.ollamaHost}/api/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: config.ollamaModel,
-      stream: false,
-      options: { num_predict: numPredict, temperature: 0 },
-      messages: [
+export interface RepairRunContext {
+  cloudCalls: number;
+  maxCloudCalls: number;
+}
+
+async function completeRepair(
+  prompt: string,
+  numPredict: number,
+  ctx: RepairRunContext,
+  opts: { skipLocal?: boolean } = {},
+): Promise<{ content: string; via: 'local' | 'cloud' }> {
+  if (!opts.skipLocal) {
+    const localError = await tryLocalRepair(prompt, numPredict).catch((err) => err as Error);
+    if (typeof localError !== 'object' || localError === null || !('wasLocalFailure' in localError)) {
+      return { content: localError as unknown as string, via: 'local' };
+    }
+    if (ctx.cloudCalls >= ctx.maxCloudCalls) {
+      throw new Error(`Local repair failed (${(localError as Error).message.slice(0, 120)}) and cloud budget is spent (${ctx.cloudCalls}/${ctx.maxCloudCalls}).`);
+    }
+  } else if (ctx.cloudCalls >= ctx.maxCloudCalls) {
+    throw new Error(`Cloud budget is spent (${ctx.cloudCalls}/${ctx.maxCloudCalls}).`);
+  }
+  ctx.cloudCalls += 1;
+  const provider = await getLLMProviderCached();
+  const { content } = await chatWithTimeout(
+    () => provider.chat(
+      [
         { role: 'system', content: REPAIR_SYSTEM },
         { role: 'user', content: prompt },
       ],
-    }),
-  });
-  if (!res.ok) throw new Error(`Ollama chat failed: HTTP ${res.status}`);
-  const body = (await res.json()) as { message?: { content?: string }; error?: string };
-  if (body.error) throw new Error(`Ollama error: ${body.error}`);
-  return { content: body.message?.content ?? '' };
+      { maxTokens: numPredict, temperature: 0 },
+    ).then((res) => ({ content: res.content })),
+    120000,
+  );
+  return { content, via: 'cloud' };
+}
+
+async function tryLocalRepair(prompt: string, numPredict: number): Promise<string> {
+  try {
+    const res = await fetch(`${config.ollamaHost}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.ollamaModel,
+        stream: false,
+        options: { num_predict: numPredict, temperature: 0 },
+        messages: [
+          { role: 'system', content: REPAIR_SYSTEM },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    });
+    if (!res.ok) throw new Error(`Ollama chat failed: HTTP ${res.status}`);
+    const body = (await res.json()) as { message?: { content?: string }; error?: string };
+    if (body.error) throw new Error(`Ollama error: ${body.error}`);
+    return body.message?.content ?? '';
+  } catch (err) {
+    // Marker object so the caller can distinguish local failure (escalate)
+    // from a successful empty response (no escalation).
+    const marker = err instanceof Error ? err : new Error(String(err));
+    (marker as Error & { wasLocalFailure?: boolean }).wasLocalFailure = true;
+    throw marker;
+  }
 }
 
 function extractCode(response: string): string | null {
@@ -158,20 +210,27 @@ function spliceLines(original: string, targetLine: number, response: string): { 
   const origLines = original.split('\n');
   const rejections: string[] = [];
   const updates = new Map<number, string>();
-  for (const raw of response.split('\n')) {
-    const line = raw.trim().replace(/^```[a-zA-Z]*|```$/g, '').trim();
-    const m = line.match(/^(\d+)\|(.*)$/);
-    if (!m) continue;
-    const n = parseInt(m[1], 10);
-    if (!Number.isFinite(n) || n < 1 || n > origLines.length) {
-      rejections.push(`line ${m[1]} out of range`);
-      continue;
-    }
-    if (Math.abs(n - targetLine) > 30) {
-      rejections.push(`line ${n} outside repair radius`);
-      continue;
-    }
-    updates.set(n, m[2]);
+    for (const raw of response.split('\n')) {
+      const line = raw.trim().replace(/^```[a-zA-Z]*|```$/g, '').trim();
+      const m = line.match(/^(\d+)\|(.*)$/);
+      if (!m) continue;
+      const n = parseInt(m[1], 10);
+      // Empty replacement = line deletion: rejected outright. Deletion shifts
+      // every later line number and routinely breaks references below (the
+      // interface is still used); a real fix replaces, not removes.
+      if (!m[2].trim()) {
+        rejections.push(`line ${n} deletion rejected`);
+        continue;
+      }
+      if (!Number.isFinite(n) || n < 1 || n > origLines.length) {
+        rejections.push(`line ${m[1]} out of range`);
+        continue;
+      }
+      if (Math.abs(n - targetLine) > 30) {
+        rejections.push(`line ${n} outside repair radius`);
+        continue;
+      }
+      updates.set(n, m[2]);
   }
   if (updates.size === 0) return { proposal: null, rejections };
   const next = origLines.slice();
@@ -179,11 +238,16 @@ function spliceLines(original: string, targetLine: number, response: string): { 
   return { proposal: next.join('\n'), rejections };
 }
 
+/** First 150 chars of a raw model response, for supervision notes. */
+export function rawExcerpt(content: string): string {
+  return content.replace(/\s+/g, ' ').trim().slice(0, 150);
+}
+
 /** Repair a single error. Reverts on any verification failure. */
 export async function repairOneError(
   repoPath: string,
   target: LintError,
-  opts: { maxFileLines?: number; llmTimeoutMs?: number } = {},
+  opts: { maxFileLines?: number; llmTimeoutMs?: number; ctx?: RepairRunContext } = {},
 ): Promise<RepairOutcome> {
   const abs = `${repoPath}/${target.file}`;
   let original: string;
@@ -198,44 +262,91 @@ export async function repairOneError(
   }
   const before = await fileErrorCount(repoPath, target.file);
 
-  let proposal: string;
-  try {
-    // Windowed prompt: file head (imports) + ±25 lines around the error.
-    // Small output (~a few lines) keeps CPU inference fast and terminating.
-    const allLines = original.split('\n');
-    const lo = Math.max(0, target.line - 26);
-    const hi = Math.min(allLines.length, target.line + 25);
-    const head = allLines.slice(0, Math.min(15, allLines.length));
-    const window = allLines.slice(lo, hi);
-    const numbered = window.map((l, i) => `${lo + i + 1}|${l}`).join('\n');
-    const headBlock = lo <= 15 ? '' : `File head (line|code):\n${head.map((l, i) => `${i + 1}|${l}`).join('\n')}\n\n`;
-    const prompt = `File: ${target.file}\nESLint error at line ${target.line}, column ${target.column}: [${target.ruleId}] ${target.message}\n\n${headBlock}Repair window (line|code):\n${numbered}`;
-    const budgetMs = opts.llmTimeoutMs ?? 180000;
-    const content = await chatWithTimeout(
-      () => completeRepair(prompt, 300),
-      budgetMs,
-    );
-    const { proposal: spliced, rejections } = spliceLines(original, target.line, content);
-    if (!spliced) {
-      return { target, fixed: false, detail: `LLM proposed no usable lines${rejections.length > 0 ? ` (${rejections.slice(0, 2).join('; ')})` : ''}.` };
+  let proposal: string | null = null;
+  let via: 'local' | 'cloud' = 'local';
+  let lastNote = '';
+  const ctx = opts.ctx ?? { cloudCalls: 0, maxCloudCalls: config.markRepairMaxCloudCalls };
+  // Up to two tiers with per-tier verification: local first, then cloud
+  // escalation when the local proposal is unusable OR verification rejects
+  // it. Cloud is spent only on errors the free model demonstrably cannot
+  // fix — never speculatively. The file is reverted between tiers.
+  for (const tier of ['local', 'cloud'] as const) {
+    if (tier === 'cloud' && ctx.cloudCalls >= ctx.maxCloudCalls) {
+      lastNote = `cloud budget spent (${ctx.cloudCalls}/${ctx.maxCloudCalls})`;
+      break;
     }
-    if (/eslint-disable/.test(spliced)) {
-      return { target, fixed: false, detail: 'Proposal rejected: eslint-disable suppression instead of a fix.' };
+    let candidate: string | null = null;
+    try {
+      const attempt = await proposeEdit(original, target, {
+        skipLocal: tier === 'cloud',
+        ctx,
+        llmTimeoutMs: opts.llmTimeoutMs,
+      });
+      if (!attempt.proposal) {
+        lastNote = `${tier}: ${attempt.note}`;
+        continue;
+      }
+      candidate = attempt.proposal;
+      via = attempt.via;
+    } catch (err) {
+      lastNote = `${tier} call failed: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
+      continue;
     }
-    proposal = spliced;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { target, fixed: false, detail: `LLM call failed: ${msg.slice(0, 200)}` };
+    writeFileSync(abs, candidate);
+    const mid = await fileErrorCount(repoPath, target.file);
+    if (mid.count < before.count) {
+      proposal = candidate;
+      break; // verified improvement — keep, stop escalating
+    }
+    writeFileSync(abs, original);
+    lastNote = `${tier} proposal did not verify (${before.count} → ${mid.count}); reverted`;
   }
-
-  writeFileSync(abs, proposal);
+  if (!proposal) {
+    return { target, fixed: false, via: 'none', detail: `No verified fix (${lastNote.slice(0, 180)}).` };
+  }
+  // Final recount guards against verifier flakiness between the tier check
+  // and this return: only a recount-confirmed drop counts as fixed.
   const after = await fileErrorCount(repoPath, target.file);
   if (after.count < before.count) {
-    return { target, fixed: true, detail: `${target.file}: ${before.count} → ${after.count} errors.` };
+    return { target, fixed: true, via, detail: `${target.file}: ${before.count} → ${after.count} errors via ${via}.` };
   }
-  // No improvement (or worse): revert, never keep a lateral move.
   writeFileSync(abs, original);
-  return { target, fixed: false, detail: `${target.file}: proposal did not reduce errors (${before.count} → ${after.count}); reverted.` };
+  return { target, fixed: false, via: 'none', detail: `${target.file}: final recount did not confirm improvement; reverted.` };
+}
+
+/** Single proposal attempt: prompt, generate, splice, integrity-check. */
+async function proposeEdit(
+  original: string,
+  target: LintError,
+  opts: { skipLocal?: boolean; ctx: RepairRunContext; llmTimeoutMs?: number },
+): Promise<{ proposal: string | null; via: 'local' | 'cloud'; note: string }> {
+  // Windowed prompt: file head (imports) + ±25 lines around the error.
+  // Small output (~a few lines) keeps inference fast and terminating.
+  const allLines = original.split('\n');
+  const lo = Math.max(0, target.line - 26);
+  const hi = Math.min(allLines.length, target.line + 25);
+  const head = allLines.slice(0, Math.min(15, allLines.length));
+  const window = allLines.slice(lo, hi);
+  const numbered = window.map((l, i) => `${lo + i + 1}|${l}`).join('\n');
+  const headBlock = lo <= 15 ? '' : `File head (line|code):\n${head.map((l, i) => `${i + 1}|${l}`).join('\n')}\n\n`;
+  const prompt = `File: ${target.file}\nESLint error at line ${target.line}, column ${target.column}: [${target.ruleId}] ${target.message}\n\n${headBlock}Repair window (line|code):\n${numbered}`;
+  const budgetMs = opts.llmTimeoutMs ?? 180000;
+  const { content, via } = await chatWithTimeout(
+    () => completeRepair(prompt, 300, opts.ctx, { skipLocal: opts.skipLocal }),
+    budgetMs,
+  );
+  const { proposal: spliced, rejections } = spliceLines(original, target.line, content);
+  if (!spliced) {
+    return {
+      proposal: null,
+      via,
+      note: `no usable lines${rejections.length > 0 ? ` (${rejections.slice(0, 2).join('; ')})` : ''}; raw: ${rawExcerpt(content)}`,
+    };
+  }
+  if (/eslint-disable/.test(spliced)) {
+    return { proposal: null, via, note: 'eslint-disable suppression instead of a fix' };
+  }
+  return { proposal: spliced, via, note: 'ok' };
 }
 
 /**
@@ -244,14 +355,17 @@ export async function repairOneError(
  */
 export async function repairLintErrors(
   repoPath: string,
-  opts: { maxErrors?: number; maxFileLines?: number; onOutcome?: (o: RepairOutcome) => void | Promise<void> } = {},
+  opts: { maxErrors?: number; maxFileLines?: number; maxCloudCalls?: number; onOutcome?: (o: RepairOutcome) => void | Promise<void> } = {},
 ): Promise<RepairSummary> {
   const all = await collectEslintErrors(repoPath);
   const budget = opts.maxErrors ?? 5;
   const queue = all.slice(0, budget);
+  // One shared cloud budget for the whole run: escalation is per-incident,
+  // not per-error, so a hard file can't burn the budget for easy ones.
+  const ctx: RepairRunContext = { cloudCalls: 0, maxCloudCalls: opts.maxCloudCalls ?? config.markRepairMaxCloudCalls };
   const outcomes: RepairOutcome[] = [];
   for (const target of queue) {
-    const outcome = await repairOneError(repoPath, target, { maxFileLines: opts.maxFileLines });
+    const outcome = await repairOneError(repoPath, target, { maxFileLines: opts.maxFileLines, ctx });
     outcomes.push(outcome);
     if (opts.onOutcome) await opts.onOutcome(outcome);
   }

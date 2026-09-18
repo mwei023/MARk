@@ -457,9 +457,11 @@ export class GitAgent extends Agent {
     await this.runProbe(incidentId, 'toolchain', 'node', ['-e', "console.log('node '+process.version)"], repoPath);
     // P4: declared scripts + dependency surface for missing-dep checks.
     let pkgScripts = '';
+    let hasCheckScripts = false;
     try {
       const pkg = JSON.parse(readFileSync(`${repoPath}/package.json`, 'utf8'));
       pkgScripts = Object.keys(pkg?.scripts ?? {}).join(', ');
+      hasCheckScripts = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck);
       await incidentStore.addFinding(incidentId, `Probe package-scripts: ${pkgScripts || '(no scripts)'}`);
     } catch {
       await incidentStore.addFinding(incidentId, 'Probe package-scripts unavailable (no readable package.json).');
@@ -519,6 +521,15 @@ export class GitAgent extends Agent {
         `Observation: working tree has uncommitted changes (${files}). ` +
         `These did not go through CI — commit or stash them, then re-run the failing command to isolate.`,
       );
+    }
+    if (!hasCheckScripts && !diagnosed) {
+      await incidentStore.addFinding(
+        incidentId,
+        `Diagnosis: this repo has no automated checks (no lint/test/typecheck scripts; only: ${pkgScripts || 'none'}). ` +
+        `A CI failure here cannot come from code checks — suspect the pipeline itself (install, build, deploy steps). ` +
+        `Remedy (your steps): add a lint or test script so failures become diagnosable, and inspect the workflow file for non-code steps.`,
+      );
+      diagnosed = true;
     }
     void gitLog;
     void pkgScripts;

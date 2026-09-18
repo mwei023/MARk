@@ -1,6 +1,7 @@
-import { existsSync } from 'fs';
+import { existsSync, readdirSync } from 'fs';
 import { execSync } from 'child_process';
 import { getPool } from '../db/postgres';
+import { config } from '../config.js';
 
 export type RepositoryProvider = 'github';
 
@@ -167,6 +168,12 @@ export class RepositoryRegistry {
       return this.autoRegisterLocalRepo(localCandidate);
     }
 
+    // Last resort: scan the machine for a clone whose origin matches.
+    const wanted = normalizeRepositoryFullName(reference);
+    if (wanted.includes('/')) {
+      return this.findLocalClone(wanted);
+    }
+
     return null;
   }
 
@@ -181,8 +188,46 @@ export class RepositoryRegistry {
     return this.list().find(repo => repo.localPath && repo.localPath === localPath) ?? null;
   }
 
-  autoRegisterLocalRepo(localPath: string): MonitoredRepository | null {
-    if (!existsSync(localPath)) return null;
+  /**
+   * Find a local clone of a repo by scanning configured roots (one level).
+   * Answers "find the portfolio folder in my pc": matches directories whose
+   * git origin remote normalizes to the requested full name. Bounded
+   * (max 100 entries per root, 5s per remote lookup); failures skip silently.
+   */
+  findLocalClone(fullName: string, roots: string[] = config.repoRoots): MonitoredRepository | null {
+    const wanted = normalizeRepositoryFullName(fullName);
+    if (!wanted || !wanted.includes('/')) return null;
+    for (const root of roots.slice(0, 5)) {
+      let entries: string[];
+      try {
+        entries = readdirSync(root, { withFileTypes: true })
+          .filter(e => e.isDirectory() && !e.name.startsWith('.'))
+          .map(e => e.name)
+          .slice(0, 100);
+      } catch {
+        continue;
+      }
+      for (const name of entries) {
+        const candidate = `${root}/${name}`;
+        if (!existsSync(`${candidate}/.git`)) continue;
+        let remote: string | null = null;
+        try {
+          remote = execSync(`git -C "${candidate}" remote get-url origin`, {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            timeout: 5000,
+          }).toString().trim() || null;
+        } catch {
+          continue;
+        }
+        if (remote && normalizeRepositoryFullName(remote) === wanted) {
+          return this.autoRegisterLocalRepo(candidate);
+        }
+      }
+    }
+    return null;
+  }
+
+  autoRegisterLocalRepo(localPath: string): MonitoredRepository | null {    if (!existsSync(localPath)) return null;
 
     const remoteUrl = getGitRemoteUrl(localPath);
     if (!remoteUrl) return null;

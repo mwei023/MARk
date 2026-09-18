@@ -69,6 +69,16 @@ export class Gateway {
           reasoning: 'Test failure. Check logs for known patterns.',
         };
 
+      // Code repair: owned by the coding agent (LLM edits + verify-or-revert)
+      case 'code.repair.requested':
+        return {
+          path: 'agent',
+          agent: 'code-agent',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: 'Code repair request. Coding agent proposes minimal edits with verification.',
+        };
+
       // User Command: Route based on content
       case 'user.command.received':
         return this.routeUserCommand(event);
@@ -105,7 +115,16 @@ export class Gateway {
       };
     }
 
-    const cmd = command.toLowerCase();
+    const cmd = command;
+
+    // Agent intent patterns use whole-word matching only. Substring
+    // `includes()` misroutes ("legitimate" -> git, "latest" -> test,
+    // "somehow" -> how). Word boundaries keep specialist routing precise;
+    // anything ambiguous falls through to kernel / reasoning.
+    const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request)\b/i;
+    const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
+    const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
+    const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;
 
     if (
       /\b(what llm|which llm|what model|which model|llm provider|ai provider|mark status|system status|how are you configured|configuration)\b/i.test(
@@ -141,7 +160,7 @@ export class Gateway {
     }
 
     // Git commands
-    if (cmd.includes('git') || cmd.includes('branch') || cmd.includes('commit')) {
+    if (GIT_RE.test(cmd)) {
       return {
         path: 'agent',
         agent: 'git-agent',
@@ -152,7 +171,7 @@ export class Gateway {
     }
 
     // Deployment/DevOps commands
-    if (cmd.includes('deploy') || cmd.includes('rollback') || cmd.includes('restart') || cmd.includes('docker')) {
+    if (DEVOPS_RE.test(cmd)) {
       return {
         path: 'agent',
         agent: 'devops-agent',
@@ -163,7 +182,7 @@ export class Gateway {
     }
 
     // CI/CD commands
-    if (cmd.includes('pipeline') || cmd.includes('build') || cmd.includes('test')) {
+    if (CICD_RE.test(cmd)) {
       return {
         path: 'agent',
         agent: 'cicd-agent',
@@ -174,13 +193,7 @@ export class Gateway {
     }
 
     // Complex reasoning needed
-    if (
-      cmd.includes('debug') ||
-      cmd.includes('why') ||
-      cmd.includes('how') ||
-      cmd.includes('figure out') ||
-      cmd.includes('investigate')
-    ) {
+    if (REASONING_RE.test(cmd) || /\bfigure out\b/i.test(cmd)) {
       return {
         path: 'reasoning',
         needsLLM: true,

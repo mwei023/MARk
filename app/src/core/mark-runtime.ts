@@ -14,10 +14,23 @@ import { Gateway, gateway } from './gateway';
 import { CapabilityRegistry, capabilityRegistry } from '../runtime/capabilities/registry';
 import { LocalHostCapability } from '../runtime/capabilities/shell';
 import { GitAgent } from '../agents/git-agent';
+import { DevOpsAgent } from '../agents/devops-agent';
+import { CICDAgent } from '../agents/cicd-agent';
+import { CodeAgent } from '../agents/code-agent';
 import {
   MARKKernelBridge,
   markKernelBridge,
 } from '../kernel/bridge';
+import {
+  extractGoalTerms,
+} from '../kernel/workflow-memory';
+import { config } from '../config.js';
+import { respondWithLLM } from '../llm/reasoner';
+import { classifyWithLLM } from './classifier';
+import { TaskBinder } from '../kernel/task-binder';
+import type { ToolDescriptor } from '../kernel/types';
+
+const taskBinder = new TaskBinder();
 
 export interface Reasoner {
   respond(input: string, userId: string): Promise<string>;
@@ -40,17 +53,10 @@ export interface CommandResult {
   trace?: string[];
 }
 
-/** Preserves the existing LangGraph assistant behind MARK's reasoning boundary. */
-const legacyJarvisReasoner: Reasoner = {
+/** Canonical reasoning: plain LLM chat with deterministic memory retrieval. */
+const markReasoner: Reasoner = {
   async respond(input, userId) {
-    // Dynamic loading keeps the legacy graph an adapter, not a dependency of
-    // MARK's core startup path. It also lets deterministic commands work when
-    // an LLM/database is unavailable.
-    // `import('../agent')` resolves to the sibling directory under ts-node's
-    // ESM loader. CommonJS resolution deliberately selects `agent.ts`, the
-    // legacy public entry point retained as MARK's reasoning adapter.
-    const legacy = require('../agent') as { runAgent: (text: string, id: string) => Promise<string> };
-    return legacy.runAgent(input, userId);
+    return respondWithLLM(input, userId);
   },
 };
 
@@ -67,7 +73,7 @@ export class MarkRuntime {
     this.router = dependencies.gateway ?? gateway;
     this.agents = dependencies.agents ?? agentRuntime;
     this.capabilities = dependencies.capabilities ?? capabilityRegistry;
-    this.reasoner = dependencies.reasoner ?? legacyJarvisReasoner;
+    this.reasoner = dependencies.reasoner ?? markReasoner;
     this.kernelBridge = dependencies.kernelBridge ?? markKernelBridge;
 
     if (!this.capabilities.list().some(capability => capability.id === 'host.local')) {
@@ -79,6 +85,9 @@ export class MarkRuntime {
     }
     if (this.agents.getAgentCount() === 0) {
       this.agents.registerAgent(new GitAgent());
+      this.agents.registerAgent(new DevOpsAgent());
+      this.agents.registerAgent(new CICDAgent());
+      this.agents.registerAgent(new CodeAgent());
     }
 
     // Operational inputs (webhooks now; other perceptions later) share this
@@ -87,7 +96,7 @@ export class MarkRuntime {
   }
 
   /** The single application command path for every MARK interface. */
-  async executeCommand(command: string, userId = 'mwei', source: 'api' | 'voice' | 'cli' = 'api'): Promise<CommandResult> {
+  async executeCommand(command: string, userId = config.defaultUser, source: 'api' | 'voice' | 'cli' = 'api'): Promise<CommandResult> {
     const event: Event = {
       id: `CMD-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date(),
@@ -100,10 +109,38 @@ export class MarkRuntime {
 
     // The event is emitted before handling, so observers see every command.
     await this.bus.emit(event);
-    const decision = this.router.classify(event);
+    let decision = this.router.classify(event);
     const trace = [
       `gateway → ${decision.path}${decision.agent ? ` (${decision.agent})` : ''}: ${decision.reasoning ?? ''}`.trim(),
     ];
+
+    // Smart routing: when keywords cannot claim the command, an LLM
+    // classifier gets one chance to upgrade to deterministic/agent.
+    // Deterministic and agent keyword routes never consult the LLM (fast,
+    // offline-safe, test-stable). Disabled with MARK_SMART=off.
+    if (process.env.MARK_SMART !== 'off' && (decision.path === 'reasoning' || decision.path === 'escalate')) {
+      try {
+        const smart = await classifyWithLLM(command);
+        if (smart && smart.path === 'deterministic' && this.capabilities.findFor(command)) {
+          decision = { ...smart, needsLLM: false };
+          trace.push(
+            `gateway → deterministic (llm, confidence ${smart.confidence.toFixed(2)}): ${smart.reasoning}`.trim(),
+          );
+        } else if (smart && smart.path === 'agent') {
+          decision = { ...smart, needsLLM: false };
+          trace.push(
+            `gateway → agent${smart.agent ? ` (${smart.agent})` : ''} (llm, confidence ${smart.confidence.toFixed(2)}): ${smart.reasoning}`.trim(),
+          );
+        } else if (smart) {
+          trace.push(
+            `gateway → ${smart.path} (llm confirms, confidence ${smart.confidence.toFixed(2)}): ${smart.reasoning}`.trim(),
+          );
+        }
+      } catch (err) {
+        // LLM classifier failed — keyword routing decision stands.
+        trace.push(`gateway → llm classifier error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     let result: CommandResult;
 
     if (decision.path === 'deterministic') {
@@ -187,7 +224,8 @@ export class MarkRuntime {
   ): Promise<{ response: string; route: 'kernel'; trace: string[] } | undefined> {
     try {
       await this.kernelBridge.initialize();
-    } catch {
+    } catch (err) {
+      // Kernel init failed (DB offline, tool discovery error) — skip kernel path.
       return undefined;
     }
     const contextInput = {
@@ -197,17 +235,32 @@ export class MarkRuntime {
     } as const;
 
     // Experience before reasoning: a saved workflow with strong goal overlap
-    // runs as-is. Outcomes are recorded so memory learns what keeps working.
+    // runs as-is — unless it is hollow for THIS goal (takes inputs the goal
+    // never states AND fresh resolution is weak or disagrees). Hollow
+    // replays execute the wrong tool confidently, so they plan fresh
+    // instead (arbitration included). Outcomes are recorded so memory
+    // learns what keeps working.
     try {
       const reused = this.kernelBridge.reuseWorkflow(command);
-      if (reused) {
+      const fresh = this.kernelBridge.resolveCapability(command);
+      if (reused && !isHollowReuse(reused.plan, command, this.kernelBridge.listTools(), (cmd, tool) => taskBinder.bind(cmd, tool), fresh)) {
         const report = await this.kernelBridge.executePlanWithReport(reused.plan, { ...contextInput });
         const succeeded = report.status === 'succeeded';
         this.kernelBridge.recordWorkflowOutcome(reused.workflowId, succeeded);
         const stepSummary = report.steps.map(step => `${step.stepId.slice(0, 18)}…:${step.status}`).join(', ');
+        // State what actually ran: "procedure succeeded" alone misleads for
+        // action goals (finding tracks is not playing music).
+        const whatRan = report.steps
+          .map(step => {
+            const detail = step.output && typeof step.output === 'object'
+              ? JSON.stringify(step.output).slice(0, 200)
+              : String(step.output ?? step.status);
+            return `• ${step.toolId}: ${step.status}${step.status === 'succeeded' ? ` — ${detail}` : ` — ${step.error ?? 'failed'}`}`;
+          })
+          .join('\n');
         return {
           response: succeeded
-            ? `⚙️ Reused a known procedure (${report.steps.length} steps, all succeeded).`
+            ? `⚙️ Reused a known procedure (${report.steps.length} steps, all succeeded):\n${whatRan}`
             : `Reused procedure ${reused.workflowId} ended ${report.status}: ${stepSummary}`,
           route: 'kernel',
           trace: [
@@ -217,14 +270,26 @@ export class MarkRuntime {
           ],
         };
       }
-    } catch {
-      // Memory must never break fresh planning.
+    } catch (err) {
+      // Memory recall/execution error — proceed with fresh planning.
+      trace.push(`memory → reuse error: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
     try {
       outcome = await this.kernelBridge.executeGoal(command, contextInput);
-    } catch {
+    } catch (err) {
+      // Goal execution threw — kernel path unavailable, caller falls through.
+      trace.push(`kernel → executeGoal error: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+
+    // Chat-only unknowns: an explanation request ("help me understand X")
+    // with at most one thin tool-term match is answered by chat, never by
+    // executing the coincidental tool ("neural networks" must not open
+    // network interfaces). Retrieval requests ("summarize recent
+    // incidents") are unaffected — they match or miss on their own terms.
+    if (isExplanationRequest(command) && (outcome.resolution.matchedTerms?.length ?? 0) <= 1) {
       return undefined;
     }
 
@@ -300,6 +365,10 @@ export class MarkRuntime {
   ): string | undefined {
     try {
       if (!plan || plan.steps.length === 0) return undefined;
+      // Single-term goals ("hi", "status") execute fine but are never worth
+      // memorizing: they are usually false-positive matches or too vague to
+      // replay safely.
+      if (extractGoalTerms(command).length < 2) return undefined;
       const risks = new Map(this.kernelBridge.listTools().map(tool => [tool.id, tool.risk] as const));
       const allReadOnly = plan.steps.every(step => {
         const risk = risks.get(step.toolId);
@@ -308,7 +377,8 @@ export class MarkRuntime {
       if (!allReadOnly) return undefined;
       if (this.kernelBridge.recallWorkflows(command, 1, 0.9).length > 0) return undefined;
       return this.kernelBridge.saveWorkflow(plan).id;
-    } catch {
+    } catch (err) {
+      // Workflow save failed — non-critical, proceed without saving.
       return undefined;
     }
   }
@@ -338,7 +408,7 @@ export class MarkRuntime {
   async executeKernelTool(
     toolId: string,
     input: Record<string, unknown> = {},
-    userId = 'mwei',
+    userId = config.defaultUser,
     source: 'api' | 'voice' | 'cli' = 'api',
   ) {
     return this.kernelBridge.executeTool(toolId, input, {
@@ -349,7 +419,7 @@ export class MarkRuntime {
 
   async executeKernelGoal(
     goal: string,
-    userId = 'mwei',
+    userId = config.defaultUser,
     source: 'api' | 'voice' | 'cli' = 'api',
   ) {
     return this.kernelBridge.executeGoal(goal, {
@@ -371,12 +441,49 @@ export class MarkRuntime {
 
 export const markRuntime = new MarkRuntime();
 
+/** Explicit explanation framings: chat owns these unless tools match deeply. */
+function isExplanationRequest(command: string): boolean {
+  return /\b(help me understand|explain|what (is|are)|define|tell me about|how (does|do)|why (is|are|do))\b/i.test(command);
+}
+
+/**
+ * A recalled plan is hollow for the current goal when its first step
+ * declares inputs the goal never states AND fresh resolution is weak
+ * (one thin match) or disagrees (different top tool): replaying would run
+ * a tool the goal never evidenced. Input-less tools, evidenced replays,
+ * and recalls no fresh resolution covers always run.
+ */
+export function isHollowReuse(
+  plan: { steps: Array<{ toolId: string; input?: Record<string, unknown> }> },
+  command: string,
+  tools: ToolDescriptor[],
+  bind: (command: string, tool: ToolDescriptor) => { matchedFields: string[] },
+  fresh?: { tool?: { id: string }; matchedTerms?: string[] },
+): boolean {
+  const first = plan.steps[0];
+  if (!first) return true;
+  const tool = tools.find(candidate => candidate.id === first.toolId);
+  if (!tool) return true;
+  if (Object.keys(tool.inputSchema?.properties ?? {}).length === 0) return false;
+  let evidenced = false;
+  try {
+    evidenced = bind(command, tool).matchedFields.length > 0;
+  } catch (_err) {
+    // bind() threw (e.g. malformed tool schema) — treat as not evidenced, allow reuse.
+    return false;
+  }
+  if (evidenced) return false;
+  if (!fresh?.tool) return false;
+  return fresh.tool.id !== first.toolId || (fresh.matchedTerms?.length ?? 0) <= 1;
+}
+
 function compactKernelOutput(output: unknown): string {
   if (output === undefined) return '(no output)';
   try {
     const text = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
     return text.length > 800 ? `${text.slice(0, 800)}\n… (output truncated)` : text;
-  } catch {
+  } catch (_err) {
+    // Circular reference or other serialization failure.
     return String(output);
   }
 }

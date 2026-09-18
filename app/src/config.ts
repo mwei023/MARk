@@ -7,6 +7,15 @@
  *
  * Import: import { config } from '../config.js';
  */
+import os from 'os';
+
+function homeDir(): string {
+  try {
+    return process.env.HOME || os.homedir() || '/home/mwei';
+  } catch {
+    return '/home/mwei';
+  }
+}
 
 export interface AppConfig {
   // --- Identity ---
@@ -65,6 +74,8 @@ export interface AppConfig {
   markRepairMaxErrors: number;
   /** Skip LLM repair for files larger than this many lines (default 300). */
   markRepairMaxFileLines: number;
+  /** Max cloud-LLM repair calls per repair run; local model is always tried first (default 5). */
+  markRepairMaxCloudCalls: number;
   /**
    * TESTING ONLY — never enable in production. When true: the kernel
    * working-directory jail is bypassed (loud warning logged) and
@@ -76,6 +87,8 @@ export interface AppConfig {
   // --- Security ---
   /** Root directory that shell capabilities are allowed to read/write. */
   allowedDataDir: string;
+  /** Directories scanned (one level) to find local clones of repos by remote URL. */
+  repoRoots: string[];
 
   // --- Voice ---
   whisperBin: string | undefined;
@@ -148,10 +161,14 @@ export const config: AppConfig = {
   markDryRun: readBool(process.env.MARK_DRY_RUN, false),
   markRepairMaxErrors: readInt(process.env.MARK_REPAIR_MAX_ERRORS, 2),
   markRepairMaxFileLines: readInt(process.env.MARK_REPAIR_MAX_FILE_LINES, 300),
+  markRepairMaxCloudCalls: readInt(process.env.MARK_REPAIR_MAX_CLOUD_CALLS, 5),
   markTestMode: readBool(process.env.MARK_TEST_MODE, false),
 
   // Security
   allowedDataDir: process.env.ALLOWED_DATA_DIR ?? '/tmp/mark-data',
+  repoRoots: readList(process.env.MARK_REPO_ROOTS).length > 0
+    ? readList(process.env.MARK_REPO_ROOTS)
+    : [homeDir()],
 
   // Voice
   whisperBin: process.env.WHISPER_BIN,

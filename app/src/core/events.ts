@@ -76,7 +76,11 @@ export type EventType =
   | 'incident.updated'
   | 'incident.resolved'
   | 'agent.action.taken'
-  | 'agent.action.failed';
+  | 'agent.action.failed'
+
+  // Code repair (coding agent)
+  | 'code.repair.requested'
+  | 'code.repair.completed';
 
 /**
  * Specific event implementations
