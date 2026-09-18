@@ -20,6 +20,21 @@ import {
 } from './media';
 
 import {
+  incidentDiscoveryProvider,
+  incidentImplementations,
+} from './incidents';
+
+import {
+  browserDiscoveryProvider,
+  browserNativeImplementations,
+} from './browser';
+
+import {
+  investigateDiscoveryProvider,
+  investigateImplementations,
+} from './investigate';
+
+import {
   MARKKernel,
   markKernel,
 } from '../kernel';
@@ -34,12 +49,27 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(nativeSystemDiscoveryProvider);
   toolDiscovery.registerProvider(desktopDiscoveryProvider);
   toolDiscovery.registerProvider(mediaDiscoveryProvider);
+  toolDiscovery.registerProvider(incidentDiscoveryProvider);
+  toolDiscovery.registerProvider(browserDiscoveryProvider);
+  toolDiscovery.registerProvider(investigateDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
     kernel.registerImplementation(implementation);
   }
 
   for (const implementation of mediaNativeImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of incidentImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of browserNativeImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of investigateImplementations) {
     kernel.registerImplementation(implementation);
   }
 

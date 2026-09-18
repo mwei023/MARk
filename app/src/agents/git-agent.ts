@@ -408,6 +408,102 @@ export class GitAgent extends Agent {
     }
   }
 
+  // ── Planner-driven investigation ─────────────────────────────────────────
+  //
+  // The same probes GitAgent used to hardcode, composed as a kernel plan:
+  // deterministic template first ("deterministic first"), LLM proposal when
+  // smart mode is on ("LLM last"), validator as guardrail, kernel executor
+  // running each step with its authority policy. Any failure returns null
+  // and the caller falls back to the legacy inline probes — never worse.
+  private async collectProbesViaPlanner(
+    incidentId: string,
+    repoPath: string,
+    commit: string | undefined,
+    classifyText: string,
+  ): Promise<{
+    gitLog: string | null; gitStatus: string | null; pkgScripts: string;
+    hasChecks: boolean; depTree: string | null; planId: string;
+  } | null> {
+    try {
+      const { markKernelBridge } = await import('../kernel/bridge.js');
+      await markKernelBridge.initialize();
+      const stepId = (n: number): string => `probe-step-${Date.now()}-${n}` as never;
+
+      const buildTemplate = (): Record<string, unknown> => ({
+        id: `plan-${Date.now()}` as never,
+        goal: `Investigate build failure evidence for local checkout ${repoPath}`,
+        steps: [
+          { id: stepId(1), toolId: 'investigate.git_log', input: { repoPath, n: 5 }, dependsOn: [] },
+          { id: stepId(2), toolId: 'investigate.git_status', input: { repoPath }, dependsOn: [] },
+          { id: stepId(3), toolId: 'investigate.package_scripts', input: { repoPath }, dependsOn: [] },
+          { id: stepId(4), toolId: 'investigate.toolchain', input: { repoPath }, dependsOn: [] },
+          ...(commit
+            ? [{ id: stepId(5), toolId: 'investigate.diff_stat', input: { repoPath, commit }, dependsOn: [] }]
+            : []),
+        ],
+        successCriteria: ['evidence collected for diagnosis'],
+        explanation: 'Deterministic investigation template (planner-composed, validator-checked).',
+      });
+
+      let plan: Record<string, unknown> | null = null;
+      let source = 'template';
+      if (config.markSmart !== 'off') {
+        try {
+          const smart = await markKernelBridge.planGoalSmart(
+            `Investigate build failure for repository checkout ${repoPath}: gather recent commits, working tree status, package scripts, toolchain versions, then classify: ${classifyText.slice(0, 200)}`,
+          );
+          if (smart && markKernelBridge.validatePlan(smart.plan).valid) {
+            plan = smart.plan as unknown as Record<string, unknown>;
+            source = `llm-${smart.source}`;
+          }
+        } catch { /* fall through to template */ }
+      }
+      if (!plan) {
+        plan = buildTemplate();
+        const validation = markKernelBridge.validatePlan(plan as never);
+        if (!validation.valid) return null;
+      }
+
+      const report = await Promise.race([
+        markKernelBridge.executePlanWithReport(plan as never, {
+          userId: config.defaultUser,
+          source: 'api',
+          workingDirectory: repoPath,
+        } as never),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('plan timeout')), 90000)),
+      ]);
+      const byTool = new Map<string, Record<string, unknown>>();
+      for (const step of report.steps ?? []) {
+        const out = (step as { toolId: string; output?: unknown }).output;
+        if (out && typeof out === 'object') byTool.set((step as { toolId: string }).toolId, out as Record<string, unknown>);
+      }
+      const str = (v: unknown): string | null => typeof v === 'string' && v.length > 0 ? v : null;
+      const gitLog = str(byTool.get('investigate.git_log')?.commits);
+      const gitStatus = str(byTool.get('investigate.git_status')?.status);
+      const scriptsOut = byTool.get('investigate.package_scripts');
+      const pkgScripts = typeof scriptsOut?.scripts === 'string' ? scriptsOut.scripts : '';
+      const hasChecks = scriptsOut?.hasChecks === true;
+      const toolchainOut = byTool.get('investigate.toolchain');
+      const depTree = str(toolchainOut?.deps);
+
+      await incidentStore.addAction(incidentId, {
+        timestamp: new Date(),
+        agent: this.name,
+        action: 'investigate_plan',
+        tool: 'kernel-planner',
+        result: 'success',
+        details: `Executed investigation plan ${(plan as { id: string }).id} (source: ${source}, ${(report.steps ?? []).length} steps) via kernel executor.`,
+      });
+      await incidentStore.addFinding(incidentId, `Probe git-log (planned): ${gitLog ?? '(unavailable)'}`);
+      await incidentStore.addFinding(incidentId, `Probe git-status (planned): ${gitStatus ?? '(unavailable)'}`);
+      await incidentStore.addFinding(incidentId, `Probe package-scripts (planned): ${pkgScripts || '(unavailable)'}`);
+      await incidentStore.addFinding(incidentId, `Probe installed-deps (planned): ${(depTree ?? '(unavailable)').slice(0, 600)}`);
+      return { gitLog, gitStatus, pkgScripts, hasChecks, depTree, planId: (plan as { id: string }).id };
+    } catch {
+      return null;
+    }
+  }
+
   private async investigateUnknown(
     incidentId: string,
     correlationId: string,
@@ -449,27 +545,43 @@ export class GitAgent extends Agent {
       details: `Running up to ${GitAgent.MAX_PROBES} read-only probes in ${repoPath}`,
     });
 
-    // P1: recent history — what changed just before the failure.
-    const gitLog = await this.runProbe(incidentId, 'git-log', 'git', ['-C', repoPath, 'log', '--oneline', '-5'], repoPath);
-    // P2: dirty tree — uncommitted changes are a prime suspect.
-    const gitStatus = await this.runProbe(incidentId, 'git-status', 'git', ['-C', repoPath, 'status', '--porcelain'], repoPath);
-    // P3: toolchain — node/npm versions anchor dependency diagnoses.
-    await this.runProbe(incidentId, 'toolchain', 'node', ['-e', "console.log('node '+process.version)"], repoPath);
-    // P4: declared scripts + dependency surface for missing-dep checks.
-    let pkgScripts = '';
-    let hasCheckScripts = false;
-    try {
-      const pkg = JSON.parse(readFileSync(`${repoPath}/package.json`, 'utf8'));
-      pkgScripts = Object.keys(pkg?.scripts ?? {}).join(', ');
-      hasCheckScripts = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck);
-      await incidentStore.addFinding(incidentId, `Probe package-scripts: ${pkgScripts || '(no scripts)'}`);
-    } catch {
-      await incidentStore.addFinding(incidentId, 'Probe package-scripts unavailable (no readable package.json).');
-    }
-    // P5: installed versions of the usual suspects (exit code ignored).
-    const depTree = await this.runProbe(
-      incidentId, 'installed-deps', 'npm', ['ls', 'eslint', 'typescript', 'vite', '--depth=0'], repoPath,
+    // Planner first: compose the probes as a kernel plan (template, or LLM
+    // proposal when smart). Any failure falls back to the legacy inline
+    // probes below — the investigation never gets less than it had.
+    const planned = await this.collectProbesViaPlanner(
+      incidentId, repoPath, eventData.commit, diagnosisText,
     );
+    let gitLog: string | null;
+    let gitStatus: string | null;
+    let pkgScripts: string;
+    let hasCheckScripts: boolean;
+    let depTree: string | null;
+    if (planned) {
+      ({ gitLog, gitStatus, pkgScripts, hasChecks: hasCheckScripts, depTree } = planned);
+    } else {
+      // Legacy inline probes (fallback).
+      // P1: recent history — what changed just before the failure.
+      gitLog = await this.runProbe(incidentId, 'git-log', 'git', ['-C', repoPath, 'log', '--oneline', '-5'], repoPath);
+      // P2: dirty tree — uncommitted changes are a prime suspect.
+      gitStatus = await this.runProbe(incidentId, 'git-status', 'git', ['-C', repoPath, 'status', '--porcelain'], repoPath);
+      // P3: toolchain — node/npm versions anchor dependency diagnoses.
+      await this.runProbe(incidentId, 'toolchain', 'node', ['-e', "console.log('node '+process.version)"], repoPath);
+      // P4: declared scripts + dependency surface for missing-dep checks.
+      pkgScripts = '';
+      hasCheckScripts = false;
+      try {
+        const pkg = JSON.parse(readFileSync(`${repoPath}/package.json`, 'utf8'));
+        pkgScripts = Object.keys(pkg?.scripts ?? {}).join(', ');
+        hasCheckScripts = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck);
+        await incidentStore.addFinding(incidentId, `Probe package-scripts: ${pkgScripts || '(no scripts)'}`);
+      } catch {
+        await incidentStore.addFinding(incidentId, 'Probe package-scripts unavailable (no readable package.json).');
+      }
+      // P5: installed versions of the usual suspects (exit code ignored).
+      depTree = await this.runProbe(
+        incidentId, 'installed-deps', 'npm', ['ls', 'eslint', 'typescript', 'vite', '--depth=0'], repoPath,
+      );
+    }
 
     // ── Deterministic diagnosis ──────────────────────────────────────────
     const ruleMatch = diagnosisText.match(/Error while loading rule '([^']+)'/);
