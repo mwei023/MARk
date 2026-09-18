@@ -206,7 +206,7 @@ function extractCode(response: string): string | null {
  * by construction: only listed lines change, everything else is untouched.
  * Changes outside a ±30-line radius of the reported error are rejected.
  */
-function spliceLines(original: string, targetLine: number, response: string): { proposal: string | null; rejections: string[] } {
+function spliceLines(original: string, targetLine: number, response: string): { proposal: string | null; rejections: string[]; reindented: number[] } {
   const origLines = original.split('\n');
   const rejections: string[] = [];
   const updates = new Map<number, string>();
@@ -232,10 +232,19 @@ function spliceLines(original: string, targetLine: number, response: string): { 
       }
       updates.set(n, m[2]);
   }
-  if (updates.size === 0) return { proposal: null, rejections };
+  if (updates.size === 0) return { proposal: null, rejections, reindented: [] };
   const next = origLines.slice();
-  for (const [n, code] of updates) next[n - 1] = code;
-  return { proposal: next.join('\n'), rejections };
+  const reindented: number[] = [];
+  for (const [n, code] of updates) {
+    // Preserve the original line's indentation: small models routinely emit
+    // correct code at the wrong indent, and lint fixes almost never require
+    // reindentation. The original leading whitespace wins; the change is noted.
+    const origIndent = (origLines[n - 1].match(/^\s*/) ?? [''])[0];
+    const stripped = code.replace(/^\s*/, '');
+    next[n - 1] = origIndent + stripped;
+    if (stripped !== code) reindented.push(n);
+  }
+  return { proposal: next.join('\n'), rejections, reindented };
 }
 
 /** First 150 chars of a raw model response, for supervision notes. */
@@ -335,7 +344,7 @@ async function proposeEdit(
     () => completeRepair(prompt, 300, opts.ctx, { skipLocal: opts.skipLocal }),
     budgetMs,
   );
-  const { proposal: spliced, rejections } = spliceLines(original, target.line, content);
+  const { proposal: spliced, rejections, reindented } = spliceLines(original, target.line, content);
   if (!spliced) {
     return {
       proposal: null,
@@ -346,7 +355,11 @@ async function proposeEdit(
   if (/eslint-disable/.test(spliced)) {
     return { proposal: null, via, note: 'eslint-disable suppression instead of a fix' };
   }
-  return { proposal: spliced, via, note: 'ok' };
+  return {
+    proposal: spliced,
+    via,
+    note: reindented.length > 0 ? `reindented to original: lines ${reindented.slice(0, 5).join(',')}` : 'ok',
+  };
 }
 
 /**
