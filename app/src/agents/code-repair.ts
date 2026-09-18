@@ -10,7 +10,6 @@ import { execFile } from 'child_process';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { promisify } from 'util';
 import { config } from '../config.js';
-import { getLLMProviderCached } from '../llm/index.js';
 
 const execFilePromise = promisify(execFile);
 
@@ -153,18 +152,60 @@ async function completeRepair(
     throw new Error(`Cloud budget is spent (${ctx.cloudCalls}/${ctx.maxCloudCalls}).`);
   }
   ctx.cloudCalls += 1;
-  const provider = await getLLMProviderCached();
-  const { content } = await chatWithTimeout(
-    () => provider.chat(
-      [
-        { role: 'system', content: REPAIR_SYSTEM },
-        { role: 'user', content: prompt },
-      ],
-      { maxTokens: numPredict, temperature: 0 },
-    ).then((res) => ({ content: res.content })),
-    120000,
-  );
-  return { content, via: 'cloud' };
+  return await tryDirectCloudRepair(prompt, numPredict);
+}
+
+/**
+ * Cloud repair via direct OpenAI-compatible REST (Groq, then OpenRouter).
+ *
+ * Deliberately bypasses the MARK provider factory: its availability gate
+ * (5s timeout) flaps under load and its interface exposes no per-call
+ * options. Same request shape, generous timeout, explicit key presence
+ * checks. Failures throw so the caller records them honestly.
+ */
+async function tryDirectCloudRepair(prompt: string, numPredict: number): Promise<{ content: string; via: 'cloud' }> {
+  const targets = [
+    { base: 'https://api.groq.com/openai/v1', key: config.groqApiKey, model: config.groqModel, name: 'groq' },
+    { base: 'https://openrouter.ai/api/v1', key: config.openrouterApiKey, model: config.openrouterModel, name: 'openrouter' },
+  ].filter(t => t.key && t.key.length > 0);
+  if (targets.length === 0) throw new Error('No cloud keys configured (GROQ_API_KEY / OPENROUTER_API_KEY).');
+  let lastError = '';
+  for (const t of targets) {
+    try {
+      const res = await fetch(`${t.base}/chat/completions`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${t.key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: t.model,
+          temperature: 0,
+          max_tokens: Math.max(numPredict, 600),
+          messages: [
+            { role: 'system', content: REPAIR_SYSTEM },
+            { role: 'user', content: prompt },
+          ],
+        }),
+        signal: AbortSignal.timeout(150000),
+      });
+      if (!res.ok) {
+        lastError = `${t.name} HTTP ${res.status}`;
+        continue;
+      }
+      const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
+      if (body.error) {
+        lastError = `${t.name}: ${body.error.message}`;
+        continue;
+      }
+      const content = body.choices?.[0]?.message?.content ?? '';
+      if (!content.trim()) {
+        lastError = `${t.name}: empty response`;
+        continue;
+      }
+      return { content, via: 'cloud' };
+    } catch (err) {
+      lastError = `${t.name}: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
+    }
+  }
+  throw new Error(`Cloud repair failed: ${lastError.slice(0, 200)}`);
 }
 
 async function tryLocalRepair(prompt: string, numPredict: number): Promise<string> {
