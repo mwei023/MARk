@@ -31,6 +31,14 @@ import {
   PlanValidationResult,
 } from './planner';
 
+import {
+  confirmationManager,
+} from './confirmations';
+
+import { reliabilityTracker } from './reliability';
+import { episodeMemory } from './episode-memory';
+import { proposePlanWithLLM } from './llm-planner';
+
 
 export interface KernelBridgeOptions {
   initializeNativeProviders?: boolean;
@@ -59,6 +67,32 @@ export class MARKKernelBridge {
       registerNativeSystemProvider(this.kernel);
       await this.kernel.discover();
       this.initialized = true;
+    }
+
+    // Best-effort restore of persisted memory + approvals (never breaks startup).
+    try {
+      await this.kernel.workflowMemory.loadFromDatabase();
+    } catch (err) {
+      // Offline/tests: memory stays in-memory.
+      console.debug('[kernel/bridge] workflowMemory.loadFromDatabase skipped:', err instanceof Error ? err.message : String(err));
+    }
+    try {
+      await confirmationManager.loadFromDatabase();
+    } catch (err) {
+      // Offline/tests: approvals stay in-memory.
+      console.debug('[kernel/bridge] confirmationManager.loadFromDatabase skipped:', err instanceof Error ? err.message : String(err));
+    }
+    try {
+      await reliabilityTracker.loadFromDatabase();
+    } catch (err) {
+      // Offline/tests: reliability starts neutral.
+      console.debug('[kernel/bridge] reliabilityTracker.loadFromDatabase skipped:', err instanceof Error ? err.message : String(err));
+    }
+    try {
+      await episodeMemory.prune();
+    } catch (err) {
+      // Best effort — prune failure is non-critical.
+      console.debug('[kernel/bridge] episodeMemory.prune skipped:', err instanceof Error ? err.message : String(err));
     }
 
     return this.status();
@@ -113,8 +147,8 @@ export class MARKKernelBridge {
     return this.kernel.searchPendingConfirmations(text);
   }
 
-  trustTool(pattern: string, grantedBy = 'user') {
-    return this.kernel.trustTool(pattern, grantedBy);
+  trustTool(pattern: string, grantedBy = 'user', scopePath?: string) {
+    return this.kernel.trustTool(pattern, grantedBy, scopePath);
   }
 
   untrustTool(pattern: string) {
@@ -123,6 +157,10 @@ export class MARKKernelBridge {
 
   listTrustedTools() {
     return this.kernel.listTrustedTools();
+  }
+
+  suggestTrust() {
+    return this.kernel.suggestTrust();
   }
 
   listPendingConfirmations() {
@@ -175,6 +213,24 @@ export class MARKKernelBridge {
 
   planGoal(goal: string): ExecutionPlan {
     return this.kernel.planGoal(goal);
+  }
+
+  /**
+   * Smart planning: metadata planning first (fast, offline); when it yields
+   * nothing usable and smart mode is on, one LLM proposal round guarded by
+   * the kernel's own plan validator. Returns the plan with its source, or
+   * undefined when neither path produces anything.
+   */
+  async planGoalSmart(goal: string): Promise<{ plan: ExecutionPlan; source: 'metadata' | 'llm' } | undefined> {
+    const meta = this.planGoal(goal);
+    const metaValidation = this.validatePlan(meta);
+    if (metaValidation.valid && meta.steps.length > 0) {
+      return { plan: meta, source: 'metadata' };
+    }
+    if (process.env.MARK_SMART === 'off') return undefined;
+    const proposed = await proposePlanWithLLM(goal, this.listTools(), plan => this.validatePlan(plan));
+    if (!proposed) return undefined;
+    return { plan: proposed.plan, source: 'llm' };
   }
 
   validatePlan(plan: ExecutionPlan): PlanValidationResult {

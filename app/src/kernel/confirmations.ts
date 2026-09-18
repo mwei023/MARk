@@ -1,5 +1,7 @@
 import { ActionRequest, KernelId } from './types';
 import { createKernelId } from './execution-context';
+import { getPool } from '../db/postgres';
+import { TrustStore, trustStore } from './trust';
 
 export type ConfirmationStatus = 'pending' | 'approved' | 'denied';
 
@@ -14,6 +16,8 @@ export interface ConfirmationRecord {
   status: ConfirmationStatus;
   createdAt: string;
   decidedAt?: string;
+  /** Execution working directory at request time — enables root-scoped grants. */
+  scopePath?: string;
 }
 
 /**
@@ -22,12 +26,16 @@ export interface ConfirmationRecord {
  * there is nothing to confirm.
  *
  * Approval is bound to the exact tool + input snapshot so a grant cannot
- * be replayed against a different action.
+ * be replayed against a different action. Records persist best-effort to
+ * Postgres (`kernel_confirmations`) so approvals survive restarts.
  */
 export class ConfirmationManager {
   private readonly records = new Map<KernelId, ConfirmationRecord>();
+  private loadedFromDb = false;
 
-  request(action: ActionRequest, reason: string): ConfirmationRecord {
+  constructor(private readonly trust: TrustStore = trustStore) {}
+
+  request(action: ActionRequest, reason: string, scopePath?: string): ConfirmationRecord {
     const record: ConfirmationRecord = {
       id: createKernelId('confirm'),
       toolId: action.toolId,
@@ -38,7 +46,9 @@ export class ConfirmationManager {
       status: 'pending',
       createdAt: new Date().toISOString(),
     };
+    if (scopePath) record.scopePath = scopePath;
     this.records.set(record.id, record);
+    void this.persistRecord(record);
     return record;
   }
 
@@ -47,6 +57,8 @@ export class ConfirmationManager {
     if (!record || record.status !== 'pending') return undefined;
     record.status = approved ? 'approved' : 'denied';
     record.decidedAt = new Date().toISOString();
+    if (!approved) this.trust.recordApprovalResolved(record.toolId, false);
+    void this.persistDecision(record);
     return record;
   }
 
@@ -88,6 +100,63 @@ export class ConfirmationManager {
     const needle = text.toLowerCase().trim();
     if (!needle) return [];
     return this.listPending().filter(record => record.toolId.toLowerCase().includes(needle));
+  }
+
+  /** Best-effort load of pending confirmations (never throws). */
+  async loadFromDatabase(limit = 100): Promise<number> {
+    if (this.loadedFromDb) return this.listPending().length;
+    try {
+      /* getPool via static import */
+      const result = await getPool().query(
+        `SELECT id, tool_id, action_id, input, requested_by, reason, status, created_at, decided_at
+         FROM kernel_confirmations WHERE status = 'pending' ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      for (const row of result.rows) {
+        if (this.records.has(row.id)) continue;
+        this.records.set(row.id, {
+          id: row.id,
+          toolId: row.tool_id,
+          actionId: row.action_id,
+          input: row.input ?? {},
+          requestedBy: row.requested_by ?? 'unknown',
+          reason: row.reason ?? '',
+          status: row.status,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          decidedAt: row.decided_at ? new Date(row.decided_at).toISOString() : undefined,
+        });
+      }
+      this.loadedFromDb = true;
+      return this.listPending().length;
+    } catch {
+      return this.listPending().length;
+    }
+  }
+
+  private async persistRecord(record: ConfirmationRecord): Promise<void> {
+    try {
+      /* getPool via static import */
+      await getPool().query(
+        `INSERT INTO kernel_confirmations (id, tool_id, action_id, input, requested_by, reason, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (id) DO NOTHING`,
+        [record.id, record.toolId, record.actionId, JSON.stringify(record.input),
+         record.requestedBy, record.reason, record.status, record.createdAt],
+      );
+    } catch {
+      // Offline/tests: memory remains the source of truth.
+    }
+  }
+
+  private async persistDecision(record: ConfirmationRecord): Promise<void> {
+    try {
+      /* getPool via static import */
+      await getPool().query(
+        `UPDATE kernel_confirmations SET status = $2, decided_at = $3 WHERE id = $1`,
+        [record.id, record.status, record.decidedAt ?? new Date().toISOString()],
+      );
+    } catch {
+      // Best-effort only.
+    }
   }
 }
 

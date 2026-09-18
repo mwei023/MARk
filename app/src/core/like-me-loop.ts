@@ -10,6 +10,7 @@ import {
   MARKKernelBridge,
   markKernelBridge,
 } from '../kernel/bridge';
+import { config } from '../config.js';
 import {
   AuthorityManager,
   authorityManager,
@@ -142,6 +143,24 @@ export class LikeMeLoop {
     // their own names), and inputs bind from explicit values. Whatever the
     // plan cannot bind is reported honestly as a validation error.
     const plan = this.bridge.planGoal(goal);
+    return this.describePlan(goal, mode, plan);
+  }
+
+  /**
+   * Smart preview: metadata planning first, LLM proposal (validator-guarded)
+   * when metadata yields nothing. Async — needs the model round trip.
+   */
+  async previewSmart(goal: string, mode: LikeMeMode = 'plan'): Promise<LikeMePlanPreview & { planSource: 'metadata' | 'llm' }> {
+    const smart = await this.bridge.planGoalSmart(goal);
+    if (!smart) {
+      const fallback = this.describePlan(goal, mode, this.bridge.planGoal(goal));
+      return { ...fallback, planSource: 'metadata' };
+    }
+    const described = this.describePlan(goal, mode, smart.plan);
+    return { ...described, planSource: smart.source };
+  }
+
+  private describePlan(goal: string, mode: LikeMeMode, plan: ExecutionPlan): LikeMePlanPreview {
     const validation = this.bridge.validatePlan(plan);
     const tools = new Map(this.bridge.listTools().map(tool => [tool.id, tool]));
     const profileId = mode === 'plan' ? 'default' : 'workspace';
@@ -225,11 +244,13 @@ export class LikeMeLoop {
 
   async execute(
     goal: string,
-    opts: { mode?: LikeMeMode; userId?: string; source?: 'api' | 'cli' | 'voice' } = {},
+    opts: { mode?: LikeMeMode; userId?: string; source?: 'api' | 'cli' | 'voice'; smart?: boolean } = {},
   ) {
     const mode = opts.mode ?? 'build';
     await this.ensureInit();
-    const preview = this.preview(goal, mode);
+    const preview = opts.smart
+      ? await this.previewSmart(goal, mode)
+      : this.preview(goal, mode);
 
     if (mode === 'plan') {
       this.history.push({ goal, mode, at: new Date().toISOString() });
@@ -237,7 +258,7 @@ export class LikeMeLoop {
     }
 
     const report = await this.bridge.executePlanWithReport(preview.plan, {
-      userId: opts.userId ?? 'mwei',
+      userId: opts.userId ?? config.defaultUser,
       source: opts.source ?? 'api',
     } as never);
     this.history.push({ goal, mode, at: new Date().toISOString() });
@@ -253,12 +274,21 @@ export class LikeMeLoop {
     return this.confirmations.listPending();
   }
 
-  approve(confirmationId: string, approved: boolean) {
-    return this.confirmations.resolve(confirmationId as never, approved);
+  approve(confirmationId: string, approved: boolean, opts: { trust?: 'tool' | 'root' } = {}) {
+    const record = this.confirmations.resolve(confirmationId as never, approved);
+    // One-click standing grants: approving also records "allow always"
+    // (tool) or "allow in this project root" (tool + request directory).
+    if (record && approved && opts.trust) {
+      const scope = opts.trust === 'root' ? record.scopePath : undefined;
+      try {
+        this.bridge.trustTool(record.toolId as string, config.defaultUser, scope);
+      } catch { /* approval stands even if the grant fails to persist */ }
+    }
+    return record;
   }
 
   trust(pattern: string) {
-    return this.bridge.trustTool(pattern, 'mwei');
+    return this.bridge.trustTool(pattern, config.defaultUser);
   }
 
   untrust(pattern: string) {
@@ -267,6 +297,10 @@ export class LikeMeLoop {
 
   listTrusted() {
     return this.bridge.listTrustedTools();
+  }
+
+  suggestTrust() {
+    return this.bridge.suggestTrust();
   }
 
   /**

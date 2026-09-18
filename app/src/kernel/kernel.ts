@@ -80,6 +80,9 @@ import {
   toPlanExecutionResult,
 } from './plan-execution';
 
+import { episodeMemory } from './episode-memory';
+import { bindTaskSmart } from './task-binder';
+
 export interface KernelDependencies {
   toolRegistry?: ToolRegistry;
   toolDiscovery?: ToolDiscovery;
@@ -146,8 +149,17 @@ export class MARKKernel {
       resolveCapability: goal =>
         this.capabilityResolver.resolve(goal),
 
+      resolveAll: goal =>
+        this.capabilityResolver.resolveAll(goal),
+
+      resolveCandidates: goal =>
+        this.capabilityResolver.resolveAll(goal, { gate: false }),
+
       bindTask: (goal, tool) =>
         this.taskBinder.bind(goal, tool),
+
+      bindTaskSmart: (goal, tool) =>
+        bindTaskSmart(this.taskBinder, goal, tool),
 
       execute: (action, context) =>
         this.executor.execute(action, context),
@@ -218,8 +230,8 @@ export class MARKKernel {
     return this.executor.searchPendingConfirmations(text);
   }
 
-  trustTool(pattern: string, grantedBy = 'user') {
-    return this.executor.trustTool(pattern, grantedBy);
+  trustTool(pattern: string, grantedBy = 'user', scopePath?: string) {
+    return this.executor.trustTool(pattern, grantedBy, scopePath);
   }
 
   untrustTool(pattern: string) {
@@ -228,6 +240,10 @@ export class MARKKernel {
 
   listTrustedTools() {
     return this.executor.listTrustedTools();
+  }
+
+  suggestTrust() {
+    return this.executor.suggestTrust();
   }
 
   listPendingConfirmations() {
@@ -298,7 +314,25 @@ export class MARKKernel {
   }
 
   reuseWorkflow(goal: string): ReusedPlan | undefined {
-    return this.workflowMemory.reuse(goal);
+    const reused = this.workflowMemory.reuse(goal);
+    if (!reused) return undefined;
+    // Rebind: memory supplies structure, the CURRENT goal supplies values.
+    // Explicitly bound fields overlay the stored input; stored values fill
+    // the rest. Stale explicit inputs never replay against a goal that
+    // overrides them, and partial bindings never wipe stored values.
+    for (const step of reused.plan.steps) {
+      try {
+        const tool = this.toolRegistry.get(step.toolId);
+        if (!tool) continue;
+        const binding = this.taskBinder.bind(goal, tool);
+        if (binding.complete && binding.matchedFields.length > 0) {
+          step.input = { ...step.input, ...binding.input };
+        }
+      } catch {
+        // Keep the stored input on any binding trouble.
+      }
+    }
+    return reused;
   }
 
   recordWorkflowOutcome(workflowId: string, succeeded: boolean): void {
@@ -329,6 +363,11 @@ export class MARKKernel {
       validation,
       executeStep: (action, executionContext) =>
         this.executor.execute(action, executionContext),
+      recovery: {
+        tools: this.toolRegistry.list(),
+        maxAlternativesPerStep: 2,
+        recall: text => episodeMemory.recallSimilar(text, 5),
+      },
     });
 
     return toPlanExecutionResult(report);
@@ -348,6 +387,11 @@ export class MARKKernel {
       validation: this.validatePlan(plan),
       executeStep: (action, executionContext) =>
         this.executor.execute(action, executionContext),
+      recovery: {
+        tools: this.toolRegistry.list(),
+        maxAlternativesPerStep: 2,
+        recall: text => episodeMemory.recallSimilar(text, 5),
+      },
     });
   }
 

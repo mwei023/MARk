@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { config } from '../../config.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -423,6 +424,159 @@ export const fsFileReadImplementation: ToolImplementation = {
   },
 };
 
+export const fsFileSearchTool: ToolDescriptor = {
+  id: 'fs.file_search',
+  name: 'File search',
+  description:
+    'Finds text in file contents under a directory (searches for a pattern). Skips node_modules and .git. Read-only; patterns are operands, never shell.',
+  version: '1.0.0',
+  domain: 'filesystem',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: {
+        type: 'string',
+        description: 'Directory to search. Defaults to the working directory.',
+      },
+      pattern: {
+        type: 'string',
+        description: 'Fixed text to search for (not a regex).',
+      },
+      include: {
+        type: 'string',
+        description: 'Filename glob, e.g. "*.ts" (default: all files).',
+      },
+      limit: {
+        type: 'number',
+        description: 'Maximum matches to return (1-50, default 20).',
+      },
+    },
+    required: ['pattern'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string' },
+      pattern: { type: 'string' },
+      count: { type: 'number' },
+      truncated: { type: 'boolean' },
+      matches: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            file: { type: 'string' },
+            line: { type: 'number' },
+            preview: { type: 'string' },
+          },
+          required: ['file', 'line', 'preview'],
+        },
+      },
+      capturedAt: { type: 'string' },
+    },
+    required: ['path', 'pattern', 'count', 'truncated', 'matches', 'capturedAt'],
+  },
+  capabilities: ['filesystem-search', 'code-search', 'local-environment'],
+  supportedResourceKinds: ['file', 'directory'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+const FILE_SEARCH_LIMIT = 50;
+
+export const fsFileSearchImplementation: ToolImplementation = {
+  toolId: fsFileSearchTool.id,
+
+  async execute({ action, context }) {
+    const pattern = String(action.input.pattern ?? '');
+    if (!pattern) throw new Error('Search pattern is required.');
+    if (pattern.length > 200) throw new Error('Search pattern too long (max 200 chars).');
+
+    const rawPath =
+      typeof action.input.path === 'string' && action.input.path.length > 0
+        ? String(action.input.path)
+        : context.workingDirectory ?? process.cwd();
+    const requestedLimit =
+      typeof action.input.limit === 'number' ? Math.floor(action.input.limit) : 20;
+    const limit = Math.min(Math.max(requestedLimit, 1), FILE_SEARCH_LIMIT);
+
+    const base = path.resolve(context.workingDirectory ?? process.cwd());
+    const resolved = path.resolve(base, rawPath);
+    const stats = await fs.stat(resolved);
+    if (!stats.isDirectory()) throw new Error(`Not a directory: "${resolved}".`);
+
+    const include = typeof action.input.include === 'string' && action.input.include.length > 0
+      ? String(action.input.include)
+      : null;
+
+    // Fixed flags only; the pattern travels as an operand after `--`,
+    // never through a shell. grep exits 1 on no matches: that is an
+    // empty result, not a failure.
+    const args = ['-r', '-n', '-I', '-m', '3', '--exclude-dir=node_modules', '--exclude-dir=.git'];
+    if (include) args.push(`--include=${include}`);
+    args.push('--', pattern, resolved);
+
+    let stdout = '';
+    try {
+      ({ stdout } = await execFileAsync('grep', args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }));
+    } catch (error: any) {
+      if (Number((error as any)?.code) === 1) {
+        stdout = '';
+      } else {
+        throw new Error(`Search failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    const matches = stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)
+      .map(line => {
+        const first = line.indexOf(':');
+        const second = line.indexOf(':', first + 1);
+        if (first < 0 || second < 0) return null;
+        return {
+          file: line.slice(0, first),
+          line: Number(line.slice(first + 1, second)) || 0,
+          preview: line.slice(second + 1, second + 201),
+        };
+      })
+      .filter((entry): entry is { file: string; line: number; preview: string } => entry !== null)
+      .slice(0, limit + 1);
+    const truncated = matches.length > limit;
+    const sliced = matches.slice(0, limit);
+
+    const output = {
+      path: resolved,
+      pattern,
+      count: sliced.length,
+      truncated,
+      matches: sliced,
+      capturedAt: new Date().toISOString(),
+    };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'file',
+          source: 'native.system',
+          subject: resolved,
+          summary: `Searched "${pattern}" under ${resolved}: ${sliced.length} match(es).`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
 export const systemProcessListTool: ToolDescriptor = {
   id: 'system.process_list',
   name: 'Process list',
@@ -684,13 +838,19 @@ export const netNetworkInterfacesImplementation: ToolImplementation = {
 
 /**
  * Resolves a caller-supplied path inside the working-directory jail.
- * Throws when the resolved path escapes the jail.
+ * Throws when the resolved path escapes the jail — unless MARK_TEST_MODE
+ * is set, which bypasses the check with a loud warning (testing only,
+ * reversible via env var).
  */
 function resolveJailedPath(rawPath: string, workingDirectory: string | undefined): { base: string; resolved: string } {
   if (!rawPath) throw new Error('A path is required.');
   const base = path.resolve(workingDirectory ?? process.cwd());
   const resolved = path.resolve(base, rawPath);
   if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+    if (config.markTestMode) {
+      console.warn(`[kernel] MARK_TEST_MODE: jail bypass for "${rawPath}" (base ${base})`);
+      return { base, resolved };
+    }
     throw new Error(`Refused: "${rawPath}" escapes the working directory.`);
   }
   return { base, resolved };
@@ -758,6 +918,18 @@ export const fsDirectoryCreateImplementation: ToolImplementation = {
         },
       ],
     };
+  },
+
+  async verify({ output }) {
+    const dir = String((output as any)?.path ?? '');
+    if (!dir) return { ok: false, detail: 'no directory path in output to verify' };
+    try {
+      const stats = await fs.stat(dir);
+      if (!stats.isDirectory()) return { ok: false, detail: `"${dir}" exists but is not a directory` };
+      return { ok: true, detail: `directory "${dir}" exists` };
+    } catch {
+      return { ok: false, detail: `directory "${dir}" missing after creation` };
+    }
   },
 };
 
@@ -851,6 +1023,22 @@ export const fsFileWriteImplementation: ToolImplementation = {
         },
       ],
     };
+  },
+
+  async verify({ output }) {
+    const file = String((output as any)?.path ?? '');
+    const expectedBytes = Number((output as any)?.bytesWritten ?? NaN);
+    if (!file) return { ok: false, detail: 'no file path in output to verify' };
+    try {
+      const stats = await fs.stat(file);
+      if (!stats.isFile()) return { ok: false, detail: `"${file}" exists but is not a file` };
+      if (Number.isFinite(expectedBytes) && stats.size !== expectedBytes) {
+        return { ok: false, detail: `"${file}" is ${stats.size} bytes, expected ${expectedBytes}` };
+      }
+      return { ok: true, detail: `file "${file}" exists (${stats.size} bytes)` };
+    } catch {
+      return { ok: false, detail: `file "${file}" missing after write` };
+    }
   },
 };
 
@@ -973,6 +1161,10 @@ export const systemContainerRestartImplementation: ToolImplementation = {
       observations: [containerRestartObservation(container, restarted, detail, capturedAt)],
     };
   },
+
+  async verify({ output }) {
+    return verifyContainerRunning(String((output as any)?.container ?? ''));
+  },
 };
 
 export const containerRestartFamilyImplementation: ToolImplementation = {
@@ -993,7 +1185,24 @@ export const containerRestartFamilyImplementation: ToolImplementation = {
       observations: [containerRestartObservation(container, restarted, detail, capturedAt)],
     };
   },
+
+  async verify({ output }) {
+    return verifyContainerRunning(String((output as any)?.container ?? ''));
+  },
 };
+
+/** Independent check: is the container actually up after the restart? */
+async function verifyContainerRunning(container: string): Promise<{ ok: boolean; detail: string }> {
+  if (!container) return { ok: false, detail: 'no container name in output to verify' };
+  try {
+    const live = await listDockerContainers();
+    const entry = live.find(item => item.name === container);
+    if (!entry) return { ok: false, detail: `container "${container}" not running after restart` };
+    return { ok: true, detail: `container "${container}" running (${entry.status})` };
+  } catch (error) {
+    return { ok: false, detail: `could not verify "${container}": ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
 
 /** Measures paths with du. Fixed flags only; paths are operands, never a command string. */
 async function duSizes(targets: string[]): Promise<Array<{ path: string; sizeKB: number }>> {
@@ -1223,6 +1432,7 @@ export const nativeSystemTools: ToolDescriptor[] = [
   systemProcessSummaryTool,
   fsDirectoryListTool,
   fsFileReadTool,
+  fsFileSearchTool,
   systemProcessListTool,
   systemDiskUsageTool,
   netNetworkInterfacesTool,
@@ -1238,6 +1448,7 @@ export const nativeSystemImplementations: ToolImplementation[] = [
   systemProcessSummaryImplementation,
   fsDirectoryListImplementation,
   fsFileReadImplementation,
+  fsFileSearchImplementation,
   systemProcessListImplementation,
   systemDiskUsageImplementation,
   netNetworkInterfacesImplementation,

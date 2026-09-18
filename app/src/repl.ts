@@ -14,6 +14,7 @@ for (const candidate of [
 
 import { markRuntime } from './core/mark-runtime';
 import { likeMeLoop } from './core/like-me-loop';
+import { config } from './config.js';
 
 const animateThinking = () => {
   let dots = 0;
@@ -32,6 +33,8 @@ const printHelp = () => {
     '  /build <goal>       execute a like-me plan (confirmation-gated)',
     '  /pending            list pending kernel confirmations',
     '  /approve <id>       approve (id, action id, prefix, or app words)',
+    '  /approve <id> always approve + allow this tool always',
+    '  /approve <id> root   approve + allow this tool in this project root',
     '  /deny <id>          deny (same matching)',
     '  /trust <tool...>    always approve a tool (exact id or id prefix)',
     '  /untrust <tool...>  remove standing trust',
@@ -90,7 +93,7 @@ const repl = async () => {
     }
 
     if (!input) {
-      if (!rl.closed) rl.prompt();
+      if (!(rl as any).closed) rl.prompt();
       continue;
     }
 
@@ -105,7 +108,7 @@ const repl = async () => {
         const preview = likeMeLoop.preview(input.slice(6).trim(), 'plan');
         output = formatPreview(preview);
       } else if (input.startsWith('/build ')) {
-        const result = await likeMeLoop.execute(input.slice(7).trim(), { mode: 'build', userId: 'mwei', source: 'cli' });
+        const result = await likeMeLoop.execute(input.slice(7).trim(), { mode: 'build', userId: config.defaultUser, source: 'cli' });
         output = formatPreview(result.preview) + `\nexecuted=${result.executed}` +
           (result.report ? ` status=${(result.report as any).status}` : '') +
           `\npending=${result.pendingConfirmations?.length ?? 0} (use /pending, /approve <id>)`;
@@ -119,12 +122,18 @@ const repl = async () => {
           : `Pending:\n${pending.map(p => `  ${p.id} tool=${p.toolId}`).join('\n')}\nSay /approve <id or app words>.`;
       } else if (input.startsWith('/approve ') || input.startsWith('/deny ')) {
         const approved = input.startsWith('/approve ');
-        const text = input.replace(/^\/(approve|deny)\s+/, '').trim();
+        const raw = input.replace(/^\/(approve|deny)\s+/, '').trim();
+        // Trailing keywords: "/approve <id> always" (allow always) or
+        // "/approve <id> root" (allow in this project root). Deny ignores them.
+        const trust = approved && /\balways$/.test(raw) ? 'tool' as const
+          : approved && /\broot$/.test(raw) ? 'root' as const : undefined;
+        const text = trust ? raw.replace(/\s+(always|root)$/, '').trim() : raw;
         const verdict = likeMeLoop.resolveApproval(text);
         if (verdict.kind === 'record') {
-          const record = likeMeLoop.approve(verdict.record.id, approved);
+          const record = likeMeLoop.approve(verdict.record.id, approved, trust ? { trust } : {});
           output = record
-            ? `${approved ? 'approved' : 'denied'} ${record.toolId} (${record.id})`
+            ? `${approved ? 'approved' : 'denied'} ${record.toolId} (${record.id})` +
+              (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ` + trusted in ${record.scopePath ?? 'this root'}` : '')
             : 'confirmation not found or already decided';
         } else if (verdict.kind === 'ambiguous') {
           output = `Several match "${text}":\n${verdict.candidates.map(c => `  ${c.id} tool=${c.toolId}`).join('\n')}\nBe more specific.`;
@@ -137,7 +146,7 @@ const repl = async () => {
         const grants = likeMeLoop.listTrusted();
         output = grants.length === 0
           ? '(no standing trust — every gated tool asks each time)'
-          : grants.map(g => `  ${g.pattern} (since ${g.grantedAt})`).join('\n');
+          : grants.map(g => `  ${g.pattern}${g.scopePath ? ` [root: ${g.scopePath}]` : ''} (since ${g.grantedAt})`).join('\n');
       } else if (input.startsWith('/trust ') || input.startsWith('/untrust ')) {
         const untrusting = input.startsWith('/untrust ');
         const pattern = input.replace(/^\/(un)?trust\s+/, '').trim();
@@ -154,8 +163,13 @@ const repl = async () => {
         if (arg === 'off') showTrace = false;
         else if (arg === 'on') showTrace = true;
         output = `trace ${showTrace ? 'on' : 'off'}`;
+      } else if (input.startsWith('/')) {
+        output = '';
+        stopThinking();
+        console.log(`MARK: Unknown command "${input.split(/\s+/)[0]}".`);
+        printHelp();
       } else {
-        const result = await markRuntime.executeCommand(input, 'mwei', 'cli');
+        const result = await markRuntime.executeCommand(input, config.defaultUser, 'cli');
         output = `[${result.route}] ${result.response}`;
         if (showTrace && result.trace?.length) {
           output += `\n  ⎿ ${result.trace.join('\n  ⎿ ')}`;
@@ -168,7 +182,7 @@ const repl = async () => {
       console.log(`Error: ${error.message}\n`);
     }
 
-    if (!rl.closed) rl.prompt();
+    if (!(rl as any).closed) rl.prompt();
   }
 };
 
