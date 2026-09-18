@@ -17,9 +17,13 @@ import { Event } from '../core/events';
 import { incidentStore } from '../core/incident';
 import { eventBus } from '../core/event-bus';
 import { existsSync } from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { config } from '../config.js';
 import { repositoryRegistry } from '../repositories/registry';
 import { collectEslintErrors, repairLintErrors, repairOneError, LintError, RepairOutcome, RepairRunContext } from './code-repair';
+
+const execFilePromise = promisify(execFile);
 
 export class CodeAgent extends Agent {
   constructor() {
@@ -106,10 +110,17 @@ export class CodeAgent extends Agent {
         await find(`Final verification failed safely: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`);
       }
       const done = fixed > 0 && remaining === 0;
+      // Push is explicit, never default: the request must carry push:true
+      // (plus dry-run off). Pushed branches are the audit trail.
+      let pushedBranch: string | null = null;
+      if (fixed > 0 && data.push === true && !config.markDryRun) {
+        pushedBranch = await this.pushFixes(repoPath, incidentId, outcomes.filter((o) => o.fixed));
+      }
       await find(
         done
           ? `Repair complete and verified: ${fixed} error(s) fixed, ${remaining} remain repo-wide.`
-          : `Repair run finished: fixed ${fixed}/${attempted}, ${remaining >= 0 ? remaining : '?'} error(s) remain repo-wide. Needs another run or your action.`,
+          : `Repair run finished: fixed ${fixed}/${attempted}, ${remaining >= 0 ? remaining : '?'} error(s) remain repo-wide.` +
+            (pushedBranch ? ` Progress pushed to ${pushedBranch}.` : ' Needs another run or your action.'),
       );
       if (incidentId) {
         if (done) {
@@ -122,7 +133,7 @@ export class CodeAgent extends Agent {
           await incidentStore.updateStatus(incidentId, 'open');
         }
       }
-      await this.complete(event, fullName, incidentId, done, `${fixed}/${attempted} fixed, ${remaining} remain`);
+      await this.complete(event, fullName, incidentId, done, `${fixed}/${attempted} fixed, ${remaining} remain${pushedBranch ? `, pushed ${pushedBranch}` : ''}`);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.error('[CodeAgent] Repair run failed:', msg);
@@ -133,6 +144,36 @@ export class CodeAgent extends Agent {
       try {
         console.log(`[CodeAgent] Completed repair for ${fullName}`);
       } catch { /* logging never fails a run */ }
+    }
+  }
+
+  /**
+   * Commit verified fixes on their own branch and push. Only files with a
+   * verified fix are staged — never the whole tree. Failures are findings,
+   * never silent.
+   */
+  private async pushFixes(repoPath: string, incidentId: string | undefined, fixed: RepairOutcome[]): Promise<string | null> {
+    const files = [...new Set(fixed.map((o) => o.target.file).filter(Boolean))];
+    if (files.length === 0) return null;
+    const branchName = `auto-fix/code-${Date.now()}`;
+    const find = async (text: string): Promise<void> => {
+      if (incidentId) await incidentStore.addFinding(incidentId, text);
+    };
+    try {
+      await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
+      await execFilePromise('git', ['-C', repoPath, 'add', '--', ...files], { timeout: 15000 });
+      await execFilePromise(
+        'git',
+        ['-C', repoPath, 'commit', '-m', `auto-fix: repair ${files.length} file(s) (${fixed.length} lint errors)`],
+        { timeout: 15000 },
+      );
+      await execFilePromise('git', ['-C', repoPath, 'push', '-u', 'origin', branchName], { timeout: 120000 });
+      await find(`CodeAgent pushed ${branchName} with ${files.length} fixed file(s): ${files.slice(0, 5).join(', ')}.`);
+      return branchName;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      await find(`CodeAgent push failed safely on ${branchName}: ${msg.slice(0, 200)}. Fixes remain committed locally on that branch.`);
+      return null;
     }
   }
 
