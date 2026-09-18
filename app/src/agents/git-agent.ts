@@ -28,6 +28,7 @@ import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
 import { repairEslintTypescriptSkew } from './dependency-repair';
 import { repairLintErrors } from './code-repair';
+import { assessWorldState, formatWorldState } from './repo-state';
 
 const execFilePromise = promisify(execFile);
 
@@ -420,6 +421,7 @@ export class GitAgent extends Agent {
     repoPath: string,
     commit: string | undefined,
     classifyText: string,
+    worldSummary: string,
   ): Promise<{
     gitLog: string | null; gitStatus: string | null; pkgScripts: string;
     hasChecks: boolean; depTree: string | null; planId: string;
@@ -450,7 +452,7 @@ export class GitAgent extends Agent {
       if (config.markSmart !== 'off') {
         try {
           const smart = await markKernelBridge.planGoalSmart(
-            `Investigate build failure for repository checkout ${repoPath}: gather recent commits, working tree status, package scripts, toolchain versions, then classify: ${classifyText.slice(0, 200)}`,
+            `Investigate build failure for repository checkout ${repoPath}: gather recent commits, working tree status, package scripts, toolchain versions, then classify: ${classifyText.slice(0, 200)}. Current state: ${worldSummary.slice(0, 300)}`,
           );
           if (smart && markKernelBridge.validatePlan(smart.plan).valid) {
             plan = smart.plan as unknown as Record<string, unknown>;
@@ -545,11 +547,16 @@ export class GitAgent extends Agent {
       details: `Running up to ${GitAgent.MAX_PROBES} read-only probes in ${repoPath}`,
     });
 
+    // State first: what is true about this repo before any conclusion.
+    // Probes, diagnosis, and repairs all condition on this assessment.
+    const worldState = await assessWorldState(repoPath);
+    await incidentStore.addFinding(incidentId, formatWorldState(worldState));
+
     // Planner first: compose the probes as a kernel plan (template, or LLM
     // proposal when smart). Any failure falls back to the legacy inline
     // probes below — the investigation never gets less than it had.
     const planned = await this.collectProbesViaPlanner(
-      incidentId, repoPath, eventData.commit, diagnosisText,
+      incidentId, repoPath, eventData.commit, diagnosisText, formatWorldState(worldState),
     );
     let gitLog: string | null;
     let gitStatus: string | null;
@@ -618,9 +625,12 @@ export class GitAgent extends Agent {
         declared = Boolean(pkg?.dependencies?.[mod] ?? pkg?.devDependencies?.[mod]);
       } catch { /* probe already recorded */ }
       if (!declared) {
+        const installFirst = !worldState.hasNodeModules
+          ? ' Dependencies are not installed in this checkout, so run npm install BEFORE anything else — the module may simply be uninstalled rather than undeclared.'
+          : '';
         await incidentStore.addFinding(
           incidentId,
-          `Diagnosis: missing dependency '${mod}' — required at runtime but absent from package.json. ` +
+          `Diagnosis: missing dependency '${mod}' — required at runtime but absent from package.json.${installFirst} ` +
           `Remedy (your steps): run npm install ${mod} in the repo, commit the lockfile change, and re-run.`,
         );
         diagnosed = true;
@@ -838,6 +848,32 @@ export class GitAgent extends Agent {
       } else if (failureType === 'LINT_FAILURE') {
         const branchName = `auto-fix/lint-${Date.now()}`;
         await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
+        // Repair readiness: lint tooling needs installed dependencies. Fill
+        // the gap first (recorded) instead of failing mid-repair.
+        const readiness = await assessWorldState(repoPath);
+        if (!readiness.hasNodeModules && readiness.hasPackageJson && !config.markDryRun) {
+          try {
+            await execFilePromise('npm', ['install', '--no-audit', '--no-fund'], { cwd: repoPath, timeout: 300000 });
+            await incidentStore.addFinding(incidentId, `Readiness: installed dependencies on ${branchName} before repairing (node_modules was missing).`);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            await incidentStore.addAction(incidentId, {
+              timestamp: new Date(),
+              agent: this.name,
+              action: 'auto_fix_prepare',
+              tool: 'npm',
+              result: 'failure',
+              details: `Readiness install failed: ${msg.slice(0, 200)}`,
+            });
+            await incidentStore.addFinding(incidentId, `Cannot repair: dependencies failed to install (${msg.slice(0, 160)}). Remedy is yours: install manually and re-fire.`);
+            await incidentStore.updateStatus(incidentId, 'open');
+            return;
+          }
+        } else if (!readiness.repairReady && !config.markDryRun) {
+          await incidentStore.addFinding(incidentId, `Cannot repair: ${readiness.blockers.join('; ')}. Remedy is yours: fix readiness and re-fire.`);
+          await incidentStore.updateStatus(incidentId, 'open');
+          return;
+        }
         // Prefer the repo's own lint:fix script; fall back to local eslint --fix.
         let lintCmd: string[] = ['run', 'lint:fix'];
         let lintLabel = 'npm run lint:fix';
@@ -929,6 +965,29 @@ export class GitAgent extends Agent {
           return;
         }
         await execFilePromise('git', ['-C', repoPath, 'add', '-A'], { timeout: 15000 });
+        // Lockfile churn is not a fix: unstage package-lock.json unless
+        // package.json changed alongside it (real dependency change).
+        try {
+          const { stdout: staged } = await execFilePromise('git', ['-C', repoPath, 'diff', '--cached', '--name-only'], { timeout: 15000 });
+          const names = staged.split('\n').map(s => s.trim());
+          if (names.includes('package-lock.json') && !names.includes('package.json')) {
+            await execFilePromise('git', ['-C', repoPath, 'restore', '--staged', 'package-lock.json'], { timeout: 15000 });
+            await execFilePromise('git', ['-C', repoPath, 'checkout', '--', 'package-lock.json'], { timeout: 15000 });
+            await incidentStore.addFinding(incidentId, 'Hygiene: unstaged package-lock.json churn (installer version drift, not a fix).');
+          }
+        } catch {
+          // Best-effort hygiene; the emptiness check below still applies.
+        }
+        // If hygiene removed the only change, there is nothing real to commit.
+        const { stdout: stagedAfter } = await execFilePromise('git', ['-C', repoPath, 'diff', '--cached', '--name-only'], { timeout: 15000 });
+        if (!stagedAfter.trim()) {
+          await incidentStore.addFinding(
+            incidentId,
+            `Auto-fix on ${branchName} produced no source changes (only installer churn, now discarded). Remaining lint errors require manual fixes.`,
+          );
+          await incidentStore.updateStatus(incidentId, 'open');
+          return;
+        }
         await execFilePromise(
           'git',
           ['-C', repoPath, 'commit', '-m', `auto-fix: lint corrections (${failureType})`],
