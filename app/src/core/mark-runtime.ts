@@ -18,6 +18,7 @@ import { DevOpsAgent } from '../agents/devops-agent';
 import { CICDAgent } from '../agents/cicd-agent';
 import { CodeAgent } from '../agents/code-agent';
 import { ScreenAgent } from '../agents/screen-agent';
+import { WebAgent } from '../agents/web-agent';
 import { interactionStream } from './interaction';
 import {
   MARKKernelBridge,
@@ -91,6 +92,7 @@ export class MarkRuntime {
       this.agents.registerAgent(new CICDAgent());
       this.agents.registerAgent(new CodeAgent());
       this.agents.registerAgent(new ScreenAgent());
+      this.agents.registerAgent(new WebAgent());
     }
 
     // Operational inputs (webhooks now; other perceptions later) share this

@@ -84,7 +84,11 @@ export type EventType =
 
   // Screen tasks (computer-use agent)
   | 'screen.task.requested'
-  | 'screen.task.completed';
+  | 'screen.task.completed'
+
+  // Web research (web agent)
+  | 'web.search.requested'
+  | 'web.search.completed';
 
 /**
  * Specific event implementations

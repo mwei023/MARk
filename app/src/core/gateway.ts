@@ -89,6 +89,16 @@ export class Gateway {
           reasoning: 'Screen task. Computer-use agent observes, reasons, acts, and verifies.',
         };
 
+      // Web research: owned by the web agent (search + read)
+      case 'web.search.requested':
+        return {
+          path: 'agent',
+          agent: 'web-agent',
+          needsLLM: false,
+          priority: 'normal',
+          reasoning: 'Web research request. Web agent searches and reads.',
+        };
+
       // User Command: Route based on content
       case 'user.command.received':
         return this.routeUserCommand(event);
@@ -134,6 +144,7 @@ export class Gateway {
     const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up|repo\b|repository|repositories)\b/i;
     const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
     const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
+    const WEB_RE = /\b(google|browse|browsing|look\s?up|search the web|research)\b/i;
     const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;
 
     if (
@@ -199,6 +210,17 @@ export class Gateway {
         needsLLM: false,
         priority: 'normal',
         reasoning: 'CI/CD operation',
+      };
+    }
+
+    // Web research commands
+    if (WEB_RE.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'web-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Web research operation',
       };
     }
 
