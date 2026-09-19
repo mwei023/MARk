@@ -4,6 +4,7 @@ import {
   ActionStatus,
   ExecutionContext,
   Observation,
+  ToolDescriptor,
 } from './types';
 
 import {
@@ -27,7 +28,19 @@ import {
   resolveInputReferences,
   StepReferenceError,
   StepResultSnapshot,
+  collectStepReferences,
+  parseStepReference,
 } from './step-references';
+
+import { validateOutput } from './output-contracts';
+
+import {
+  listSchemaLeafPaths,
+  resolveSchemaPath,
+  scoreCompatibility,
+} from './compatibility';
+
+import { reliabilityTracker } from './reliability';
 
 export interface ExecuteStructuredPlanInput {
   plan: ExecutionPlan;
@@ -43,6 +56,24 @@ export interface ExecuteStructuredPlanInput {
     action: ActionRequest,
     context: ExecutionContext,
   ) => Promise<ActionResult>;
+
+  /**
+   * Optional recovery catalog. When a step fails (never when it is blocked
+   * awaiting a human), the executor tries compatible sibling tools before
+   * giving up on the step. Absent = fail fast, legacy behavior.
+   */
+  recovery?: PlanRecoveryOptions;
+}
+
+export interface PlanRecoveryOptions {
+  tools: ToolDescriptor[];
+  maxAlternativesPerStep?: number;
+  /**
+   * Optional episodic recall: similar past outcomes for "toolId error".
+   * Used to prefer siblings that delivered before and demote ones that
+   * failed in similar situations. Absent or throwing = no memory.
+   */
+  recall?: (text: string) => Promise<Array<{ toolId: string; status: string }>>;
 }
 
 interface StepExecutionState {
@@ -68,7 +99,7 @@ interface StepExecutionState {
 export async function executeStructuredPlan(
   input: ExecuteStructuredPlanInput,
 ): Promise<PlanExecutionReport> {
-  const { plan, context, executeStep } = input;
+  const { plan, context, executeStep, recovery } = input;
 
   const startedAt = new Date().toISOString();
 
@@ -128,105 +159,133 @@ export async function executeStructuredPlan(
     }
   };
 
-  for (const step of orderedSteps) {
-    const state = states.get(step.id)!;
+  for (const level of groupStepsByLevel(orderedSteps, stepMap)) {
+    // Dependency checks first (all synchronous): deps live in earlier
+    // levels and are already final, so skips are decided before anything
+    // in this level runs.
+    const runnable: Array<{ step: PlanStep; state: StepExecutionState; resolvedInput: Record<string, unknown> }> = [];
+    for (const step of level) {
+      const state = states.get(step.id)!;
+      if (state.status !== 'pending') continue;
 
-    if (state.status !== 'pending') {
-      continue;
+      const dependencyCheck = checkDependencies(step, states, stepMap);
+      if (!dependencyCheck.satisfied) {
+        state.status = 'skipped';
+        state.result = buildSkippedResult(step, dependencyCheck.unsatisfiedBy!);
+        continue;
+      }
+
+      // Resolve input references against finalized earlier levels.
+      const dependencySnapshots = buildDependencySnapshots(states);
+      let resolvedInput: Record<string, unknown>;
+      try {
+        resolvedInput = resolveInputReferences(step.input, dependencySnapshots);
+      } catch (error) {
+        const message =
+          error instanceof StepReferenceError
+            ? error.message
+            : `Failed to resolve input references for step "${step.id}": ${describeError(error)}`;
+        state.status = 'failed';
+        state.result = buildFailedResult(step, step.input, message);
+        markUnexecutedDependentsSkipped(step.id);
+        continue;
+      }
+      runnable.push({ step, state, resolvedInput });
     }
 
-    // 3. Execute only when all dependencies are satisfied.
-    const dependencyCheck = checkDependencies(step, states, stepMap);
-
-    if (!dependencyCheck.satisfied) {
-      state.status = 'skipped';
-      state.result = buildSkippedResult(
-        step,
-        dependencyCheck.unsatisfiedBy!,
-      );
-      continue;
-    }
-
-    // 4. Resolve input references immediately before execution.
-    const dependencySnapshots =
-      buildDependencySnapshots(states);
-
-    let resolvedInput: Record<string, unknown>;
-
-    try {
-      resolvedInput = resolveInputReferences(
-        step.input,
-        dependencySnapshots,
-      );
-    } catch (error) {
-      const message =
-        error instanceof StepReferenceError
-          ? error.message
-          : `Failed to resolve input references for step "${step.id}": ${describeError(error)}`;
-
-      state.status = 'failed';
-      state.result = buildFailedResult(step, step.input, message);
-
-      markUnexecutedDependentsSkipped(step.id);
-      continue;
-    }
-
-    const action: ActionRequest = {
-      id: createKernelId('action'),
-      toolId: step.toolId,
-      input: resolvedInput,
-      requestedBy: context.userId,
-      createdAt: new Date().toISOString(),
-      metadata: {
-        source: 'plan-execution',
-        planId: plan.id,
-        stepId: step.id,
-      },
-    };
-
-    // 5. Execute through the established, authority-checked path.
-    const stepStartedAt = new Date().toISOString();
-    state.status = 'running';
-    const result = await executeStep(action, context);
-    const stepCompletedAt = new Date().toISOString();
-
-    observations.push(...result.observations);
-
-    if (result.status === 'succeeded') {
-      state.status = 'succeeded';
-      state.result = {
-        stepId: step.id,
+    // Independent steps in one level run concurrently. Results are folded
+    // back in plan order so reports and observations stay deterministic.
+    const settled = await Promise.all(runnable.map(async ({ step, state, resolvedInput }) => {
+      const action: ActionRequest = {
+        id: createKernelId('action'),
         toolId: step.toolId,
-        status: 'succeeded',
-        input: step.input,
-        resolvedInput,
-        action,
-        output: result.output,
-        result,
-        observations: result.observations,
-        startedAt: stepStartedAt,
-        completedAt: stepCompletedAt,
+        input: resolvedInput,
+        requestedBy: context.userId,
+        createdAt: new Date().toISOString(),
+        metadata: {
+          source: 'plan-execution',
+          planId: plan.id,
+          stepId: step.id,
+        },
       };
-    } else {
-      state.status = 'failed';
-      state.result = {
-        stepId: step.id,
-        toolId: step.toolId,
-        status: 'failed',
-        input: step.input,
-        resolvedInput,
-        action,
-        result,
-        observations: result.observations,
-        startedAt: stepStartedAt,
-        completedAt: stepCompletedAt,
-        error:
-          result.error ??
-          `Step "${step.id}" finished with status "${result.status}".`,
-      };
+      const stepStartedAt = new Date().toISOString();
+      const result = await executeStep(action, context);
+      return { step, state, action, resolvedInput, result, stepStartedAt, stepCompletedAt: new Date().toISOString() };
+    }));
 
-      // 6. Dependents of a failed step never run.
-      markUnexecutedDependentsSkipped(step.id);
+    for (const { step, state, action, resolvedInput, result, stepStartedAt, stepCompletedAt } of settled) {
+      observations.push(...result.observations);
+
+      if (result.status === 'succeeded') {
+        state.status = 'succeeded';
+        state.result = {
+          stepId: step.id,
+          toolId: step.toolId,
+          status: 'succeeded',
+          input: step.input,
+          resolvedInput,
+          action,
+          output: result.output,
+          result,
+          observations: result.observations,
+          startedAt: stepStartedAt,
+          completedAt: stepCompletedAt,
+        };
+      } else if (result.status === 'failed' && recovery) {
+        // Recovery: try compatible siblings before failing the step.
+        // Blocked steps (awaiting human confirmation) never recover here.
+        const recovered = await attemptStepRecovery({
+          step,
+          resolvedInput,
+          originalError: result.error ?? `Step "${step.id}" finished with status "${result.status}".`,
+          recovery,
+          context,
+          executeStep,
+          observations,
+        });
+        if (recovered) {
+          state.status = 'succeeded';
+          state.result = recovered;
+        } else {
+          state.status = 'failed';
+          state.result = {
+            stepId: step.id,
+            toolId: step.toolId,
+            status: 'failed',
+            input: step.input,
+            resolvedInput,
+            action,
+            result,
+            observations: result.observations,
+            startedAt: stepStartedAt,
+            completedAt: stepCompletedAt,
+            error:
+              result.error ??
+              `Step "${step.id}" finished with status "${result.status}".`,
+          };
+          markUnexecutedDependentsSkipped(step.id);
+        }
+      } else {
+        state.status = 'failed';
+        state.result = {
+          stepId: step.id,
+          toolId: step.toolId,
+          status: 'failed',
+          input: step.input,
+          resolvedInput,
+          action,
+          result,
+          observations: result.observations,
+          startedAt: stepStartedAt,
+          completedAt: stepCompletedAt,
+          error:
+            result.error ??
+            `Step "${step.id}" finished with status "${result.status}".`,
+        };
+
+        // Dependents of a failed step never run.
+        markUnexecutedDependentsSkipped(step.id);
+      }
     }
   }
 
@@ -271,6 +330,55 @@ interface DependencyCheckResult {
   satisfied: boolean;
   /** ID of the dependency that blocked execution, if any. */
   unsatisfiedBy?: string;
+}
+
+/**
+ * Groups steps into execution levels: steps in one level share no
+ * dependency edges (declared `dependsOn` or `$steps.*` input references)
+ * and may run concurrently. Levels follow dependency order, and steps keep
+ * plan order within a level so reports stay deterministic.
+ */
+function groupStepsByLevel(
+  orderedSteps: PlanStep[],
+  stepMap: Map<string, PlanStep>,
+): PlanStep[][] {
+  const edges = new Map<string, Set<string>>();
+  for (const step of orderedSteps) {
+    const deps = new Set<string>();
+    for (const dependencyId of step.dependsOn ?? []) {
+      if (stepMap.has(dependencyId)) deps.add(dependencyId);
+    }
+    for (const reference of collectStepReferences(step.input)) {
+      const target = parseStepReference(reference);
+      if (target && stepMap.has(target.stepId) && target.stepId !== step.id) {
+        deps.add(target.stepId);
+      }
+    }
+    edges.set(step.id, deps);
+  }
+
+  const levelOf = new Map<string, number>();
+  const computeLevel = (stepId: string, visiting: Set<string>): number => {
+    const known = levelOf.get(stepId);
+    if (known !== undefined) return known;
+    if (visiting.has(stepId)) return 0;
+    visiting.add(stepId);
+    let level = 0;
+    for (const depId of edges.get(stepId) ?? []) {
+      level = Math.max(level, computeLevel(depId, visiting) + 1);
+    }
+    visiting.delete(stepId);
+    levelOf.set(stepId, level);
+    return level;
+  };
+
+  const levels: PlanStep[][] = [];
+  for (const step of orderedSteps) {
+    const level = computeLevel(step.id, new Set());
+    while (levels.length <= level) levels.push([]);
+    levels[level].push(step);
+  }
+  return levels;
 }
 
 function checkDependencies(
@@ -454,6 +562,151 @@ function describeError(error: unknown): string {
   }
 
   return String(error);
+}
+
+/**
+ * Recovery: substitute a compatible sibling tool for a failed step.
+ *
+ * A sibling qualifies only when:
+ * - it is available and is not the failed tool;
+ * - every input it requires is already present in the resolved input;
+ * - the failed tool declares an output contract, and every required leaf
+ *   of that contract exists in the sibling's output with a compatible type
+ *   (so downstream `$steps.*` references keep working);
+ * - its own run succeeds AND its output validates against the failed
+ *   tool's contract.
+ *
+ * Each attempt goes through executeStep, so authority checks apply to
+ * siblings too. A sibling that comes back `blocked` (needs a human) stops
+ * recovery immediately — automation never routes around confirmation.
+ * Returns a succeeded PlanStepResult, or undefined when nothing recovered.
+ */
+async function attemptStepRecovery(args: {
+  step: PlanStep;
+  resolvedInput: Record<string, unknown>;
+  originalError: string;
+  recovery: PlanRecoveryOptions;
+  context: ExecutionContext;
+  executeStep: (action: ActionRequest, context: ExecutionContext) => Promise<ActionResult>;
+  observations: Observation[];
+}): Promise<PlanStepResult | undefined> {
+  const { step, resolvedInput, originalError, recovery, context, executeStep, observations } = args;
+  const failedTool = recovery.tools.find(tool => tool.id === step.toolId);
+  if (!failedTool?.outputSchema) return undefined;
+
+  const requiredLeaves = listSchemaLeafPaths(failedTool.outputSchema)
+    .filter(leaf => (failedTool.outputSchema?.required ?? []).includes(leaf.path[0]));
+  if (requiredLeaves.length === 0) return undefined;
+
+  const candidates = recovery.tools
+    .filter(tool => tool.id !== step.toolId && tool.available && tool.outputSchema)
+    .filter(tool => {
+      const required = tool.inputSchema?.required ?? [];
+      if (!required.every(key => key in resolvedInput)) return false;
+      return requiredLeaves.every(leaf => {
+        const siblingNode = resolveSchemaPath(tool.outputSchema, leaf.path);
+        return siblingNode !== null && scoreCompatibility(siblingNode, leaf.schema).compatible;
+      });
+    });
+
+  // Memory: what happened last time in similar situations?
+  let memory: Array<{ toolId: string; status: string }> = [];
+  if (recovery.recall && candidates.length > 0) {
+    try {
+      memory = await recovery.recall(`${step.toolId} ${originalError}`.slice(0, 500));
+    } catch (err) {
+      // Memory recall failed — continue with empty memory, no recovery ranking.
+      memory = [];
+      console.debug('[plan-execution] recovery.recall failed:', err instanceof Error ? err.message : String(err));
+    }
+  }
+  const memoryScore = (toolId: string): number => {
+    let score = 0;
+    for (const episode of memory) {
+      if (episode.toolId !== toolId) continue;
+      score += episode.status === 'succeeded' ? 1 : -1;
+    }
+    return score;
+  };
+
+  const ranked = candidates
+    .sort((a, b) =>
+      (b.domain === failedTool.domain ? 1 : 0) - (a.domain === failedTool.domain ? 1 : 0) ||
+      memoryScore(b.id) - memoryScore(a.id) ||
+      reliabilityTracker.score(b.id) - reliabilityTracker.score(a.id) ||
+      a.id.localeCompare(b.id),
+    )
+    .slice(0, Math.max(recovery.maxAlternativesPerStep ?? 2, 0));
+  if (ranked.length === 0) return undefined;
+
+  if (memory.length > 0) {
+    const relevant = ranked
+      .map(tool => `${tool.id}(${memoryScore(tool.id) >= 0 ? '+' : ''}${memoryScore(tool.id)})`)
+      .join(', ');
+    observations.push(recoveryObservation(step, `memory: ${memory.length} similar past outcome(s); sibling history ${relevant}`));
+  }
+
+  for (const sibling of ranked) {
+    const siblingAction: ActionRequest = {
+      id: createKernelId('action'),
+      toolId: sibling.id,
+      input: resolvedInput,
+      requestedBy: context.userId,
+      createdAt: new Date().toISOString(),
+      metadata: { source: 'plan-recovery', planId: '', stepId: step.id, recoveryFor: step.toolId },
+    };
+    const siblingResult = await executeStep(siblingAction, context);
+    observations.push(...siblingResult.observations);
+
+    if (siblingResult.status === 'blocked') {
+      observations.push(recoveryObservation(step, `sibling "${sibling.id}" needs human confirmation; recovery stops`));
+      return undefined;
+    }
+    if (siblingResult.status !== 'succeeded') continue;
+
+    const contract = validateOutput(siblingResult.output, failedTool.outputSchema);
+    if (!contract.valid) continue;
+
+    const summary = `Recovered step "${step.id}" via sibling "${sibling.id}" after "${failedTool.id}" failed: ${originalError}`;
+    observations.push(recoveryObservation(step, summary));
+    return {
+      stepId: step.id,
+      toolId: sibling.id,
+      status: 'succeeded',
+      input: step.input,
+      resolvedInput,
+      action: siblingAction,
+      output: siblingResult.output,
+      result: {
+        ...siblingResult,
+        metadata: { ...(siblingResult.metadata ?? {}), recoveredVia: sibling.id, recoveryFor: step.toolId },
+      },
+      observations: siblingResult.observations,
+      startedAt: siblingResult.startedAt,
+      completedAt: siblingResult.completedAt,
+      error: undefined,
+    };
+  }
+
+  observations.push(recoveryObservation(
+    step,
+    `Recovery exhausted for step "${step.id}": tried ${ranked.map(c => c.id).join(', ')}; original error stands: ${originalError}`,
+  ));
+  return undefined;
+}
+
+function recoveryObservation(step: PlanStep, summary: string): Observation {
+  return {
+    id: `observation-${Date.now()}`,
+    kind: 'output',
+    source: 'kernel.recovery',
+    subject: step.id,
+    summary,
+    data: { stepId: step.id, toolId: step.toolId },
+    confidence: 1,
+    observedAt: new Date().toISOString(),
+    relatedResourceIds: [],
+  };
 }
 
 /**

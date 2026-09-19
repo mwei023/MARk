@@ -2,6 +2,7 @@ import { ExecutionPlan, PlanStep } from './planner';
 import { createKernelId } from './execution-context';
 import { isStepReference, parseStepReference, STEP_REFERENCE_PREFIX } from './step-references';
 import { KernelId } from './types';
+import { getPool } from '../db/postgres';
 
 export interface LearnedWorkflow {
   id: KernelId;
@@ -27,10 +28,12 @@ export interface ReusedPlan {
  * against stored goals by metadata term overlap — no hardcoded app
  * knowledge. Reuse remaps step IDs and rewrites every $steps.* reference
  * so the recalled plan executes fresh without colliding with the original.
- * In-memory for now; a persistent store can replace it later.
+ * Persisted best-effort to Postgres (`learned_workflows`); memory is the
+ * source of truth when the database is unavailable (tests, offline).
  */
 export class WorkflowMemory {
   private readonly workflows = new Map<KernelId, LearnedWorkflow>();
+  private loadedFromDb = false;
 
   save(plan: ExecutionPlan, maxWorkflows = 100): LearnedWorkflow {
     const workflow: LearnedWorkflow = {
@@ -48,6 +51,7 @@ export class WorkflowMemory {
       createdAt: new Date().toISOString(),
     };
     this.workflows.set(workflow.id, workflow);
+    void this.persistWorkflow(workflow);
     while (this.workflows.size > maxWorkflows) {
       // Evict the least recently used workflow first.
       let oldest: LearnedWorkflow | undefined;
@@ -116,6 +120,7 @@ export class WorkflowMemory {
     const workflow = this.workflows.get(workflowId);
     if (!workflow) return;
     if (succeeded) workflow.successCount += 1;
+    void this.persistOutcome(workflow);
   }
 
   get(workflowId: KernelId): LearnedWorkflow | undefined {
@@ -124,6 +129,71 @@ export class WorkflowMemory {
 
   list(): LearnedWorkflow[] {
     return Array.from(this.workflows.values());
+  }
+
+  /** Best-effort load of persisted workflows (never throws). */
+  async loadFromDatabase(limit = 100): Promise<number> {
+    if (this.loadedFromDb) return this.workflows.size;
+    try {
+      /* getPool via static import */
+      const pool = getPool();
+      const result = await pool.query(
+        `SELECT id, goal, steps, success_criteria, explanation, use_count, success_count, created_at, last_used_at
+         FROM learned_workflows ORDER BY last_used_at DESC NULLS LAST, created_at DESC LIMIT $1`,
+        [limit],
+      );
+      for (const row of result.rows) {
+        if (this.workflows.has(row.id)) continue;
+        this.workflows.set(row.id, {
+          id: row.id,
+          goal: row.goal,
+          steps: row.steps ?? [],
+          successCriteria: row.success_criteria ?? [],
+          explanation: row.explanation ?? undefined,
+          useCount: row.use_count ?? 0,
+          successCount: row.success_count ?? 0,
+          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          lastUsedAt: row.last_used_at ? new Date(row.last_used_at).toISOString() : undefined,
+        });
+      }
+      this.loadedFromDb = true;
+      return this.workflows.size;
+    } catch {
+      return this.workflows.size;
+    }
+  }
+
+  private async persistWorkflow(workflow: LearnedWorkflow): Promise<void> {
+    try {
+      /* getPool via static import */
+      await getPool().query(
+        `INSERT INTO learned_workflows (id, goal, steps, success_criteria, explanation, use_count, success_count, created_at, last_used_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO UPDATE SET goal = EXCLUDED.goal, steps = EXCLUDED.steps,
+           success_criteria = EXCLUDED.success_criteria, explanation = EXCLUDED.explanation,
+           use_count = EXCLUDED.use_count, success_count = EXCLUDED.success_count,
+           last_used_at = EXCLUDED.last_used_at`,
+        [
+          workflow.id, workflow.goal, JSON.stringify(workflow.steps),
+          JSON.stringify(workflow.successCriteria), workflow.explanation ?? null,
+          workflow.useCount, workflow.successCount, workflow.createdAt, workflow.lastUsedAt ?? null,
+        ],
+      );
+    } catch {
+      // Offline/tests: memory remains the source of truth.
+    }
+  }
+
+  private async persistOutcome(workflow: LearnedWorkflow): Promise<void> {
+    try {
+      /* getPool via static import */
+      await getPool().query(
+        `UPDATE learned_workflows SET use_count = $2, success_count = $3, last_used_at = NOW() WHERE id = $1`,
+        [workflow.id, workflow.useCount, workflow.successCount],
+      );
+    } catch {
+      // Best-effort only.
+    }
   }
 }
 
@@ -172,6 +242,11 @@ function extractTerms(input: string): string[] {
         .filter(term => !STOP_WORDS.has(term)),
     ),
   ];
+}
+
+/** Meaningful goal terms (stopwords removed). Used to avoid memorizing trivial goals like "hi". */
+export function extractGoalTerms(input: string): string[] {
+  return extractTerms(input ?? '');
 }
 
 function scoreOverlap(queryTerms: string[], storedTerms: string[]): number {

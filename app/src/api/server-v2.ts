@@ -31,6 +31,7 @@ import { DevOpsAgent } from '../agents/devops-agent';
 import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
 import { repositoryRegistry } from '../repositories/registry';
+import { opsObjective } from '../ops/objective';
 
 // Load env: repo-root .env first (LLM keys), then app/.env fills gaps.
 import * as path from 'path';
@@ -396,6 +397,9 @@ app.get('/api/health', (req: any, res: any) => {
  */
 app.get('/api/status/ops', async (req: any, res: any) => {
   const snapshot: Record<string, any> = { timestamp: new Date().toISOString(), degraded: [] as string[] };
+
+  // Persistent objective: always present, never depends on the database.
+  snapshot.objective = opsObjective.snapshot();
 
   try {
     const open = await incidentStore.getOpenIncidents();

@@ -28,7 +28,10 @@ async function main(): Promise<void> {
       required: ['message'],
     },
     capabilities: ['testing', 'echo'],
-    supportedResourceKinds: ['output'],
+    supportedResourceKinds: ['system'],
+    requiredPermissions: [],
+    reversible: true,
+    metadata: {},
     provider: 'kernel-smoke-test',
   };
 
@@ -68,9 +71,9 @@ async function main(): Promise<void> {
   kernel.registerImplementation(implementation);
 
   const context = kernel.createContext({
-    actorId: 'smoke-test',
+    userId: 'smoke-test',
     authorityProfile: 'default',
-    source: 'kernel.smoke-test',
+    source: 'system',
     metadata: {
       purpose: 'kernel smoke test',
     },
@@ -83,7 +86,7 @@ async function main(): Promise<void> {
       input: {
         message: 'MARK kernel is working',
       },
-      requestedBy: context.actorId,
+      requestedBy: context.userId,
       reason: 'Verify the dynamic execution kernel.',
       createdAt: new Date().toISOString(),
     },

@@ -51,7 +51,7 @@ export const watchlistTool = createTool({
         const res = await fetch(
           `https://api.coingecko.com/api/v3/simple/price?ids=${row.symbol}&vs_currencies=usd`
         );
-        const data = await res.json();
+        const data: any = await res.json();
         const current = data[row.symbol]?.usd;
         
         if (current) {

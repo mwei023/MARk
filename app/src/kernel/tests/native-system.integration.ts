@@ -17,9 +17,9 @@ async function main(): Promise<void> {
   );
 
   const context = markKernel.createContext({
-    actorId: 'native-system-integration-test',
+    userId: 'native-system-integration-test',
     authorityProfile: 'default',
-    source: 'kernel.integration-test',
+    source: 'system',
   });
 
   const result = await markKernel.execute(
@@ -27,7 +27,7 @@ async function main(): Promise<void> {
       id: 'native-system-action-1',
       toolId: 'system.machine_info',
       input: {},
-      requestedBy: context.actorId,
+      requestedBy: context.userId,
       reason: 'Verify native system tool execution.',
       createdAt: new Date().toISOString(),
     },

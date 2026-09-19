@@ -205,10 +205,11 @@ export class MARKKernelBridge {
   async executeGoal(
     goal: string,
     contextInput: Parameters<MARKKernel['createContext']>[0],
+    options?: import('./goal-execution').GoalExecutionOptions,
   ): Promise<GoalExecutionResult> {
     const context = this.createContext(contextInput);
 
-    return this.kernel.executeGoal(goal, context);
+    return this.kernel.executeGoal(goal, context, options);
   }
 
   planGoal(goal: string): ExecutionPlan {

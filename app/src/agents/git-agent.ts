@@ -26,6 +26,7 @@ import {
 import { config } from '../config.js';
 import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
+import { opsObjective } from '../ops/objective';
 import { repairEslintTypescriptSkew } from './dependency-repair';
 import { repairLintErrors } from './code-repair';
 import { assessWorldState, formatWorldState } from './repo-state';
@@ -177,6 +178,7 @@ export class GitAgent extends Agent {
     });
 
     console.log(`[GitAgent] Incident ${incident.id} (${incident._wasCorrelated ? 'correlated' : 'new'})`);
+    try { opsObjective.record(incident._wasCorrelated ? 'incident.investigated' : 'incident.seen'); } catch { /* objective never fails a run */ }
 
     try {
       // ── Memory recall: surface prior resolution if available ─────────────
@@ -243,6 +245,7 @@ export class GitAgent extends Agent {
           : `Log fetch unavailable (${logFetch.unavailableReason}). Cannot classify failure automatically.`;
 
       await incidentStore.addFinding(incident.id, classificationFinding);
+      try { opsObjective.record('incident.investigated'); } catch { /* objective never fails a run */ }
 
       // ── Step 3: Fetch diff ───────────────────────────────────────────────────
       if (data.commit) {
@@ -297,6 +300,21 @@ export class GitAgent extends Agent {
             incident.id, incident.correlationId, data, repositoryContext, diagnosisText, incident.createdAt,
           );
         } else {
+          // Classified but manual: attach the same read-only probe trail
+          // (git evidence + repo map + lint baseline) so the handoff names
+          // real files and states verification ground truth. Best-effort:
+          // probe failure never blocks the manual-intervention event.
+          try {
+            const probePath = repositoryContext.localPath || (typeof data.repository === 'string' ? data.repository : '');
+            if (probePath && existsSync(probePath)) {
+              const probeText = logFetch.source !== 'unavailable' && logFetch.length > 0
+                ? logFetch.content
+                : [data.failureMessage, data.message]
+                  .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+                  .join('\n');
+              await this.collectProbesViaPlanner(incident.id, probePath, data.commit, probeText, '');
+            }
+          } catch { /* probes are best-effort evidence, never fatal */ }
           await eventBus.emit({
             id: `EVT-${Date.now()}`,
             timestamp: new Date(),
@@ -427,6 +445,7 @@ export class GitAgent extends Agent {
   ): Promise<{
     gitLog: string | null; gitStatus: string | null; pkgScripts: string;
     hasChecks: boolean; depTree: string | null; planId: string;
+    repoMap: string | null; verifyLint: string | null;
   } | null> {
     try {
       const { markKernelBridge } = await import('../kernel/bridge.js');
@@ -441,8 +460,10 @@ export class GitAgent extends Agent {
           { id: stepId(2), toolId: 'investigate.git_status', input: { repoPath }, dependsOn: [] },
           { id: stepId(3), toolId: 'investigate.package_scripts', input: { repoPath }, dependsOn: [] },
           { id: stepId(4), toolId: 'investigate.toolchain', input: { repoPath }, dependsOn: [] },
+          { id: stepId(5), toolId: 'repo.map', input: { repoPath, limit: 50 }, dependsOn: [] },
+          { id: stepId(6), toolId: 'ops.verify_lint', input: { repoPath }, dependsOn: [] },
           ...(commit
-            ? [{ id: stepId(5), toolId: 'investigate.diff_stat', input: { repoPath, commit }, dependsOn: [] }]
+            ? [{ id: stepId(7), toolId: 'investigate.diff_stat', input: { repoPath, commit }, dependsOn: [] }]
             : []),
         ],
         successCriteria: ['evidence collected for diagnosis'],
@@ -489,6 +510,18 @@ export class GitAgent extends Agent {
       const hasChecks = scriptsOut?.hasChecks === true;
       const toolchainOut = byTool.get('investigate.toolchain');
       const depTree = str(toolchainOut?.deps);
+      // Semantic map: what source files exist (unfamiliar-codebase orientation).
+      const mapOut = byTool.get('repo.map');
+      const mapFiles = Array.isArray(mapOut?.files) ? (mapOut.files as unknown[]).filter(f => typeof f === 'string') as string[] : [];
+      const repoMap = mapFiles.length > 0
+        ? `${mapOut?.count ?? mapFiles.length} source file(s): ${mapFiles.slice(0, 12).join(', ')}${(mapOut?.truncated ? '…' : '') || (mapFiles.length > 12 ? '…' : '')}`
+        : null;
+      // Verification gate: lint error count at investigation time (baseline
+      // for any later fix — improvement must move this number down).
+      const lintOut = byTool.get('ops.verify_lint');
+      const verifyLint = typeof lintOut?.errors === 'number'
+        ? `${lintOut.errors} eslint error(s)${lintOut.ok === false ? ` (probe: ${String(lintOut.reason ?? 'unavailable').slice(0, 120)})` : ''}`
+        : (typeof lintOut?.reason === 'string' ? `unavailable (${lintOut.reason.slice(0, 120)})` : null);
 
       await incidentStore.addAction(incidentId, {
         timestamp: new Date(),
@@ -502,7 +535,9 @@ export class GitAgent extends Agent {
       await incidentStore.addFinding(incidentId, `Probe git-status (planned): ${gitStatus ?? '(unavailable)'}`);
       await incidentStore.addFinding(incidentId, `Probe package-scripts (planned): ${pkgScripts || '(unavailable)'}`);
       await incidentStore.addFinding(incidentId, `Probe installed-deps (planned): ${(depTree ?? '(unavailable)').slice(0, 600)}`);
-      return { gitLog, gitStatus, pkgScripts, hasChecks, depTree, planId: (plan as { id: string }).id };
+      await incidentStore.addFinding(incidentId, `Probe repo-map (planned): ${repoMap ?? '(unavailable — no source files listed)'}`);
+      await incidentStore.addFinding(incidentId, `Probe verify-lint (planned): ${verifyLint ?? '(unavailable)'}`);
+      return { gitLog, gitStatus, pkgScripts, hasChecks, depTree, planId: (plan as { id: string }).id, repoMap, verifyLint };
     } catch {
       return null;
     }

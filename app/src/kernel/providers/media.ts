@@ -218,46 +218,8 @@ export const mediaExtractTrackImplementation: ToolImplementation = {
   async execute({ action }) {
     const archive = resolveLibraryArchive(String(action.input.archive ?? ''));
     const entry = String(action.input.entry ?? '');
-    if (!entry || entry.includes('..') || path.isAbsolute(entry)) {
-      throw new Error(`Refused: invalid archive entry "${entry}".`);
-    }
-
-    // Verify membership against a fresh listing: only listed tracks extract.
-    const listed = await listArchiveEntries(archive);
-    if (!listed.includes(entry)) {
-      throw new Error(`Refused: "${entry}" is not a listed track in "${path.basename(archive)}".`);
-    }
-
-    await fs.mkdir(TRACK_CACHE, { recursive: true });
-    const dest = path.join(TRACK_CACHE, path.basename(entry));
-
-    try {
-      await fs.stat(dest);
-    } catch {
-      // Stream bytes straight from unzip to disk: fixed argv, no shell.
-      const chunks: Buffer[] = [];
-      let bytes = 0;
-      await new Promise<void>((resolve, reject) => {
-        const child = spawn('unzip', ['-p', archive, entry], { stdio: ['ignore', 'pipe', 'pipe'] });
-        child.on('error', reject);
-        child.stdout.on('data', (chunk: Buffer) => {
-          bytes += chunk.length;
-          if (bytes > EXTRACT_MAX_BYTES) {
-            child.kill();
-            reject(new Error('Refused: track exceeds the extraction size cap.'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        child.on('close', code => {
-          if (code !== 0) {
-            reject(new Error(`Extraction failed for "${entry}".`));
-            return;
-          }
-          fs.writeFile(dest, Buffer.concat(chunks)).then(() => resolve(), reject);
-        });
-      });
-    }
+    assertListedEntry(entry);
+    const dest = await extractListedTrack(archive, entry);
 
     const output = { path: dest, capturedAt: new Date().toISOString() };
     return {
@@ -279,11 +241,199 @@ export const mediaExtractTrackImplementation: ToolImplementation = {
   },
 };
 
-export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool];
+/** Guards shared by extract and play: listed members only, no escapes. */
+function assertListedEntry(entry: string): void {
+  if (!entry || entry.includes('..') || path.isAbsolute(entry)) {
+    throw new Error(`Refused: invalid archive entry "${entry}".`);
+  }
+}
+
+async function extractListedTrack(archive: string, entry: string): Promise<string> {
+  // Verify membership against a fresh listing: only listed tracks extract.
+  const listed = await listArchiveEntries(archive);
+  if (!listed.includes(entry)) {
+    throw new Error(`Refused: "${entry}" is not a listed track in "${path.basename(archive)}".`);
+  }
+
+  await fs.mkdir(TRACK_CACHE, { recursive: true });
+  const dest = path.join(TRACK_CACHE, path.basename(entry));
+
+  try {
+    await fs.stat(dest);
+    return dest;
+  } catch {
+    // Stream bytes straight from unzip to disk: fixed argv, no shell.
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('unzip', ['-p', archive, entry], { stdio: ['ignore', 'pipe', 'pipe'] });
+      child.on('error', reject);
+      child.stdout.on('data', (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > EXTRACT_MAX_BYTES) {
+          child.kill();
+          reject(new Error('Refused: track exceeds the extraction size cap.'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      child.on('close', code => {
+        if (code !== 0) {
+          reject(new Error(`Extraction failed for "${entry}".`));
+          return;
+        }
+        fs.writeFile(dest, Buffer.concat(chunks)).then(() => resolve(), reject);
+      });
+    });
+    return dest;
+  }
+}
+
+const PLAY_STARTUP_WAIT_MS = 1500;
+const activePlayers = new Map<number, ReturnType<typeof spawn>>();
+
+function resolvePlayableFile(rawPath: string): string {
+  if (!rawPath) throw new Error('A file path is required to play.');
+  const jails = [path.resolve(MUSIC_LIBRARY), path.resolve(TRACK_CACHE)];
+  const resolved = path.resolve(rawPath);
+  if (!jails.some(jail => resolved === jail || resolved.startsWith(jail + path.sep))) {
+    throw new Error(`Refused: "${rawPath}" is outside the music library and track cache.`);
+  }
+  if (!AUDIO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
+    throw new Error(`Refused: "${resolved}" is not a supported audio file.`);
+  }
+  return resolved;
+}
+
+async function pickPlayer(): Promise<{ command: string; args: string[]; name: string }> {
+  for (const candidate of [
+    { command: 'mpv', args: ['--no-video', '--really-quiet'], name: 'mpv' },
+    { command: 'cvlc', args: ['--play-and-exit', '--quiet'], name: 'vlc' },
+  ]) {
+    try {
+      await execFileAsync(candidate.command, ['--version'], { timeout: 10000 });
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error('No audio player found (looked for mpv, vlc).');
+}
+
+export const mediaPlayTrackTool: ToolDescriptor = {
+  id: 'media.play_track',
+  name: 'Play music track',
+  description: 'Plays one audio file from the music library or track cache, or an archive track (extracted first). Verifies the player is running.',
+  version: '1.0.0',
+  domain: 'media',
+  risk: 'reversible',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Audio file inside the music library or track cache.' },
+      archive: { type: 'string', description: 'Zip archive file name inside the music library (with entry).' },
+      entry: { type: 'string', description: 'Track path inside the archive, as listed by find_tracks.' },
+    },
+    required: [],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string' },
+      player: { type: 'string' },
+      pid: { type: 'number' },
+      running: { type: 'boolean' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['file', 'player', 'pid', 'running', 'capturedAt'],
+  },
+  capabilities: ['music-playback', 'media'],
+  supportedResourceKinds: ['unknown'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'media.native',
+};
+
+export const mediaPlayTrackImplementation: ToolImplementation = {
+  toolId: mediaPlayTrackTool.id,
+
+  async execute({ action }) {
+    let file: string;
+    const rawPath = String(action.input.path ?? '');
+    if (rawPath) {
+      file = resolvePlayableFile(rawPath);
+      await fs.stat(file);
+    } else {
+      const archive = resolveLibraryArchive(String(action.input.archive ?? ''));
+      const entry = String(action.input.entry ?? '');
+      assertListedEntry(entry);
+      file = await extractListedTrack(archive, entry);
+    }
+
+    const player = await pickPlayer();
+    const child = spawn(player.command, [...player.args, file], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    await new Promise<void>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('spawn', () => resolve());
+    });
+    if (child.pid === undefined) throw new Error('Player process failed to spawn.');
+    activePlayers.set(child.pid, child);
+    child.unref();
+
+    await new Promise(resolve => setTimeout(resolve, PLAY_STARTUP_WAIT_MS));
+    let running = true;
+    try {
+      process.kill(child.pid, 0);
+    } catch {
+      running = false;
+      activePlayers.delete(child.pid);
+    }
+    if (!running) throw new Error(`Player ${player.name} exited within ${PLAY_STARTUP_WAIT_MS}ms — playback did not start.`);
+
+    const output = { file, player: player.name, pid: child.pid, running, capturedAt: new Date().toISOString() };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'output',
+          source: 'media.native',
+          subject: file,
+          summary: `Playing "${path.basename(file)}" via ${player.name} (pid ${child.pid}, verified running; confirmation granted).`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+
+  async verify({ output }) {
+    const pid = Number((output as any)?.pid ?? NaN);
+    const file = String((output as any)?.file ?? '');
+    if (!Number.isFinite(pid)) return { ok: false, detail: 'no player pid in output to verify' };
+    try {
+      process.kill(pid, 0);
+      return { ok: true, detail: `player pid ${pid} playing "${path.basename(file)}" is alive` };
+    } catch {
+      activePlayers.delete(pid);
+      return { ok: false, detail: `player pid ${pid} is gone — playback stopped` };
+    }
+  },
+};
+
+export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool];
 
 export const mediaNativeImplementations: ToolImplementation[] = [
   mediaFindTracksImplementation,
   mediaExtractTrackImplementation,
+  mediaPlayTrackImplementation,
 ];
 
 export const mediaDiscoveryProvider: DiscoveryProvider = {

@@ -17,7 +17,7 @@ export const marketSnapshotTool = createTool({
         `https://api.coingecko.com/api/v3/simple/price?ids=${args.symbol}&vs_currencies=usd&include_24hr_change=true&include_market_cap=true`
       );
       if (!res.ok) throw new Error(`API error: ${res.status}`);
-      const data = await res.json();
+      const data: any = await res.json();
       const coin = data[args.symbol];
       if (!coin?.usd) throw new Error(`Symbol '${args.symbol}' not found`);
       

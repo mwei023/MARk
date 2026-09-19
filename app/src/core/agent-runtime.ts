@@ -5,7 +5,8 @@
 
 import { Event } from './events';
 import { IncidentAction } from './incident';
-import { PolicyContext, policyEngine } from './policies';
+import { PolicyContext } from './policies';
+import { unifiedEvaluate } from '../kernel/policy-bridge';
 import type { CapabilityRegistry } from '../runtime/capabilities/registry';
 
 export interface ToolDefinition {
@@ -35,7 +36,7 @@ export abstract class Agent {
   protected async executeTool(
     toolName: string,
     args: any,
-    context: Omit<PolicyContext, 'agentName' | 'action' | 'risk'>
+    context: Omit<PolicyContext, 'agentName' | 'action'> & { risk?: PolicyContext['risk'] }
   ): Promise<{ success: boolean; result: string; action: IncidentAction }> {
     const tool = this.tools.get(toolName);
     if (!tool) {
@@ -54,16 +55,17 @@ export abstract class Agent {
       };
     }
 
-    // Check policies
+    // Check policies: single authority story (agent policy + kernel
+    // authority, stricter wins — deny anywhere means deny everywhere).
+    const { risk = 'medium', ...rest } = context;
     const policyContext: PolicyContext = {
       agentName: this.name,
       action: toolName,
-      risk: 'medium', // Default; override in subclass
-      ...context,
+      risk,
+      ...rest,
     };
 
-    const decision = policyEngine.evaluate(policyContext);
-    const reason = policyEngine.getReason(policyContext);
+    const { decision, reason } = unifiedEvaluate(policyContext);
 
     if (decision === 'block') {
       return {
@@ -161,6 +163,10 @@ export class AgentRuntime {
   registerAgent(agent: Agent): void {
     this.agents.push(agent);
     console.log(`[AgentRuntime] Registered agent: ${agent.getName()}`);
+  }
+
+  getAgent(name: string): Agent | undefined {
+    return this.agents.find(a => a.getName() === name);
   }
 
   getAgentCount(): number {

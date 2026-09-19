@@ -12,6 +12,7 @@ const ALLOWED_COMMANDS = [
 ];
 
 export const createSystemCheckTool = () => ({
+  name: "system_check",
   description: "Run safe system commands: ls, df, free, ps, etc.",
   argsSchema: z.object({
     command: z.string().describe("Shell command to run, e.g., 'ls -la ~' or 'df -h'"),

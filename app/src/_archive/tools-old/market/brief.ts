@@ -44,7 +44,7 @@ export const marketBriefTool = createTool({
   func: async (args) => {
     try {
       // 1. Fetch comprehensive market data
-      const data = await fetchCoinData(args.symbol);
+      const data: any = await fetchCoinData(args.symbol);
       const market = data.market_data;
       
       if (!market?.current_price?.usd) {

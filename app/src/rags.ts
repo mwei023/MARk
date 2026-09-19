@@ -1,5 +1,5 @@
 // src/rags.ts - MINIMAL WORKING VERSION
-import { getPool } from './db/postgres';
+import { getPool, shutdown as dbShutdown } from './db/postgres';
 import { embeddings } from './llm/embeddings';
 
 export const ingestDocument = async (text: string, metadata: Record<string, any> = {}) => {
@@ -24,7 +24,12 @@ export const ingestDocument = async (text: string, metadata: Record<string, any>
   console.log(`✅ Ingested: "${text.slice(0, 50)}..." (768 dims)`);
 };
 
-export const retrieveContext = async (query: string, limit: number = 3): Promise<string> => {
+export const retrieveContext = async (
+  query: string,
+  limit: number = 3,
+  _topic?: string,
+  threshold: number = 0.18,
+): Promise<string> => {
   const pool = getPool();
   
   // 1. Generate and clean the query vector
@@ -40,10 +45,10 @@ export const retrieveContext = async (query: string, limit: number = 3): Promise
   const result = await pool.query(
     `SELECT text, metadata 
      FROM documents 
-     WHERE 1 - (embedding <-> $1::vector) > 0.18 
+     WHERE 1 - (embedding <-> $1::vector) > $3 
      ORDER BY 1 - (embedding <-> $1::vector) DESC 
      LIMIT $2`,
-    [queryVectorLiteral, limit]  // ← queryVectorLiteral is used here
+    [queryVectorLiteral, limit, threshold]  // ← queryVectorLiteral is used here
   );
   
   if (result.rows.length === 0) return "";
@@ -61,6 +66,5 @@ export const clearDocuments = async () => {
 };
 
 export const shutdown = async () => {
-  const { shutdown: dbShutdown } = await import('./db/postgres');
   await dbShutdown();
 };

@@ -1,4 +1,5 @@
 import { ToolDescriptor } from './types';
+import { getLLMProviderCached, LLMProvider, Message } from '../llm';
 
 export interface TaskBinding {
   input: Record<string, unknown>;
@@ -49,6 +50,7 @@ export class TaskBinder {
     for (const [field, definition] of Object.entries(properties)) {
       const fieldName = field.toLowerCase();
       const description = definition.description?.toLowerCase() ?? '';
+      const siblings = Object.keys(properties).filter(name => name !== field);
 
       if (
         normalizedGoal.includes(fieldName) ||
@@ -59,6 +61,7 @@ export class TaskBinder {
           goal,
           field,
           definition,
+          siblings,
         );
 
         if (value !== undefined) {
@@ -103,9 +106,15 @@ export class TaskBinder {
       type?: string;
       description?: string;
     },
+    siblingFields: string[] = [],
   ): unknown {
+    // Value stops at the next `otherField:` boundary so
+    // "path: app/src include: *.ts" binds path="app/src", not the remainder.
+    const boundary = siblingFields.length > 0
+      ? `(?=\\s+(?:${siblingFields.map(sibling => this.escapeRegExp(sibling)).join('|')})\\s*[:=]|$)`
+      : '$';
     const fieldPattern = new RegExp(
-      `${this.escapeRegExp(field)}\\s*[:=]\\s*["']?([^"',\\n]+)["']?`,
+      `${this.escapeRegExp(field)}\\s*[:=]\\s*["']?(.+?)["']?${boundary}`,
       'i',
     );
 
@@ -166,4 +175,125 @@ export class TaskBinder {
   private escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+}
+
+export interface SmartBindDeps {
+  provider?: LLMProvider;
+  timeoutMs?: number;
+}
+
+const SMART_BIND_SYSTEM = `Extract input values for ONE tool call from a user goal. Reply with EXACTLY one JSON object mapping field names to values, no other text. Only include fields listed below. Use strings for text, numbers for counts, booleans for flags. If the goal states no value for a field, omit it. Never invent paths, names, or identifiers — omit rather than guess.`;
+
+/**
+ * Free-text binding: metadata binding first (explicit `field: value`
+ * always wins); when required fields remain missing, one LLM extraction
+ * round fills them. Every extracted value is type-checked against the
+ * schema — unknown fields dropped, mistyped values dropped, complex
+ * objects dropped. Jail and policy enforcement still happen at execution,
+ * so a wrong-but-typed value can waste a call but never escape the jail.
+ * Returns the metadata result untouched when smart mode is off, the goal
+ * is empty, or anything fails. Never throws.
+ */
+export async function bindTaskSmart(
+  binder: TaskBinder,
+  goal: string,
+  tool: ToolDescriptor,
+  deps: SmartBindDeps = {},
+): Promise<TaskBinding> {
+  const base = binder.bind(goal, tool);
+  if (base.complete || process.env.MARK_SMART === 'off' || !goal?.trim()) return base;
+  try {
+    const schema = tool.inputSchema as {
+      properties?: Record<string, { type?: string; description?: string }>;
+      required?: string[];
+    };
+    const properties = schema.properties ?? {};
+    // Ask about required fields plus any optional fields the goal may state:
+    // optionals only fill unset slots, never override explicit values.
+    const wanted = Object.keys(properties).filter(field => base.input[field] === undefined);
+    const missing = (schema.required ?? []).filter(field => base.input[field] === undefined);
+    if (missing.length === 0 || wanted.length === 0) return base;
+
+    const timeoutMs = deps.timeoutMs ?? Number(process.env.MARK_LLM_TIMEOUT_MS ?? 30000);
+    const provider = deps.provider ?? await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
+    const catalog = wanted
+      .map(field => `- ${field} (${properties[field]?.type ?? 'string'}${(schema.required ?? []).includes(field) ? ', required' : ', optional'}): ${properties[field]?.description ?? ''}`.slice(0, 200))
+      .join('\n');
+    const messages: Message[] = [
+      { role: 'system', content: SMART_BIND_SYSTEM },
+      { role: 'user', content: `Goal: ${goal.slice(0, 500)}\n\nMissing fields:\n${catalog}` },
+    ];
+    const response = await withTimeout(provider.chat(messages, { temperature: 0 }), timeoutMs, 'LLM bind');
+    const extracted = parseExtraction(response.content);
+    if (!extracted) return base;
+
+    const input = { ...base.input };
+    const matchedFields = [...base.matchedFields];
+    for (const field of wanted) {
+      if (input[field] !== undefined) continue;
+      const raw = (extracted as Record<string, unknown>)[field];
+      if (raw === undefined) continue;
+      const coerced = coerceScalar(raw, properties[field]?.type ?? 'string');
+      if (coerced === undefined) continue;
+      input[field] = coerced;
+      matchedFields.push(field);
+    }
+    const stillMissing = (schema.required ?? []).filter(field => input[field] === undefined);
+    return {
+      input,
+      missingRequired: stillMissing,
+      matchedFields,
+      complete: stillMissing.length === 0,
+      reason:
+        stillMissing.length === 0
+          ? `Bound goal values to "${tool.id}" with LLM assistance (${matchedFields.join(', ')}).`
+          : base.reason,
+    };
+  } catch {
+    return base;
+  }
+}
+
+/** Scalars only: numbers/booleans coerce, strings pass, anything else drops. */
+function coerceScalar(value: unknown, type: string): string | number | boolean | undefined {
+  if (type === 'number') {
+    const parsed = typeof value === 'number' ? value : Number(String(value).trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  if (type === 'boolean') {
+    if (typeof value === 'boolean') return value;
+    const lowered = String(value).trim().toLowerCase();
+    if (lowered === 'true') return true;
+    if (lowered === 'false') return false;
+    return undefined;
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim().slice(0, 500);
+    return trimmed ? trimmed : undefined;
+  }
+  if (typeof value === 'number' && type === 'string') return String(value);
+  return undefined;
+}
+
+function parseExtraction(content: string): Record<string, unknown> | null {
+  try {
+    const start = content.indexOf('{');
+    const end = content.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    const raw = JSON.parse(content.slice(start, end + 1)) as unknown;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    return raw as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }

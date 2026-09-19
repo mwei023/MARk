@@ -76,6 +76,10 @@ export interface AppConfig {
   markRepairMaxFileLines: number;
   /** Max cloud-LLM repair calls per repair run; local model is always tried first (default 5). */
   markRepairMaxCloudCalls: number;
+  /** Ops autonomy level L0 (propose only) .. L4 (objective-driven). Default: 1. */
+  opsAutonomyLevel: number;
+  /** Max steps per multi-step ops plan (default 4). Caps autonomy per goal. */
+  opsMaxPlanSteps: number;
   /**
    * TESTING ONLY — never enable in production. When true: the kernel
    * working-directory jail is bypassed (loud warning logged) and
@@ -162,6 +166,8 @@ export const config: AppConfig = {
   markRepairMaxErrors: readInt(process.env.MARK_REPAIR_MAX_ERRORS, 2),
   markRepairMaxFileLines: readInt(process.env.MARK_REPAIR_MAX_FILE_LINES, 300),
   markRepairMaxCloudCalls: readInt(process.env.MARK_REPAIR_MAX_CLOUD_CALLS, 5),
+  opsAutonomyLevel: Math.min(Math.max(readInt(process.env.MARK_OPS_AUTONOMY_LEVEL, 1), 0), 4),
+  opsMaxPlanSteps: Math.min(Math.max(readInt(process.env.MARK_OPS_MAX_PLAN_STEPS, 4), 1), 8),
   markTestMode: readBool(process.env.MARK_TEST_MODE, false),
 
   // Security

@@ -1,5 +1,16 @@
 // src/agent/index.ts - ADD THIS LOGIC
 import { executeCommand, ALLOWED_COMMANDS, CommandKey } from './commands/terminal';
+import { getLLMProviderCached, SYSTEM_PROMPT, Message } from '../llm';
+
+const getLLMResponse = async (input: string, _userId: string): Promise<string> => {
+  const provider = await getLLMProviderCached();
+  const messages: Message[] = [
+    { role: 'system', content: SYSTEM_PROMPT },
+    { role: 'user', content: input },
+  ];
+  const response = await provider.chat(messages);
+  return response.content || 'I can help with that directly.';
+};
 
 export const runAgent = async (input: string, userId: string): Promise<string> => {
   const lower = input.toLowerCase().trim();
@@ -26,7 +37,8 @@ export const runAgent = async (input: string, userId: string): Promise<string> =
     
     // 🔒 Require confirmation for destructive actions
     if (config.requiresConfirmation) {
-      return `⚠️  This will restart ${config.args[1]}. Say "yes, restart" to confirm.`;
+      const service = config.args[1] ?? config.cmd;
+      return `⚠️  This will restart ${service}. Say "yes, restart" to confirm.`;
     }
     
     // Execute and return output

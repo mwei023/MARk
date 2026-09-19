@@ -23,6 +23,7 @@ import { config } from '../config.js';
 import { repositoryRegistry } from '../repositories/registry';
 import { collectEslintErrors, repairLintErrors, repairOneError, LintError, RepairOutcome, RepairRunContext } from './code-repair';
 import { consolidateBranches } from './branch-consolidate';
+import { opsObjective } from '../ops/objective';
 
 const execFilePromise = promisify(execFile);
 
@@ -98,6 +99,10 @@ export class CodeAgent extends Agent {
       const fixed = outcomes.filter((o) => o.fixed).length;
       const attempted = outcomes.length;
       const skipped = outcomes.filter((o) => o.skipped).length;
+      try { opsObjective.record('incident.investigated'); } catch { /* objective never fails a run */ }
+      if (fixed > 0) {
+        try { opsObjective.record('incident.fix_proposed'); } catch { /* never fails a run */ }
+      }
 
       if (incidentId) {
         try {
@@ -128,7 +133,9 @@ export class CodeAgent extends Agent {
       }
       await find(
         done
-          ? `Repair complete and verified: ${fixed} error(s) fixed, ${remaining} remain repo-wide.`
+          ? `Repair complete and verified: ${fixed} error(s) fixed, ${remaining} remain repo-wide. ` +
+            `Verification ladder: eslint recount 0 (gate 1/2) + per-error tsc no-regression gate (gate 2/2, enforced in repairOneError). ` +
+            `Scoped tests remain yours to run (gate 3/3 not automated in this run).`
           : `Repair run finished: fixed ${fixed}/${attempted}, ${remaining >= 0 ? remaining : '?'} error(s) remain repo-wide.` +
             (pushedBranch ? ` Progress pushed to ${pushedBranch}.` : ' Needs another run or your action.'),
       );
@@ -266,6 +273,14 @@ export class CodeAgent extends Agent {
     done: boolean,
     summary: string,
   ): Promise<void> {
+    try {
+      if (done) {
+        opsObjective.record('incident.fix_verified');
+        opsObjective.record('incident.resolved');
+      } else {
+        opsObjective.record('incident.escalated');
+      }
+    } catch { /* objective never fails a run */ }
     await eventBus.emit({
       id: `EVT-${Date.now()}`,
       timestamp: new Date(),

@@ -14,6 +14,8 @@ import { MarkStatusCapability } from '../runtime/capabilities/mark-status';
  * actions it did not perform.
  */
 async function main(): Promise<void> {
+  // Deterministic routing under test: the LLM classifier stays out of it.
+  process.env.MARK_SMART = 'off';
   const capabilities = new CapabilityRegistry();
   capabilities.register(new LocalHostCapability());
   capabilities.register(new MarkStatusCapability());

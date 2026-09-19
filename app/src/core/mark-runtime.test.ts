@@ -36,6 +36,8 @@ const registerTestRepositories = () => {
 };
 
 const run = async (): Promise<void> => {
+  // Deterministic routing under test: the LLM classifier stays out of it.
+  process.env.MARK_SMART = 'off';
   registerTestRepositories();
 
   const repoOne = repositoryRegistry.resolve('mwei023/MARk');

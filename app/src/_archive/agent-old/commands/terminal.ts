@@ -5,8 +5,15 @@ import { logCommandExecution } from '../../db/sessions'; // your PG logger
 
 const execFilePromise = promisify(execFile);
 
+interface AllowedCommandConfig {
+  cmd: string;
+  args: readonly string[];
+  requiresConfirmation?: boolean;
+  allowedServices?: readonly string[];
+}
+
 // 🛡️ ALLOWLIST: Only these command prefixes are permitted
-export const ALLOWED_COMMANDS = {
+export const ALLOWED_COMMANDS: Record<string, AllowedCommandConfig> = {
   'list files': { cmd: 'ls', args: ['-la', process.env.HOME || '/home/mwei'] },
   'check disk': { cmd: 'df', args: ['-h'] },
   'check memory': { cmd: 'free', args: ['-h'] },
@@ -18,7 +25,7 @@ export const ALLOWED_COMMANDS = {
     allowedServices: ['cloudflared', 'nginx'] // extra guardrail
   },
   // Add more as needed — always explicit, never wildcard
-} as const;
+};
 
 export type CommandKey = keyof typeof ALLOWED_COMMANDS;
 
@@ -35,7 +42,7 @@ export const executeCommand = async (
   // 🔒 Extra validation for service commands
   if (config.cmd === 'systemctl' && config.allowedServices) {
     const service = config.args[1];
-    if (!config.allowedServices.includes(service)) {
+    if (!service || !config.allowedServices.includes(service)) {
       throw new Error(`Service '${service}' not in allowlist`);
     }
   }
@@ -43,7 +50,7 @@ export const executeCommand = async (
   try {
     console.log(`🔧 Executing: ${config.cmd} ${config.args.join(' ')}`);
     
-    const { stdout, stderr } = await execFilePromise(config.cmd, config.args, {
+    const { stdout, stderr } = await execFilePromise(config.cmd, [...config.args], {
       timeout: 30000,
       env: { ...process.env, PATH: process.env.PATH },
     });
@@ -54,7 +61,7 @@ export const executeCommand = async (
     await logCommandExecution({
       userId,
       command: commandKey,
-      args: config.args,
+      args: [...config.args],
       output,
       success: true,
     });
@@ -68,7 +75,7 @@ export const executeCommand = async (
     await logCommandExecution({
       userId,
       command: commandKey,
-      args: config.args,
+      args: [...config.args],
       output: '',
       error: errorMsg,
       success: false,

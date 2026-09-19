@@ -16,7 +16,7 @@ async function main(): Promise<void> {
   }
 
   const context = markKernelBridge.createContext({
-    actorId: 'bridge.integration-test',
+    userId: 'bridge.integration-test',
     source: 'system',
   });
 
@@ -25,10 +25,9 @@ async function main(): Promise<void> {
       id: 'bridge-machine-info',
       toolId: 'system.machine_info',
       input: {},
-      contextId: context.id,
-      requestedBy: context.actorId,
+      requestedBy: context.userId,
       reason: 'Verify bridge execution',
-    },
+    } as any,
     context,
   );
 

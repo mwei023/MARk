@@ -10,7 +10,7 @@ declare module 'express' {
 
   export interface ExpressFactory {
     (): Express;
-    json(): any;
+    json(options?: any): any;
     urlencoded(options?: any): any;
   }
 

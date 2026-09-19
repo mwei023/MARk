@@ -1,7 +1,7 @@
 // src/agent/nodes.ts
-import { AgentState, ToolCall } from "./state";
+import { AgentState } from "./state";
 import { getLLMProviderCached, SYSTEM_PROMPT, Message } from "../llm";
-import { toolsRegistry, Tool } from "../tools"; 
+import { toolsRegistry } from "../tools"; 
 
 const tools = toolsRegistry;
 
@@ -91,9 +91,10 @@ const isLikelyMarketRequest = (text: string): boolean => {
 
 // Build tool definitions for the prompt
 const toolDefinitions = Object.entries(tools).map(([name, tool]) => {
-  const argsExample = Object.keys(tool.argsSchema?.shape || {}).length > 0
+  const schemaShape = (tool.argsSchema as any)?.shape ?? {};
+  const argsExample = Object.keys(schemaShape).length > 0
     ? JSON.stringify(Object.fromEntries(
-        Object.entries(tool.argsSchema.shape).map(([k]) => [k, "value"])
+        Object.entries(schemaShape).map(([k]) => [k, "value"])
       ), null, 2)
     : "{}";
   return `- ${name}: ${tool.description}\n  Args example: ${argsExample}`;

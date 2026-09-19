@@ -20,7 +20,7 @@ export const marketSnapshotTool = createTool({
         throw new Error(`API returned ${res.status}: ${await res.text()}`);
       }
       
-      const data = await res.json();
+      const data: any = await res.json();
       const coin = data[args.symbol.toLowerCase()];
       const marketCap = coin.market_cap 
       ? `$${(coin.market_cap / 1e9).toFixed(2)}B` 

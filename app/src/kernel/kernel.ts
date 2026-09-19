@@ -169,6 +169,12 @@ export class MARKKernel {
 
       validatePlan: plan =>
         this.planner.validate(plan, this.toolRegistry),
+
+      planComposedGoal: goal =>
+        this.planner.planComposed(goal),
+
+      executePlanReport: (plan, context) =>
+        this.executePlanWithReport(plan, context),
     });
 
     this.workflowMemory = workflowMemory;
