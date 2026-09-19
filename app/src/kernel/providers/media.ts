@@ -292,8 +292,18 @@ async function extractListedTrack(archive: string, entry: string): Promise<strin
 const PLAY_STARTUP_WAIT_MS = 1500;
 const activePlayers = new Map<number, ReturnType<typeof spawn>>();
 
-function resolvePlayableFile(rawPath: string): string {
-  if (!rawPath) throw new Error('A file path is required to play.');
+/** Top-level library entries for "what can I play" answers. Never throws. */
+async function listLibraryTop(): Promise<string> {
+  try {
+    const entries = await fs.readdir(MUSIC_LIBRARY);
+    const shown = entries.filter(e => !e.startsWith('.')).slice(0, 8);
+    return shown.length > 0 ? shown.join(', ') : '(empty library)';
+  } catch {
+    return '(library unreadable)';
+  }
+}
+
+function resolvePlayableFile(rawPath: string): string {  if (!rawPath) throw new Error('A file path is required to play.');
   const jails = [path.resolve(MUSIC_LIBRARY), path.resolve(TRACK_CACHE)];
   const resolved = path.resolve(rawPath);
   if (!jails.some(jail => resolved === jail || resolved.startsWith(jail + path.sep))) {
@@ -362,6 +372,12 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
   async execute({ action }) {
     let file: string;
     const rawPath = String(action.input.path ?? '');
+    const rawArchive = String(action.input.archive ?? '');
+    if (!rawPath && !rawArchive) {
+      // No target at all: say what's actually playable instead of dying on
+      // an empty archive check. This is the common "play <album>" dead end.
+      throw new Error(`Nothing to play: no file specified. Library holds: ${await listLibraryTop()}. Use media.find_tracks to browse.`);
+    }
     if (rawPath) {
       file = resolvePlayableFile(rawPath);
       await fs.stat(file);
