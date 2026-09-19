@@ -17,7 +17,9 @@ import { GitAgent } from '../agents/git-agent';
 import { DevOpsAgent } from '../agents/devops-agent';
 import { CICDAgent } from '../agents/cicd-agent';
 import { CodeAgent } from '../agents/code-agent';
-import { ScreenAgent } from '../agents/screen-agent';import {
+import { ScreenAgent } from '../agents/screen-agent';
+import { interactionStream } from './interaction';
+import {
   MARKKernelBridge,
   markKernelBridge,
 } from '../kernel/bridge';
@@ -114,6 +116,16 @@ export class MarkRuntime {
     const trace = [
       `gateway → ${decision.path}${decision.agent ? ` (${decision.agent})` : ''}: ${decision.reasoning ?? ''}`.trim(),
     ];
+    // Interaction stream: every command is a user message; routing is a
+    // thinking event (visible when thinking is toggled on).
+    interactionStream.append('message', userId, command);
+    interactionStream.append('thinking', 'gateway', '', {
+      thinking: {
+        source: 'classifier',
+        compact: `route=${decision.path}${decision.agent ? ` agent=${decision.agent}` : ''} llm=${decision.needsLLM}`,
+        detail: decision.reasoning ?? '',
+      },
+    });
 
     // Smart routing: when keywords cannot claim the command, an LLM
     // classifier gets one chance to upgrade to deterministic/agent.
@@ -209,6 +221,10 @@ export class MarkRuntime {
       data: { commandEventId: event.id, route: result.route, success: result.route !== 'unavailable' },
     } as Event);
     result.trace = trace;
+    interactionStream.append('receipt', result.route, result.response.slice(0, 500));
+    for (const line of trace.slice(0, 10)) {
+      interactionStream.append('trace', result.route, line);
+    }
     return result;
   }
 

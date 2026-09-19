@@ -13,6 +13,7 @@ for (const candidate of [
 
 import { markRuntime } from './core/mark-runtime';
 import { likeMeLoop } from './core/like-me-loop';
+import { interactionStream } from './core/interaction';
 import { config } from './config.js';
 import { incidentStore } from './core/incident';
 
@@ -45,7 +46,7 @@ interface State {
 const state: State = {
   view: 'run',
   input: '',
-  lines: ['Welcome to MARK. Type a goal and press Enter. 1-4 switch views, q quits.'],
+  lines: ['Welcome to MARK. Type a goal and press Enter. 1-4 switch views, v thinking, q quits.'],
   pending: [],
   incidents: [],
   selected: 0,
@@ -145,9 +146,15 @@ async function submit(): Promise<void> {
           (step.needsConfirm ? ' NEEDS-CONFIRM' : '') + (step.blocked ? ' BLOCKED' : ''));
       }
     } else {
+      const seen = interactionStream.list().length;
       const result = await markRuntime.executeCommand(goal, config.defaultUser, 'cli');
       push(`[${result.route}] ${result.response}`);
       for (const trace of result.trace ?? []) push(`  ⎿ ${trace}`);
+      if (interactionStream.isThinkingOn()) {
+        for (const e of interactionStream.list().slice(seen)) {
+          if (e.kind === 'thinking' && e.thinking) push(`  ~ ${e.from}/${e.thinking.source}: ${e.thinking.compact}`);
+        }
+      }
     }
   } catch (error: any) {
     push(`Error: ${error?.message || error}`);
@@ -201,6 +208,12 @@ async function main(): Promise<void> {
       state.view = (['run', 'plan', 'approvals', 'incidents'] as View[])[Number(key) - 1];
       state.selected = 0;
       await refresh();
+      render();
+      return;
+    }
+    if (key === 'v' && state.input === '') {
+      interactionStream.setThinking(!interactionStream.isThinkingOn());
+      push(`thinking ${interactionStream.isThinkingOn() ? 'on (routing reasons visible)' : 'off'}`);
       render();
       return;
     }

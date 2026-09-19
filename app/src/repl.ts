@@ -14,6 +14,7 @@ for (const candidate of [
 
 import { markRuntime } from './core/mark-runtime';
 import { likeMeLoop } from './core/like-me-loop';
+import { interactionStream } from './core/interaction';
 import { config } from './config.js';
 
 const animateThinking = () => {
@@ -40,6 +41,7 @@ const printHelp = () => {
     '  /untrust <tool...>  remove standing trust',
     '  /trustlist          show standing trust grants',
     '  /trace on|off       show what MARK did per command (default on)',
+    '  /think on|off       show MARK thinking (routing reasons, compact; default off)',
     '  /help               this help',
     "  quit | exit         leave ('Ciao, Mwei.')",
     '',
@@ -163,16 +165,26 @@ const repl = async () => {
         if (arg === 'off') showTrace = false;
         else if (arg === 'on') showTrace = true;
         output = `trace ${showTrace ? 'on' : 'off'}`;
+      } else if (input.startsWith('/think')) {
+        const arg = input.split(/\s+/)[1];
+        if (arg === 'on') interactionStream.setThinking(true);
+        else if (arg === 'off') interactionStream.setThinking(false);
+        output = `thinking ${interactionStream.isThinkingOn() ? 'on (routing reasons visible)' : 'off'}`;
       } else if (input.startsWith('/')) {
         output = '';
         stopThinking();
         console.log(`MARK: Unknown command "${input.split(/\s+/)[0]}".`);
         printHelp();
       } else {
+        const seen = interactionStream.list().length;
         const result = await markRuntime.executeCommand(input, config.defaultUser, 'cli');
         output = `[${result.route}] ${result.response}`;
         if (showTrace && result.trace?.length) {
           output += `\n  ⎿ ${result.trace.join('\n  ⎿ ')}`;
+        }
+        if (interactionStream.isThinkingOn()) {
+          const fresh = interactionStream.list().slice(seen).filter(e => e.kind === 'thinking' && e.thinking);
+          for (const e of fresh) output += `\n  ~ ${e.from}/${e.thinking!.source}: ${e.thinking!.compact}`;
         }
       }
       stopThinking();
