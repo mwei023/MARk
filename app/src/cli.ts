@@ -155,10 +155,16 @@ async function main(): Promise<void> {
       const trust = approved && flags.always ? 'tool' as const : approved && flags.root ? 'root' as const : undefined;
       const verdict = likeMeLoop.resolveApproval(text);
       if (verdict.kind !== 'record') fail('no matching pending confirmation');
-      const record = likeMeLoop.approve((verdict as any).record.id, approved, trust ? { trust } : {});
-      if (!record) fail('confirmation not found or already decided');
-      out(flags, flags.json ? record : `${approved ? 'approved' : 'denied'} ${(record as any).toolId} (${(record as any).id})` +
-        (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ` + trusted in ${(record as any).scopePath ?? 'this root'}` : ''));
+      if (!approved) {
+        const record = likeMeLoop.approve((verdict as any).record.id, false);
+        if (!record) fail('confirmation not found or already decided');
+        out(flags, flags.json ? record : `denied ${(record as any).toolId} (${(record as any).id})`);
+        break;
+      }
+      const resumed = await likeMeLoop.approveAndResume((verdict as any).record.id, flags.user, trust ? { trust } : {});
+      if (!resumed) fail('confirmation not found or already decided');
+      out(flags, flags.json ? resumed : `approved ${(resumed as any).record.toolId} → ${(resumed as any).result.status}` +
+        (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ' + trusted in this root' : ''));
       break;
     }
     case 'pending': {

@@ -25,6 +25,10 @@ import {
 } from './goal-execution';
 
 import {
+  ConfirmationRecord,
+} from './confirmations';
+
+import {
   ExecutionPlan,
   PlanExecutionReport,
   PlanExecutionResult,
@@ -173,6 +177,35 @@ export class MARKKernelBridge {
     confirmationId: string,
   ): Promise<ActionResult> {
     return this.kernel.executeConfirmed(action, context, confirmationId);
+  }
+
+  /**
+   * Approve a pending confirmation AND resume the blocked action in one
+   * step. Approving alone leaves the action blocked forever (the user
+   * retries, gets a new id, approves again...). Returns the record plus
+   * the resumed result, or undefined when there is nothing to resume.
+   */
+  async approveAndResume(
+    confirmationId: string,
+    userId: string,
+  ): Promise<{ record: ConfirmationRecord; result: ActionResult } | undefined> {
+    const record = this.kernel.resolveConfirmation(confirmationId, true);
+    if (!record) return undefined;
+    const action: ActionRequest = {
+      id: record.actionId,
+      toolId: record.toolId,
+      input: { ...record.input },
+      requestedBy: record.requestedBy || userId,
+      createdAt: record.createdAt,
+      metadata: { source: 'approve-and-resume', confirmationId: record.id },
+    };
+    const context = this.createContext({
+      userId,
+      source: 'cli',
+      ...(record.scopePath ? { workingDirectory: record.scopePath } : {}),
+    });
+    const result = await this.kernel.executeConfirmed(action, context, record.id);
+    return { record, result };
   }
 
   async executeTool(

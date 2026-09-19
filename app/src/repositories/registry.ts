@@ -168,9 +168,10 @@ export class RepositoryRegistry {
       return this.autoRegisterLocalRepo(localCandidate);
     }
 
-    // Last resort: scan the machine for a clone whose origin matches.
+    // Last resort: scan the machine for a clone whose origin matches
+    // (owner/name, or bare repo name).
     const wanted = normalizeRepositoryFullName(reference);
-    if (wanted.includes('/')) {
+    if (wanted) {
       return this.findLocalClone(wanted);
     }
 
@@ -196,7 +197,17 @@ export class RepositoryRegistry {
    */
   findLocalClone(fullName: string, roots: string[] = config.repoRoots): MonitoredRepository | null {
     const wanted = normalizeRepositoryFullName(fullName);
-    if (!wanted || !wanted.includes('/')) return null;
+    if (!wanted) return null;
+    // Owner/name match, or bare-name match on the repo segment
+    // ("wakulima" finds mwei023/wakulima by directory or remote name).
+    const wantedName = wanted.includes('/') ? wanted.toLowerCase() : null;
+    const bareName = (wanted.includes('/') ? wanted.split('/')[1] : wanted).toLowerCase();
+    const matches = (remote: string, dirName: string): boolean => {
+      const normalized = normalizeRepositoryFullName(remote).toLowerCase();
+      if (wantedName && normalized === wantedName) return true;
+      if (normalized.split('/')[1] === bareName) return true;
+      return dirName.toLowerCase() === bareName || dirName.toLowerCase().replace(/[-_]/g, '') === bareName.replace(/[-_]/g, '');
+    };
     for (const root of roots.slice(0, 5)) {
       let entries: string[];
       try {
@@ -219,7 +230,7 @@ export class RepositoryRegistry {
         } catch {
           continue;
         }
-        if (remote && normalizeRepositoryFullName(remote) === wanted) {
+        if (remote && matches(remote, name)) {
           return this.autoRegisterLocalRepo(candidate);
         }
       }
@@ -227,7 +238,8 @@ export class RepositoryRegistry {
     return null;
   }
 
-  autoRegisterLocalRepo(localPath: string): MonitoredRepository | null {    if (!existsSync(localPath)) return null;
+  autoRegisterLocalRepo(localPath: string): MonitoredRepository | null {
+    if (!existsSync(localPath)) return null;
 
     const remoteUrl = getGitRemoteUrl(localPath);
     if (!remoteUrl) return null;

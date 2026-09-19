@@ -225,11 +225,19 @@ async function main(): Promise<void> {
         if (current) {
           const approved = key !== 'd';
           const trust = key === 't' ? 'tool' as const : key === 'r' ? 'root' as const : undefined;
-          const record = likeMeLoop.approve(current.id, approved, trust ? { trust } : {});
-          push(record
-            ? `${approved ? 'approved' : 'denied'} ${record.toolId}` +
-              (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ` + trusted in ${record.scopePath ?? 'this root'}` : '')
-            : 'already decided');
+          if (!approved) {
+            const record = likeMeLoop.approve(current.id, false);
+            push(record ? `denied ${record.toolId}` : 'already decided');
+          } else {
+            const resumed = await likeMeLoop.approveAndResume(current.id, config.defaultUser, trust ? { trust } : {});
+            if (!resumed) {
+              push('already decided');
+            } else {
+              const status = (resumed.result as { status?: string }).status ?? 'unknown';
+              push(`approved ${(resumed.record as { toolId: string }).toolId} → ${status}` +
+                (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ' + trusted in this root' : ''));
+            }
+          }
           await refresh();
         }
       } else return;

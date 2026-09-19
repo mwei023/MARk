@@ -80,6 +80,8 @@ export interface InteractionStreamOptions {
 export class InteractionStream {
   private events: InteractionEvent[] = [];
   private thinkingOn: boolean;
+  /** Lightweight session memory: last repo, last incident, etc. Transports and agents share it. */
+  private context: Record<string, unknown> = {};
 
   constructor(private readonly opts: InteractionStreamOptions = {}) {
     this.thinkingOn = opts.thinkingOn ?? false;
@@ -91,6 +93,16 @@ export class InteractionStream {
 
   isThinkingOn(): boolean {
     return this.thinkingOn;
+  }
+
+  /** Remember a session fact (e.g. last repo). Never throws, never persists secrets. */
+  setContext(key: string, value: unknown): void {
+    if (/key|token|secret|password/i.test(key)) return;
+    this.context[key] = value;
+  }
+
+  getContext<T = unknown>(key: string): T | undefined {
+    return this.context[key] as T | undefined;
   }
 
   append(kind: InteractionEventKind, from: string, text: string, extra?: { thinking?: ThinkingPayload; approval?: ApprovalPayload }): InteractionEvent {

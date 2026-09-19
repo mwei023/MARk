@@ -235,16 +235,30 @@ app.post('/api/approve', async (req: any, res: any) => {
     // ── 2. Kernel confirmation (like-me loop) ────────────────────────────────
     if (confirmationId) {
       const trust = approved && always ? 'tool' as const : approved && scope === 'root' ? 'root' as const : undefined;
-      const confirmation = likeMeLoop.approve(confirmationId, approved, trust ? { trust } : {});
-      if (!confirmation) {
-        return res.status(404).json({
-          success: false,
-          error: `Confirmation ${confirmationId} not found or already decided`,
-        });
+      if (!approved) {
+        const confirmation = likeMeLoop.approve(confirmationId, false);
+        if (!confirmation) {
+          return res.status(404).json({
+            success: false,
+            error: `Confirmation ${confirmationId} not found or already decided`,
+          });
+        }
+        result.confirmation = confirmation;
+        result.message = result.message ?? `Confirmation ${confirmationId} denied`;
+      } else {
+        // Approve AND resume so one call finishes the job.
+        const resumed = await likeMeLoop.approveAndResume(confirmationId, 'api', trust ? { trust } : {});
+        if (!resumed) {
+          return res.status(404).json({
+            success: false,
+            error: `Confirmation ${confirmationId} not found or already decided`,
+          });
+        }
+        result.confirmation = resumed.record;
+        result.execution = resumed.result;
+        result.message = result.message ?? `Confirmation ${confirmationId} approved → ${(resumed.result as { status?: string }).status}` +
+          (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ` + trusted in ${(resumed.record as { scopePath?: string }).scopePath ?? 'this root'}` : '');
       }
-      result.confirmation = confirmation;
-      result.message = result.message ?? `Confirmation ${confirmationId} ${approved ? 'approved' : 'denied'}` +
-        (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ` + trusted in ${confirmation.scopePath ?? 'this root'}` : '');
     }
 
     // ── 3. Legacy agent-runtime approval ────────────────────────────────────
@@ -363,7 +377,7 @@ app.get('/api/confirmations', (_req: any, res: any) => {
  * POST /api/confirmations - Approve/deny a kernel confirmation
  * Body: { confirmationId: string, approved: boolean, always?: boolean, scope?: "root" }
  */
-app.post('/api/confirmations', (req: any, res: any) => {
+app.post('/api/confirmations', async (req: any, res: any) => {
   const { confirmationId, approved, always, scope } = req.body as {
     confirmationId?: string; approved?: boolean; always?: boolean; scope?: string;
   };
@@ -371,11 +385,19 @@ app.post('/api/confirmations', (req: any, res: any) => {
     return res.status(400).json({ success: false, error: 'confirmationId and approved boolean required' });
   }
   const trust = approved && always ? 'tool' as const : approved && scope === 'root' ? 'root' as const : undefined;
-  const record = likeMeLoop.approve(confirmationId, approved, trust ? { trust } : {});
-  if (!record) {
+  if (!approved) {
+    const record = likeMeLoop.approve(confirmationId, false);
+    if (!record) {
+      return res.status(404).json({ success: false, error: 'confirmation not found or already decided' });
+    }
+    res.json({ success: true, record });
+    return;
+  }
+  const resumed = await likeMeLoop.approveAndResume(confirmationId, 'api', trust ? { trust } : {});
+  if (!resumed) {
     return res.status(404).json({ success: false, error: 'confirmation not found or already decided' });
   }
-  res.json({ success: true, record });
+  res.json({ success: true, record: resumed.record, result: resumed.result });
 });
 
 /**

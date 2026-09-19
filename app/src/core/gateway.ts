@@ -131,7 +131,7 @@ export class Gateway {
     // `includes()` misroutes ("legitimate" -> git, "latest" -> test,
     // "somehow" -> how). Word boundaries keep specialist routing precise;
     // anything ambiguous falls through to kernel / reasoning.
-    const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request)\b/i;
+    const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up|repo\b|repository|repositories)\b/i;
     const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
     const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
     const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;

@@ -287,6 +287,30 @@ export class LikeMeLoop {
     return record;
   }
 
+  /**
+   * Approve AND resume: resolves the confirmation, applies any one-click
+   * trust grant, then re-executes the blocked action and returns its
+   * outcome. This is what interactive approve commands should call —
+   * bare approve() leaves the action blocked and the user in a retry loop.
+   */
+  async approveAndResume(
+    confirmationId: string,
+    userId: string = config.defaultUser,
+    opts: { trust?: 'tool' | 'root' } = {},
+  ): Promise<{ record: unknown; result: unknown } | undefined> {
+    const pending = this.confirmations.listPending();
+    const target = pending.find(r => (r.id as string) === confirmationId)
+      ?? this.confirmations.findByAction(confirmationId);
+    if (!target) return undefined;
+    if (opts.trust) {
+      const scope = opts.trust === 'root' ? target.scopePath : undefined;
+      try {
+        this.bridge.trustTool(target.toolId as string, userId, scope);
+      } catch { /* approval stands even if the grant fails to persist */ }
+    }
+    return this.bridge.approveAndResume(target.id as never, userId);
+  }
+
   trust(pattern: string) {
     return this.bridge.trustTool(pattern, config.defaultUser);
   }

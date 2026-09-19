@@ -132,11 +132,22 @@ const repl = async () => {
         const text = trust ? raw.replace(/\s+(always|root)$/, '').trim() : raw;
         const verdict = likeMeLoop.resolveApproval(text);
         if (verdict.kind === 'record') {
-          const record = likeMeLoop.approve(verdict.record.id, approved, trust ? { trust } : {});
-          output = record
-            ? `${approved ? 'approved' : 'denied'} ${record.toolId} (${record.id})` +
-              (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ` + trusted in ${record.scopePath ?? 'this root'}` : '')
-            : 'confirmation not found or already decided';
+          if (!approved) {
+            const record = likeMeLoop.approve(verdict.record.id, false);
+            output = record ? `denied ${record.toolId} (${record.id})` : 'confirmation not found or already decided';
+          } else {
+            // Approve AND resume: the blocked action re-executes immediately
+            // so one approval finishes the job instead of starting a retry loop.
+            const resumed = await likeMeLoop.approveAndResume(verdict.record.id, config.defaultUser, trust ? { trust } : {});
+            if (!resumed) {
+              output = 'confirmation not found or already decided';
+            } else {
+              const status = (resumed.result as { status?: string }).status ?? 'unknown';
+              const summary = (resumed.result as { observations?: Array<{ summary?: string }> }).observations?.slice(-1)[0]?.summary ?? '';
+              output = `approved ${(resumed.record as { toolId: string }).toolId} → ${status}${summary ? `: ${summary.slice(0, 200)}` : ''}` +
+                (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ' + trusted in this root' : '');
+            }
+          }
         } else if (verdict.kind === 'ambiguous') {
           output = `Several match "${text}":\n${verdict.candidates.map(c => `  ${c.id} tool=${c.toolId}`).join('\n')}\nBe more specific.`;
         } else {

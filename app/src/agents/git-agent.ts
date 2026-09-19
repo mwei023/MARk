@@ -26,6 +26,7 @@ import {
 import { config } from '../config.js';
 import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
+import { interactionStream } from '../core/interaction';
 import { opsObjective } from '../ops/objective';
 import { repairEslintTypescriptSkew } from './dependency-repair';
 import { repairLintErrors } from './code-repair';
@@ -114,7 +115,11 @@ export class GitAgent extends Agent {
   canHandle(event: Event): boolean {
     if (event.type === 'user.command.received') {
       const command = String((event.data as Record<string, any>).command || '');
-      return /\b(git|branch|branches|commit|commits|merge|rebase|pull request)\b/i.test(command);
+      // Matches handleCommand below: git operations AND repo-status
+      // questions (status/heads-up/repo). Kept in sync deliberately —
+      // canHandle gating what handleCommand answers was the exact bug
+      // behind "git-agent not available" on status questions.
+      return /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up|repo\b|repository|repositories)\b/i.test(command);
     }
     return [
       'github.workflow.failed',
@@ -129,10 +134,87 @@ export class GitAgent extends Agent {
   async handleCommand(event: Event, capabilities: CapabilityRegistry): Promise<string> {
     const command = String((event.data as Record<string, any>).command || '');
     if (/\b(status|branch|commit)\b/i.test(command)) {
+      // A status-style question names (or implies) a repo: answer it with a
+      // heads-up instead of delegating to a generic capability.
+      const status = await this.answerRepoStatus(command);
+      if (status) return status;
       const result = await capabilities.execute(command);
       return result ? `GitHub Agent: ${result}` : 'GitHub Agent could not find a local Git capability.';
     }
     return 'GitHub Agent received the request. GitHub webhook investigation is available for repository events.';
+  }
+
+  /**
+   * "Heads up on <repo>": resolve (by name, owner/name, discovery scan, or
+   * session memory), then report git state + checks + open incidents +
+   * remembered resolutions. Returns null when no repo can be determined.
+   */
+  private async answerRepoStatus(command: string): Promise<string | null> {
+    const candidates = this.extractRepoRefs(command);
+    const remembered = interactionStream.getContext<string>('lastRepo');
+    if (remembered) candidates.push(remembered);
+    let repo = null;
+    for (const ref of candidates) {
+      repo = repositoryRegistry.resolve(ref);
+      if (repo) break;
+    }
+    if (!repo) {
+      return 'Which repository? Name it (owner/name or local name) and I will give you a heads-up — e.g. "status of mwei023/wakulima".';
+    }
+    interactionStream.setContext('lastRepo', repo.fullName);
+    const lines = [`Heads-up on ${repo.fullName}${repo.localPath ? ` (${repo.localPath})` : ' (no local checkout)'}.`];
+    if (repo.localPath && existsSync(repo.localPath)) {
+      const log = await this.shellOut('git', ['-C', repo.localPath, 'log', '--oneline', '-3']);
+      if (log) lines.push(`Recent: ${log.split('\n').join(' | ').slice(0, 220)}`);
+      const status = await this.shellOut('git', ['-C', repo.localPath, 'status', '--porcelain']);
+      lines.push(status === '' ? 'Tree: clean.' : status === null ? 'Tree: unknown.' : `Tree has uncommitted changes: ${status.split('\n').slice(0, 4).join(', ').slice(0, 160)}`);
+      try {
+        const pkg = JSON.parse(readFileSync(`${repo.localPath}/package.json`, 'utf8'));
+        const scripts = Object.keys(pkg?.scripts ?? {});
+        lines.push(scripts.length > 0 ? `Checks: ${scripts.join(', ')}.` : 'No npm scripts declared.');
+      } catch {
+        lines.push('No readable package.json.');
+      }
+    }
+    try {
+      const open = await incidentStore.getOpenIncidents();
+      const mine = open.filter(i => (i.context as Record<string, unknown>)?.repository === repo.fullName);
+      lines.push(mine.length > 0 ? `Open incidents: ${mine.length} (${mine.slice(0, 3).map(i => `${i.id} ${i.status}`).join('; ')}).` : 'No open incidents.');
+    } catch {
+      lines.push('Incident store unreachable.');
+    }
+    try {
+      const prior = await opsMemory.recall('github.workflow.failed', 'UNKNOWN', repo.fullName);
+      if (prior) lines.push(`Remembered: "${prior.record.resolution.slice(0, 160)}" (${prior.matchReason}).`);
+    } catch { /* memory is best-effort here */ }
+    return lines.join('\n');
+  }
+
+  /**
+   * Ordered repo-name candidates: owner/name pairs, then "called|named X",
+   * then words matching a registered repo name. Tried in order; first
+   * resolution wins. Never returns filler words as candidates.
+   */
+  private extractRepoRefs(command: string): string[] {
+    const out: string[] = [];
+    for (const m of command.matchAll(/([\w.-]+\/[\w.-]+)/g)) out.push(m[1]);
+    for (const m of command.matchAll(/(?:called|named)\s+([A-Za-z0-9_.-]+)/gi)) out.push(m[1]);
+    const known = repositoryRegistry.list();
+    for (const word of command.match(/[A-Za-z0-9_.-]+/g) ?? []) {
+      const hit = known.find(r => r.name.toLowerCase() === word.toLowerCase());
+      if (hit && !out.includes(hit.fullName)) out.push(hit.fullName);
+    }
+    return out;
+  }
+
+  /** Small read-only shell helper for status answers. Never throws. */
+  private async shellOut(bin: string, args: string[]): Promise<string | null> {
+    try {
+      const { stdout } = await execFilePromise(bin, args, { timeout: 15000 });
+      return stdout.trim();
+    } catch {
+      return null;
+    }
   }
 
   async handle(event: Event): Promise<void> {
