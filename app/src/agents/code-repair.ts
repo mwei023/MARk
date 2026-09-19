@@ -470,11 +470,25 @@ export async function repairLintErrors(
 ): Promise<RepairSummary> {
   const all = await collectEslintErrors(repoPath);
   const budget = opts.maxErrors ?? 5;
-  const queue = all.slice(0, budget);
+  // Triage before spending budget: vendored bundles and oversized files are
+  // not repairable by this loop (ignores fix and human/windowed repair own
+  // them). They are reported as skipped so the budget goes to actionables.
+  const skippedNonActionable: RepairOutcome[] = [];
+  const actionable = all.filter(t => {
+    if (/^(dev-dist|dist|build|coverage)\//.test(t.file) || /\.min\.js$/.test(t.file)) {
+      skippedNonActionable.push({
+        target: t, fixed: false, skipped: 'vendored',
+        detail: `${t.file} is vendored/bundled output — fix the source or ignore the directory, not this file.`,
+      });
+      return false;
+    }
+    return true;
+  });
+  const queue = actionable.slice(0, budget);
   // One shared cloud budget for the whole run: escalation is per-incident,
   // not per-error, so a hard file can't burn the budget for easy ones.
   const ctx: RepairRunContext = { cloudCalls: 0, maxCloudCalls: opts.maxCloudCalls ?? config.markRepairMaxCloudCalls };
-  const outcomes: RepairOutcome[] = [];
+  const outcomes: RepairOutcome[] = [...skippedNonActionable];
   for (const target of queue) {
     const outcome = await repairOneError(repoPath, target, { maxFileLines: opts.maxFileLines, ctx });
     outcomes.push(outcome);
