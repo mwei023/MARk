@@ -80,7 +80,11 @@ export type EventType =
 
   // Code repair (coding agent)
   | 'code.repair.requested'
-  | 'code.repair.completed';
+  | 'code.repair.completed'
+
+  // Screen tasks (computer-use agent)
+  | 'screen.task.requested'
+  | 'screen.task.completed';
 
 /**
  * Specific event implementations

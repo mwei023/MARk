@@ -79,6 +79,16 @@ export class Gateway {
           reasoning: 'Code repair request. Coding agent proposes minimal edits with verification.',
         };
 
+      // Screen task: owned by the computer-use agent (see + act + verify)
+      case 'screen.task.requested':
+        return {
+          path: 'agent',
+          agent: 'screen-agent',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: 'Screen task. Computer-use agent observes, reasons, acts, and verifies.',
+        };
+
       // User Command: Route based on content
       case 'user.command.received':
         return this.routeUserCommand(event);

@@ -17,7 +17,7 @@ import { GitAgent } from '../agents/git-agent';
 import { DevOpsAgent } from '../agents/devops-agent';
 import { CICDAgent } from '../agents/cicd-agent';
 import { CodeAgent } from '../agents/code-agent';
-import {
+import { ScreenAgent } from '../agents/screen-agent';import {
   MARKKernelBridge,
   markKernelBridge,
 } from '../kernel/bridge';
@@ -88,6 +88,7 @@ export class MarkRuntime {
       this.agents.registerAgent(new DevOpsAgent());
       this.agents.registerAgent(new CICDAgent());
       this.agents.registerAgent(new CodeAgent());
+      this.agents.registerAgent(new ScreenAgent());
     }
 
     // Operational inputs (webhooks now; other perceptions later) share this
@@ -272,15 +273,19 @@ export class MarkRuntime {
       }
     } catch (err) {
       // Memory recall/execution error — proceed with fresh planning.
-      trace.push(`memory → reuse error: ${err instanceof Error ? err.message : String(err)}`);
+      console.debug(`[mark-runtime] memory reuse error: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
     try {
-      outcome = await this.kernelBridge.executeGoal(command, contextInput);
+      // Real planner first for multi-word goals: composed DAG (investigate →
+      // verify) beats linear single-tool execution when contracts validate.
+      // Single-step fallback is automatic inside GoalExecutor.
+      const wantsPlan = command.trim().split(/\s+/).length >= 3;
+      outcome = await this.kernelBridge.executeGoal(command, contextInput, wantsPlan ? { usePlanner: true, maxPlanSteps: 4 } : undefined);
     } catch (err) {
       // Goal execution threw — kernel path unavailable, caller falls through.
-      trace.push(`kernel → executeGoal error: ${err instanceof Error ? err.message : String(err)}`);
+      console.debug(`[mark-runtime] executeGoal error: ${err instanceof Error ? err.message : String(err)}`);
       return undefined;
     }
 
@@ -291,6 +296,28 @@ export class MarkRuntime {
     // incidents") are unaffected — they match or miss on their own terms.
     if (isExplanationRequest(command) && (outcome.resolution.matchedTerms?.length ?? 0) <= 1) {
       return undefined;
+    }
+
+    // Multi-step plan report: rendered directly, never forced into the
+    // single-action shape below. Verification status is explicit.
+    if (outcome.executionMode === 'plan' && outcome.planReport) {
+      const report = outcome.planReport;
+      const succeeded = report.steps.filter(s => s.status === 'succeeded').length;
+      const failed = report.steps.filter(s => s.status === 'failed').length;
+      const skipped = report.steps.filter(s => s.status === 'skipped').length;
+      const lines = report.steps.map(s => `  ${s.status === 'succeeded' ? '✓' : s.status === 'failed' ? '✗' : '○'} ${s.toolId} (${s.stepId})${s.error ? ` — ${s.error.slice(0, 160)}` : ''}`);
+      const lastSummary = report.observations.map(o => o.summary).filter(Boolean).pop();
+      return {
+        response:
+          `⚙️ Plan ${report.status} (${succeeded} ok, ${failed} failed, ${skipped} skipped):\n${lines.join('\n')}` +
+          (lastSummary ? `\n${lastSummary}` : '') +
+          (report.error ? `\nError: ${report.error.slice(0, 300)}` : ''),
+        route: 'kernel',
+        trace: [
+          `kernel → plan: ${outcome.plan?.id} (${outcome.plan?.steps.length} steps, composed)`,
+          `kernel → plan execution: ${report.status}`,
+        ],
+      };
     }
 
     if (!outcome.action || !outcome.result) {

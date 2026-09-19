@@ -35,6 +35,21 @@ import {
 } from './investigate';
 
 import {
+  screenDiscoveryProvider,
+  screenImplementations,
+} from './screen';
+
+import {
+  repoSemanticDiscoveryProvider,
+  repoSemanticImplementations,
+} from './repo-semantic';
+
+import {
+  opsVerifyDiscoveryProvider,
+  opsVerifyImplementations,
+} from './ops-verify';
+
+import {
   MARKKernel,
   markKernel,
 } from '../kernel';
@@ -52,6 +67,9 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(incidentDiscoveryProvider);
   toolDiscovery.registerProvider(browserDiscoveryProvider);
   toolDiscovery.registerProvider(investigateDiscoveryProvider);
+  toolDiscovery.registerProvider(screenDiscoveryProvider);
+  toolDiscovery.registerProvider(repoSemanticDiscoveryProvider);
+  toolDiscovery.registerProvider(opsVerifyDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
     kernel.registerImplementation(implementation);
@@ -70,6 +88,18 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of investigateImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of screenImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of repoSemanticImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of opsVerifyImplementations) {
     kernel.registerImplementation(implementation);
   }
 
