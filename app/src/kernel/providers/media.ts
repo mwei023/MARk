@@ -9,6 +9,7 @@ import {
   ToolDescriptor,
   ToolImplementation,
 } from '../index';
+import { parseDuckResults } from './browser';
 
 const execFileAsync = promisify(execFile);
 
@@ -290,11 +291,48 @@ async function extractListedTrack(archive: string, entry: string): Promise<strin
 }
 
 const PLAY_STARTUP_WAIT_MS = 1500;
+// Streams need longer: extraction (yt-dlp) takes seconds, and a 1.5s check
+// verified mpv mid-retry before it died. Slow sources get a second look.
+const STREAM_STARTUP_WAIT_MS = 6000;
 const activePlayers = new Map<number, ReturnType<typeof spawn>>();
 
-/** Top-level library entries for "what can I play" answers. Never throws. */
-async function listLibraryTop(): Promise<string> {
+/**
+ * Strip command verbs and filler nouns from a bound music goal:
+ * "play donda album" -> "donda". Domain words live with the tool that
+ * owns the domain, not scattered across callers.
+ */
+function normalizeMusicQuery(query: string): string {
+  const cleaned = query
+    .replace(/\b(play|search|find|look\s?up|google|listen\s?to|put\s?on|start)\b/gi, ' ')
+    .replace(/\b(album|song|track|music|video|playlist|on\s+youtube|from\s+youtube)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || query.trim();
+}
+
+/**
+ * Web stream fallback: search for "<query> youtube" and return the first
+ * watch URL. Streaming (not downloading) — the same thing opening the
+ * video in a browser does. Returns null when nothing found.
+ */async function searchStreamUrl(query: string): Promise<string | null> {
   try {
+    const endpoint = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(`${query} youtube`)}`;
+    const response = await fetch(endpoint, {
+      headers: { 'User-Agent': 'MARK/1.0 (local research tool)', Accept: 'text/html' },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!response.ok) return null;
+    const html = Buffer.from(await response.arrayBuffer()).subarray(0, 200 * 1024).toString('utf8');
+    const results = parseDuckResults(html, 10);
+    const watch = results.find(r => /youtube\.com\/watch\?v=|youtu\.be\//i.test(r.url));
+    return watch ? watch.url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Top-level library entries for "what can I play" answers. Never throws. */
+async function listLibraryTop(): Promise<string> {  try {
     const entries = await fs.readdir(MUSIC_LIBRARY);
     const shown = entries.filter(e => !e.startsWith('.')).slice(0, 8);
     return shown.length > 0 ? shown.join(', ') : '(empty library)';
@@ -333,8 +371,8 @@ async function pickPlayer(): Promise<{ command: string; args: string[]; name: st
 export const mediaPlayTrackTool: ToolDescriptor = {
   id: 'media.play_track',
   name: 'Play music track',
-  description: 'Plays one audio file from the music library or track cache, or an archive track (extracted first). Verifies the player is running.',
-  version: '1.0.0',
+  description: 'Finds and plays music by name. Local library (files and zip archives) first; otherwise searches the web and streams the top video result. Verifies the player is running.',
+  version: '1.1.0',
   domain: 'media',
   risk: 'reversible',
   available: true,
@@ -344,6 +382,7 @@ export const mediaPlayTrackTool: ToolDescriptor = {
       path: { type: 'string', description: 'Audio file inside the music library or track cache.' },
       archive: { type: 'string', description: 'Zip archive file name inside the music library (with entry).' },
       entry: { type: 'string', description: 'Track path inside the archive, as listed by find_tracks.' },
+      query: { type: 'string', description: 'Music name to find and play (library first, web stream fallback).' },
     },
     required: [],
   },
@@ -371,9 +410,12 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
 
   async execute({ action }) {
     let file: string;
+    let source = 'library';
+    let streamUrl: string | null = null;
     const rawPath = String(action.input.path ?? '');
     const rawArchive = String(action.input.archive ?? '');
-    if (!rawPath && !rawArchive) {
+    const query = String(action.input.query ?? '').trim().slice(0, 200);
+    if (!rawPath && !rawArchive && !query) {
       // No target at all: say what's actually playable instead of dying on
       // an empty archive check. This is the common "play <album>" dead end.
       throw new Error(`Nothing to play: no file specified. Library holds: ${await listLibraryTop()}. Use media.find_tracks to browse.`);
@@ -381,11 +423,35 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
     if (rawPath) {
       file = resolvePlayableFile(rawPath);
       await fs.stat(file);
-    } else {
-      const archive = resolveLibraryArchive(String(action.input.archive ?? ''));
+    } else if (rawArchive) {
+      const archive = resolveLibraryArchive(rawArchive);
       const entry = String(action.input.entry ?? '');
       assertListedEntry(entry);
       file = await extractListedTrack(archive, entry);
+    } else {
+      // Find-and-play: local library first, web stream fallback. The bound
+      // query is raw goal text ("play donda album"); normalize to the music
+      // terms for matching and searching.
+      const musicQuery = normalizeMusicQuery(query);
+      const local = await findTracks(MUSIC_LIBRARY, musicQuery, 5);
+      if (local.length > 0) {
+        const hit = local[0];
+        if (hit.kind === 'file' && hit.path) {
+          file = hit.path;
+        } else {
+          file = await extractListedTrack(
+            resolveLibraryArchive(hit.archive!.split('/').pop()!),
+            hit.entry!,
+          );
+        }
+      } else {
+        streamUrl = await searchStreamUrl(musicQuery);
+        if (!streamUrl) {
+          throw new Error(`Could not find "${musicQuery}" in the library or on the web. Library holds: ${await listLibraryTop()}.`);
+        }
+        source = `web stream (${streamUrl})`;
+        file = streamUrl;
+      }
     }
 
     const player = await pickPlayer();
@@ -401,7 +467,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
     activePlayers.set(child.pid, child);
     child.unref();
 
-    await new Promise(resolve => setTimeout(resolve, PLAY_STARTUP_WAIT_MS));
+    await new Promise(resolve => setTimeout(resolve, streamUrl ? STREAM_STARTUP_WAIT_MS : PLAY_STARTUP_WAIT_MS));
     let running = true;
     try {
       process.kill(child.pid, 0);
@@ -411,7 +477,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
     }
     if (!running) throw new Error(`Player ${player.name} exited within ${PLAY_STARTUP_WAIT_MS}ms — playback did not start.`);
 
-    const output = { file, player: player.name, pid: child.pid, running, capturedAt: new Date().toISOString() };
+    const output = { file, player: player.name, pid: child.pid, running, source, capturedAt: new Date().toISOString() };
     return {
       output,
       observations: [
@@ -420,7 +486,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
           kind: 'output',
           source: 'media.native',
           subject: file,
-          summary: `Playing "${path.basename(file)}" via ${player.name} (pid ${child.pid}, verified running; confirmation granted).`,
+          summary: `Playing "${source === 'library' ? path.basename(file) : file}" via ${player.name} (pid ${child.pid}, verified running; confirmation granted).`,
           data: output,
           confidence: 1,
           observedAt: output.capturedAt,

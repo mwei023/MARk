@@ -71,18 +71,35 @@ export class TaskBinder {
       }
     }
 
-    const missingRequired = required.filter(
-      field => input[field] === undefined,
-    );
+    // Free-text fallback: when nothing matched but the tool has exactly one
+    // string field shaped like a query box (search/play/ask tools), the
+    // whole goal is the value. "play donda album" binds query wholesale;
+    // the tool itself normalizes ("play", "album" are its domain words).
+    // Never fires when any field already matched — no silent overrides.
+    if (matchedFields.length === 0) {
+      const singles = Object.entries(properties).filter(
+        ([name, def]) => def.type === 'string' && /^(query|q|text|question|keywords|prompt)$/i.test(name),
+      );
+      if (singles.length === 1) {
+        const [name] = singles[0];
+        const value = goal.trim().slice(0, 300);
+        if (value) {
+          input[name] = value;
+          matchedFields.push(name);
+        }
+      }
+    }
+
+    const stillMissing = required.filter(field => input[field] === undefined);
 
     return {
       input,
-      missingRequired,
+      missingRequired: stillMissing,
       matchedFields,
-      complete: missingRequired.length === 0,
+      complete: stillMissing.length === 0,
       reason: this.buildReason(
         tool,
-        missingRequired,
+        stillMissing,
         matchedFields,
       ),
     };
