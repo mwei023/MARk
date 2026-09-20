@@ -33,6 +33,8 @@ const printHelp = () => {
     '  /plan <goal>        preview a like-me plan (never executes mutating steps)',
     '  /build <goal>       execute a like-me plan (confirmation-gated)',
     '  /pending            list pending kernel confirmations',
+    '  a | t | r | d       approve once / always / in root / deny (single pending)',
+    '  /approve [<id>]     approve (defaults to the single pending; resumes it)',
     '  /approve <id>       approve (id, action id, prefix, or app words)',
     '  /approve <id> always approve + allow this tool always',
     '  /approve <id> root   approve + allow this tool in this project root',
@@ -117,11 +119,41 @@ const repl = async () => {
       } else if (input === '/pending') {
         const pending = likeMeLoop.listPending();
         output = pending.length === 0 ? '(no pending confirmations)' : pending.map(p => `${p.id} tool=${p.toolId} input=${JSON.stringify(p.input)} reason=${p.reason}`).join('\n');
+      } else if (/^[atrd]$/.test(input)) {
+        // One keystroke: a=approve once, t=approve+always, r=approve+root,
+        // d=deny — applies to the single pending confirmation. With zero or
+        // several pending, falls through to chat (say /pending first).
+        const pending = likeMeLoop.listPending();
+        if (pending.length === 1) {
+          const key = input as 'a' | 't' | 'r' | 'd';
+          const approved = key !== 'd';
+          const trust = key === 't' ? 'tool' as const : key === 'r' ? 'root' as const : undefined;
+          if (!approved) {
+            const record = likeMeLoop.approve(pending[0].id, false);
+            output = record ? `denied ${record.toolId}` : 'already decided';
+          } else {
+            const resumed = await likeMeLoop.approveAndResume(pending[0].id, config.defaultUser, trust ? { trust } : {});
+            output = resumed
+              ? `approved ${(resumed.record as { toolId: string }).toolId} → ${(resumed.result as { status?: string }).status}` +
+                (trust === 'tool' ? ' + trusted always' : trust === 'root' ? ' + trusted in this root' : '')
+              : 'already decided';
+          }
+        } else {
+          output = '';
+          stopThinking();
+          console.log(`MARK: "${input}" looks like chat. (${pending.length === 0 ? 'No pending confirmations' : `${pending.length} pending — say /pending then /approve <id>`}.)`);
+          printHelp();
+        }
       } else if (input === '/approve' || input === '/deny') {
         const pending = likeMeLoop.listPending();
-        output = pending.length === 0
+        if (pending.length === 1 && input === '/approve') {
+          const resumed = await likeMeLoop.approveAndResume(pending[0].id, config.defaultUser);
+          output = resumed
+            ? `approved ${(resumed.record as { toolId: string }).toolId} → ${(resumed.result as { status?: string }).status}`
+            : 'already decided';
+        } else output = pending.length === 0
           ? 'Nothing pending. (Approvals do not survive restarts — if you pasted an id from an earlier session, ask again and approve fresh.)'
-          : `Pending:\n${pending.map(p => `  ${p.id} tool=${p.toolId}`).join('\n')}\nSay /approve <id or app words>.`;
+          : `Pending:\n${pending.map(p => `  ${p.id} tool=${p.toolId}`).join('\n')}\nSay /approve <id or app words>, or just: a approve · t always · r root · d deny.`;
       } else if (input.startsWith('/approve ') || input.startsWith('/deny ')) {
         const approved = input.startsWith('/approve ');
         const raw = input.replace(/^\/(approve|deny)\s+/, '').trim();
