@@ -401,6 +401,53 @@ app.post('/api/confirmations', async (req: any, res: any) => {
 });
 
 /**
+ * POST /api/research - Fire an exhaustive deep-research run
+ * Body: { topic?: string, query?: string, depth?: 'standard' | 'deep' | 'exhaustive', fileGaps?: boolean }
+ *
+ * Returns 202 immediately with the tracking incident id; the ResearchAgent
+ * works the loop asynchronously and lands findings + problem-statement
+ * incidents on the trail. Poll GET /api/incidents/:id for the report.
+ */
+app.post('/api/research', async (req: any, res: any) => {
+  try {
+    const { topic, query, depth = 'deep', fileGaps = true } = req.body as {
+      topic?: string; query?: string; depth?: string; fileGaps?: boolean;
+    };
+    const cleanTopic = String(topic ?? query ?? '').trim().slice(0, 300);
+    if (!cleanTopic) {
+      return res.status(400).json({ success: false, error: 'topic (or query) required' });
+    }
+    if (depth !== 'standard' && depth !== 'deep' && depth !== 'exhaustive') {
+      return res.status(400).json({ success: false, error: "depth must be 'standard', 'deep', or 'exhaustive'" });
+    }
+    const incident = await incidentStore.createIncident({
+      title: `Deep research: ${cleanTopic.slice(0, 140)}`,
+      description: `Exhaustive ${depth} research requested via API.`,
+      severity: 'low',
+      status: 'investigating',
+      triggerEvent: 'research.requested',
+      triggerEventId: `RES-${Date.now()}`,
+      correlationId: `research:${cleanTopic.slice(0, 80)}`,
+      assignedAgent: 'research-agent',
+      tags: ['research', depth],
+      context: { researchTopic: cleanTopic, depth },
+    });
+    await eventBus.emit({
+      id: `EVT-${Date.now()}`,
+      timestamp: new Date(),
+      source: 'api',
+      type: 'research.requested',
+      severity: 'info',
+      correlationId: incident.correlationId,
+      data: { topic: cleanTopic, depth, fileGaps, incidentId: incident.id },
+    } as any);
+    res.status(202).json({ success: true, incidentId: incident.id, topic: cleanTopic, depth });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+/**
  * GET /api/health - Health check
  */
 app.get('/api/health', (req: any, res: any) => {
@@ -423,8 +470,10 @@ app.get('/api/status/ops', async (req: any, res: any) => {
   // Persistent objective: always present, never depends on the database.
   snapshot.objective = opsObjective.snapshot();
 
+  let openList: Array<{ id: string; title: string; status: string; severity: string; tags?: string[]; context?: unknown }> | null = null;
   try {
     const open = await incidentStore.getOpenIncidents();
+    openList = open;
     const bySeverity: Record<string, number> = {};
     const byRepo: Record<string, number> = {};
     for (const inc of open) {
@@ -463,6 +512,15 @@ app.get('/api/status/ops', async (req: any, res: any) => {
     snapshot.degraded.push('autofix');
     snapshot.autoFix = null;
   }
+
+  // Self-improvement queue: filed problem statements awaiting an operator
+  // to route them (CodeAgent handles lint-class fixes; feature work needs
+  // a human dispatch decision — never auto-assigned).
+  snapshot.selfImprovement = openList
+    ? openList
+      .filter(i => (i.tags ?? []).includes('self-improvement'))
+      .map(i => ({ id: i.id, title: i.title, status: i.status, severity: i.severity }))
+    : null;
 
   try {
     snapshot.mostCommonFailureThisWeek = await opsMemory.mostCommonFailureType(7);

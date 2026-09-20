@@ -88,7 +88,11 @@ export type EventType =
 
   // Web research (web agent)
   | 'web.search.requested'
-  | 'web.search.completed';
+  | 'web.search.completed'
+
+  // Deep research (research agent — exhaustive, self-improving)
+  | 'research.requested'
+  | 'research.completed';
 
 /**
  * Specific event implementations

@@ -99,6 +99,16 @@ export class Gateway {
           reasoning: 'Web research request. Web agent searches and reads.',
         };
 
+      // Deep research: owned by the research agent (exhaustive loop)
+      case 'research.requested':
+        return {
+          path: 'agent',
+          agent: 'research-agent',
+          needsLLM: false,
+          priority: 'normal',
+          reasoning: 'Deep research request. Research agent runs the exhaustive loop.',
+        };
+
       // User Command: Route based on content
       case 'user.command.received':
         return this.routeUserCommand(event);
@@ -145,6 +155,7 @@ export class Gateway {
     const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
     const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
     const WEB_RE = /\b(google|browse|browsing|look\s?up|search the web|research)\b/i;
+    const DEEP_RESEARCH_RE = /\b(deep research|deep dive|thorough(ly)? research|exhaust(ive|ively)|investigate thoroughly|literature review|state of the art|sota|survey the field|map the field)\b/i;
     const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;
 
     if (
@@ -210,6 +221,18 @@ export class Gateway {
         needsLLM: false,
         priority: 'normal',
         reasoning: 'CI/CD operation',
+      };
+    }
+
+    // Deep research commands — checked before the generic web pattern so
+    // "deep research X" reaches the research agent, not the web agent.
+    if (DEEP_RESEARCH_RE.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'research-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Deep research operation',
       };
     }
 
