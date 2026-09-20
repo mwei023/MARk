@@ -340,8 +340,7 @@ function isGenuineCandidate(title: string, uploader: string): boolean {
  * no key, no bot-wall observed). Junk-labeled tracks (type beats, podcasts,
  * covers) are filtered before candidacy. Callers try each in order until
  * one verifies running. Streaming only — nothing is downloaded.
- */
-interface StreamCandidate {
+ */interface StreamCandidate {
   url: string;
   source: string;
 }
@@ -381,6 +380,42 @@ async function searchStreamCandidates(query: string): Promise<StreamCandidate[]>
       }
     }
   } catch { /* Audius failure just yields no candidate */ }
+  // Archive.org: free API, no key, genuine catalog including full albums.
+  // File-level matching (not just item titles) so "Tree" finds track 11,
+  // not merely an album that might contain it.
+  try {
+    const searchRes = await fetch(
+      `https://archive.org/advancedsearch.php?q=${encodeURIComponent(`(${query}) AND mediatype:audio`)}&fl[]=identifier,title,creator&rows=5&output=json`,
+      { signal: AbortSignal.timeout(20000) },
+    );
+    if (searchRes.ok) {
+      const searchBody = (await searchRes.json()) as { response?: { docs?: Array<{ identifier?: string; title?: string }> } };
+      for (const doc of (searchBody.response?.docs ?? []).slice(0, 3)) {
+        if (candidates.length >= 4) break;
+        if (typeof doc.identifier !== 'string' || !doc.identifier) continue;
+        if (!isGenuineCandidate(doc.title ?? '', '')) continue;
+        try {
+          const metaRes = await fetch(`https://archive.org/metadata/${doc.identifier}`, { signal: AbortSignal.timeout(20000) });
+          if (!metaRes.ok) continue;
+          const meta = (await metaRes.json()) as { files?: Array<{ name?: string }> };
+          const audio = (meta.files ?? []).map(f => f.name ?? '').filter(n =>
+            [...AUDIO_EXTENSIONS].some(ext => n.toLowerCase().endsWith(ext)),
+          );
+          const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 2);
+          const match = audio.find(n => {
+            const lower = n.toLowerCase();
+            return terms.length > 0 && terms.every(t => lower.includes(t));
+          }) ?? audio.find(n => terms.some(t => n.toLowerCase().includes(t)));
+          if (match) {
+            candidates.push({
+              url: `https://archive.org/download/${doc.identifier}/${encodeURIComponent(match)}`,
+              source: `archive.org (${doc.title ?? doc.identifier} — ${match.slice(0, 60)})`,
+            });
+          }
+        } catch { /* per-item failure skips the item, not the source */ }
+      }
+    }
+  } catch { /* Archive.org failure just yields no candidate */ }
   return candidates;
 }
 
