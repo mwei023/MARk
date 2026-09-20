@@ -74,11 +74,14 @@ export function resolveSchemaPath(  schema: ToolInputSchema | undefined,
   for (const segment of path) {
     if (!current) return null;
     if (current.type === 'array') {
+      // Arrays resolve ONLY by numeric index. A bare name (`tracks.kind`)
+      // is ambiguous across items and crashes at execution while passing
+      // validation — that exact gap shipped a broken plan live. Authors
+      // must write the index explicitly (`tracks.0.kind`).
+      if (!/^\d+$/.test(segment)) return null;
       current = current.items;
       if (current === undefined) return null;
-      // Numeric segment consumes the array level; non-numeric names a
-      // property of the item schema.
-      if (/^\d+$/.test(segment)) continue;
+      continue;
     }
     if (current.type !== 'object') return null;
     const next: ToolParameterSchema | undefined = current.properties?.[segment];

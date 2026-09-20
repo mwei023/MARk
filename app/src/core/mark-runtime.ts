@@ -511,6 +511,26 @@ export function isHollowReuse(
   if (!first) return true;
   const tool = tools.find(candidate => candidate.id === first.toolId);
   if (!tool) return true;
+  // Action goals need action tools: a plan of pure reads can never satisfy
+  // "play ...", "restart ...", "send ..." no matter the scores. Replay
+  // would report success without doing anything (observed live: a find_tracks
+  // replay "succeeding" a play-music request). Risk levels decide, not text.
+  if (/\b(play|launch|start|restart|stop|send|delete|remove|create|write)\b/i.test(command)) {
+    const risks = plan.steps.map(step => tools.find(candidate => candidate.id === step.toolId)?.risk);
+    if (risks.length > 0 && risks.every(risk => risk === undefined || risk === 'read' || risk === 'diagnostic')) {
+      return true;
+    }
+  }
+  // Mirror image: question goals ("confirm if...", "is ...?", "what ...?")
+  // need read tools. Replaying an action procedure for a question would act
+  // when the user asked to know (observed live: a play_track replay answering
+  // "confirm if any music is playing").
+  if (/^(confirm|check|is|are|what|which|how many|how much|list|show|tell me)\b/i.test(command.trim()) || /\?\s*$/.test(command.trim())) {
+    const risks = plan.steps.map(step => tools.find(candidate => candidate.id === step.toolId)?.risk);
+    if (risks.some(risk => risk !== undefined && risk !== 'read' && risk !== 'diagnostic')) {
+      return true;
+    }
+  }
   if (Object.keys(tool.inputSchema?.properties ?? {}).length === 0) return false;
   let evidenced = false;
   try {

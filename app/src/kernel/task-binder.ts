@@ -7,6 +7,15 @@ export interface TaskBinding {
   matchedFields: string[];
   complete: boolean;
   reason: string;
+  /**
+   * True when the match is a whole-goal guess into a query-shaped field
+   * (free-text fallback), not explicit evidence. Callers prefer evidenced
+   * bindings first and spend guessed ones only when nothing better binds —
+   * otherwise a guess on a lower-ranked tool jumps the queue ahead of the
+   * resolver's top pick (observed live: play_track's guessed query beating
+   * now_playing for "confirm if any music is playing").
+   */
+  freeText?: boolean;
 }
 
 export interface TaskBinderDependencies {}
@@ -86,6 +95,14 @@ export class TaskBinder {
         if (value) {
           input[name] = value;
           matchedFields.push(name);
+          return {
+            input,
+            missingRequired: required.filter(field => input[field] === undefined),
+            matchedFields,
+            complete: required.every(field => input[field] !== undefined),
+            reason: `Free-text fallback: whole goal bound to "${name}" (guess, not evidence).`,
+            freeText: true,
+          };
         }
       }
     }
@@ -246,8 +263,7 @@ export async function bindTaskSmart(
 
     const input = { ...base.input };
     const matchedFields = [...base.matchedFields];
-    for (const field of wanted) {
-      if (input[field] !== undefined) continue;
+    for (const field of wanted) {      if (input[field] !== undefined) continue;
       const raw = (extracted as Record<string, unknown>)[field];
       if (raw === undefined) continue;
       const coerced = coerceScalar(raw, properties[field]?.type ?? 'string');
@@ -265,6 +281,7 @@ export async function bindTaskSmart(
         stillMissing.length === 0
           ? `Bound goal values to "${tool.id}" with LLM assistance (${matchedFields.join(', ')}).`
           : base.reason,
+      ...(base.freeText ? { freeText: true as const } : {}),
     };
   } catch {
     return base;

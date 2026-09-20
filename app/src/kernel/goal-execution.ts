@@ -150,13 +150,21 @@ export class GoalExecutor {
     if (!candidates.some(known => known.id === resolution.tool!.id)) candidates.unshift(resolution.tool!);
 
     let fallback: { tool: ToolDescriptor; binding: TaskBinding } | undefined;
+    const guessed: Array<{ tool: ToolDescriptor; binding: TaskBinding }> = [];
     for (const tool of candidates) {
       const attempt = this.dependencies.bindTask(goal, tool);
       if (!fallback && attempt.complete) fallback = { tool, binding: attempt };
-      if (attempt.complete && attempt.matchedFields.length > 0) {
+      if (attempt.complete && attempt.matchedFields.length > 0 && !attempt.freeText) {
         return this.executeBound(goal, context, plan, validation, { ...resolution, tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, attempt);
       }
+      // Whole-goal guesses wait their turn in rank order: a guessed binding
+      // must not jump ahead of an evidenced one (observed live: play_track's
+      // guessed query beating now_playing), but among guesses rank still wins.
+      // Genuine completions (including zero-match ones like status tools)
+      // are decided after the smart section below, not here.
+      if (attempt.complete && attempt.freeText) guessed.push({ tool, binding: attempt });
     }
+    const smartGuessed: Array<{ tool: ToolDescriptor; binding: TaskBinding }> = [];
 
     if (this.dependencies.bindTaskSmart) {
       // Free-text fallback across candidates in rank order: one LLM
@@ -164,6 +172,7 @@ export class GoalExecutor {
       // Arbitration first when nothing bound with evidence: the rank leader
       // can be the wrong tool (music search outranking code search on one
       // shared verb), so the model picks among floor-passing candidates.
+      const smartGuessed: Array<{ tool: ToolDescriptor; binding: TaskBinding }> = [];
       if (process.env.MARK_SMART !== 'off' && this.dependencies.resolveCandidates) {
         // Arbitrate across the ungated floor-passers (gated ones included):
         // when nothing bound with evidence, rank order is already suspect.
@@ -179,25 +188,40 @@ export class GoalExecutor {
             // An LLM pick still needs binding evidence: sync match wins
             // immediately, otherwise one smart round must find real values.
             // A pick with nothing bindable falls through to the loop below.
+            // Guessed bindings (whole-goal text) wait like their sync kin.
             const arbitrated = this.dependencies.bindTask(goal, pick);
-            if (arbitrated.complete && arbitrated.matchedFields.length > 0) {
+            if (arbitrated.complete && arbitrated.matchedFields.length > 0 && !arbitrated.freeText) {
               return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, arbitrated);
             }
             const smartArbitrated = await this.dependencies.bindTaskSmart(goal, pick);
-            if (smartArbitrated.complete && smartArbitrated.matchedFields.length > 0) {
+            if (smartArbitrated.complete && smartArbitrated.matchedFields.length > 0 && !smartArbitrated.freeText) {
               return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, smartArbitrated);
             }
+            if (smartArbitrated.complete && smartArbitrated.freeText) smartGuessed.push({ tool: pick, binding: smartArbitrated });
           }
         }
       }
       for (const tool of candidates) {
         const smart = await this.dependencies.bindTaskSmart(goal, tool);
-        if (smart.complete && smart.matchedFields.length > 0) {
+        if (smart.complete && smart.matchedFields.length > 0 && !smart.freeText) {
           return this.executeBound(goal, context, plan, validation, { ...resolution, tool }, smart);
         }
+        if (smart.complete && smart.freeText) smartGuessed.push({ tool, binding: smart });
         if (!fallback && smart.complete) fallback = { tool, binding: smart };
         if (!fallback) fallback = { tool, binding: smart };
       }
+    }
+
+    // Decision table (rank preserved within each class): genuine completions
+    // first (a zero-match status tool answers status questions), then sync
+    // guesses, then smart guesses, then the legacy tail below.
+    if (fallback && fallback.binding.complete && !fallback.binding.freeText) {
+      const { tool, binding } = fallback;
+      return this.executeBound(goal, context, plan, validation, { ...resolution, tool }, binding);
+    }
+    const firstGuessed = guessed[0] ?? smartGuessed[0];
+    if (firstGuessed) {
+      return this.executeBound(goal, context, plan, validation, { ...resolution, tool: firstGuessed.tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, firstGuessed.binding);
     }
 
     if (fallback) {

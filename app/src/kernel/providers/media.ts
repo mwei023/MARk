@@ -307,6 +307,18 @@ const PLAY_STARTUP_WAIT_MS = 1500;
 // verified mpv mid-retry before it died. Slow sources get a second look.
 const STREAM_STARTUP_WAIT_MS = 6000;
 const activePlayers = new Map<number, ReturnType<typeof spawn>>();
+/** What each tracked player pid is playing (spawnfile is just the binary). */
+const playerFiles = new Map<number, string>();
+
+function trackPlayer(pid: number, child: ReturnType<typeof spawn>, file: string): void {
+  activePlayers.set(pid, child);
+  playerFiles.set(pid, file);
+}
+
+function untrackPlayer(pid: number): void {
+  activePlayers.delete(pid);
+  playerFiles.delete(pid);
+}
 
 /**
  * Strip command verbs and filler nouns from a bound music goal:
@@ -457,8 +469,7 @@ async function pickPlayer(): Promise<{ command: string; args: string[]; name: st
   throw new Error('No audio player found (looked for mpv, vlc).');
 }
 
-export const mediaPlayTrackTool: ToolDescriptor = {
-  id: 'media.play_track',
+export const mediaPlayTrackTool: ToolDescriptor = {  id: 'media.play_track',
   name: 'Play music track',
   description: 'Finds and plays music by name. Local library (files and zip archives) first; otherwise searches the web and streams the top video result. Verifies the player is running.',
   version: '1.1.0',
@@ -510,7 +521,7 @@ async function playFirstAlive(
       child.on('spawn', () => resolve());
     });
     if (child.pid === undefined) continue;
-    activePlayers.set(child.pid, child);
+    trackPlayer(child.pid, child, candidate.url);
     child.unref();
     await new Promise(resolve => setTimeout(resolve, STREAM_STARTUP_WAIT_MS));
     let running = true;
@@ -518,7 +529,7 @@ async function playFirstAlive(
       process.kill(child.pid, 0);
     } catch {
       running = false;
-      activePlayers.delete(child.pid);
+      untrackPlayer(child.pid);
     }
     if (!running) continue;
     const output = {
@@ -618,7 +629,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
       child.on('spawn', () => resolve());
     });
     if (child.pid === undefined) throw new Error('Player process failed to spawn.');
-    activePlayers.set(child.pid, child);
+    trackPlayer(child.pid, child, file);
     child.unref();
 
     await new Promise(resolve => setTimeout(resolve, PLAY_STARTUP_WAIT_MS));
@@ -627,7 +638,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
       process.kill(child.pid, 0);
     } catch {
       running = false;
-      activePlayers.delete(child.pid);
+      untrackPlayer(child.pid);
     }
     if (!running) throw new Error(`Player ${player.name} exited within ${PLAY_STARTUP_WAIT_MS}ms — playback did not start.`);
 
@@ -658,18 +669,79 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
       process.kill(pid, 0);
       return { ok: true, detail: `player pid ${pid} playing "${path.basename(file)}" is alive` };
     } catch {
-      activePlayers.delete(pid);
+      untrackPlayer(pid);
       return { ok: false, detail: `player pid ${pid} is gone — playback stopped` };
     }
   },
 };
 
-export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool];
+export const mediaNowPlayingTool: ToolDescriptor = {
+  id: 'media.now_playing',
+  name: 'What is playing',
+  description: 'Check currently playing audio status: live player processes Mark started, what file or stream each plays. Ask this to check, confirm, or see what is playing right now. Answers "is music playing" honestly.',
+  version: '1.0.0',
+  domain: 'media',
+  risk: 'read',
+  available: true,
+  inputSchema: { type: 'object', properties: {}, required: [] },
+  capabilities: ['music-playback', 'media'],
+  supportedResourceKinds: ['unknown'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'media.native',
+};
+
+export const mediaNowPlayingImplementation: ToolImplementation = {
+  toolId: mediaNowPlayingTool.id,
+
+  async execute() {
+    const players: Array<{ pid: number; file: string; alive: boolean }> = [];
+    for (const [pid] of activePlayers) {
+      let alive = true;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        alive = false;
+        untrackPlayer(pid);
+      }
+      players.push({ pid, file: playerFiles.get(pid) ?? '(unknown)', alive });
+    }
+    const live = players.filter(p => p.alive);
+    const output = {
+      playing: live.length > 0,
+      count: live.length,
+      players: live.map(p => ({ pid: p.pid, file: p.file })),
+      capturedAt: new Date().toISOString(),
+    };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'output',
+          source: 'media.native',
+          subject: 'now-playing',
+          summary: live.length > 0
+            ? `Playing: ${live.map(p => `${p.file} (pid ${p.pid})`).join('; ').slice(0, 300)}`
+            : 'Nothing playing from Mark-managed players.',
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool, mediaNowPlayingTool];
 
 export const mediaNativeImplementations: ToolImplementation[] = [
   mediaFindTracksImplementation,
   mediaExtractTrackImplementation,
   mediaPlayTrackImplementation,
+  mediaNowPlayingImplementation,
 ];
 
 export const mediaDiscoveryProvider: DiscoveryProvider = {
