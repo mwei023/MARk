@@ -405,6 +405,10 @@ export class MarkRuntime {
    * Saves a succeeded plan to workflow memory when it is safe to replay:
    * every step is read-only and no near-duplicate goal is already saved.
    * Returns the saved workflow id, or undefined when nothing was saved.
+   *
+   * Never saves read-only successes for action goals ("play ..."): a lookup
+   * step succeeding is not the goal succeeding, and the saved row would
+   * replay as false success forever (observed live, twice).
    */
   private maybeSaveSuccess(
     command: string,
@@ -422,6 +426,7 @@ export class MarkRuntime {
         return risk === 'read' || risk === 'diagnostic';
       });
       if (!allReadOnly) return undefined;
+      if (ACTION_GOAL_RE.test(command)) return undefined;
       if (this.kernelBridge.recallWorkflows(command, 1, 0.9).length > 0) return undefined;
       return this.kernelBridge.saveWorkflow(plan).id;
     } catch (err) {
@@ -500,8 +505,14 @@ function isExplanationRequest(command: string): boolean {
  * a tool the goal never evidenced. Input-less tools, evidenced replays,
  * and recalls no fresh resolution covers always run.
  */
-export function isHollowReuse(
-  plan: { steps: Array<{ toolId: string; input?: Record<string, unknown> }> },
+/**
+ * Goals that demand the world change (not just be observed). A read-only
+ * plan can never satisfy one — shared by the hollow-reuse guard and the
+ * workflow saver so both agree on what "doing" means.
+ */
+export const ACTION_GOAL_RE = /\b(play|launch|start|restart|stop|send|delete|remove|create|write)\b/i;
+
+export function isHollowReuse(  plan: { steps: Array<{ toolId: string; input?: Record<string, unknown> }> },
   command: string,
   tools: ToolDescriptor[],
   bind: (command: string, tool: ToolDescriptor) => { matchedFields: string[] },
@@ -515,7 +526,7 @@ export function isHollowReuse(
   // "play ...", "restart ...", "send ..." no matter the scores. Replay
   // would report success without doing anything (observed live: a find_tracks
   // replay "succeeding" a play-music request). Risk levels decide, not text.
-  if (/\b(play|launch|start|restart|stop|send|delete|remove|create|write)\b/i.test(command)) {
+  if (ACTION_GOAL_RE.test(command)) {
     const risks = plan.steps.map(step => tools.find(candidate => candidate.id === step.toolId)?.risk);
     if (risks.length > 0 && risks.every(risk => risk === undefined || risk === 'read' || risk === 'diagnostic')) {
       return true;

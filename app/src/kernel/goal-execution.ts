@@ -214,14 +214,27 @@ export class GoalExecutor {
 
     // Decision table (rank preserved within each class): genuine completions
     // first (a zero-match status tool answers status questions), then sync
-    // guesses, then smart guesses, then the legacy tail below.
-    if (fallback && fallback.binding.complete && !fallback.binding.freeText) {
+    // guesses, then smart guesses, then the legacy tail below. One exception:
+    // an action goal is never satisfied by a zero-match read completion —
+    // that is the hollow shape, so it yields to guesses and the tail.
+    const actionGoal = /\b(play|launch|start|restart|stop|send|delete|remove|create|write)\b/i.test(goal);
+    const fallbackHollow = !!fallback && fallback.binding.complete
+      && fallback.binding.matchedFields.length === 0
+      && actionGoal
+      && (fallback.tool.risk === 'read' || fallback.tool.risk === 'diagnostic');
+    if (fallback && fallback.binding.complete && !fallback.binding.freeText && !fallbackHollow) {
       const { tool, binding } = fallback;
       return this.executeBound(goal, context, plan, validation, { ...resolution, tool }, binding);
     }
-    const firstGuessed = guessed[0] ?? smartGuessed[0];
-    if (firstGuessed) {
-      return this.executeBound(goal, context, plan, validation, { ...resolution, tool: firstGuessed.tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, firstGuessed.binding);
+    const allGuessed = [...guessed, ...smartGuessed];
+    // A guessed read never satisfies an action goal either (same hollow
+    // shape one level down): skip to genuinely actionable guesses.
+    const actionableGuessed = actionGoal
+      ? allGuessed.filter(g => g.tool.risk !== 'read' && g.tool.risk !== 'diagnostic')
+      : allGuessed;
+    const winner = actionableGuessed[0] as { tool: ToolDescriptor; binding: TaskBinding } | undefined;
+    if (winner) {
+      return this.executeBound(goal, context, plan, validation, { ...resolution, tool: winner.tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, winner.binding);
     }
 
     if (fallback) {
