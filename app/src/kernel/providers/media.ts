@@ -59,7 +59,6 @@ async function listArchiveEntries(archive: string): Promise<string[]> {
 export async function findTracks(root: string, query: string, limit: number): Promise<FoundTrack[]> {
   const found: FoundTrack[] = [];
   await walkAudioFiles(root, 2, found);
-
   let archives: string[] = [];
   try {
     archives = (await fs.readdir(root))
@@ -81,11 +80,23 @@ export async function findTracks(root: string, query: string, limit: number): Pr
     }
   }
 
-  const terms = query.toLowerCase().trim();
-  const matched = !terms
-    ? found
-    : found.filter(track => track.name.toLowerCase().includes(terms));
-  return matched.slice(0, limit);
+  // Term-overlap scoring: fragmented queries ("4 your eyez only immortal
+  // j cole") match when most significant terms appear anywhere in the name,
+  // not just as one contiguous substring. Stop-words excluded; all-events
+  // with zero overlap score nothing.
+  const STOP = new Set(['the', 'a', 'an', 'of', 'and', 'for', 'to', 'in', 'on', 'my']);
+  const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1 && !STOP.has(t));
+  if (terms.length === 0) return found.slice(0, limit);
+  const scored = found.map(track => {
+    const name = track.name.toLowerCase();
+    let hits = 0;
+    for (const term of terms) {
+      if (name.includes(term)) hits++;
+    }
+    return { track, score: hits / terms.length };
+  }).filter(s => s.score >= 0.5);
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map(s => s.track);
 }
 
 function resolveLibraryArchive(rawArchive: string): string {
