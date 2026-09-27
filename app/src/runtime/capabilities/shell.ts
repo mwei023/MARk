@@ -1,5 +1,6 @@
 import { Capability } from './registry';
 import { routeLocally } from '../router';
+import { stripQuoted } from '../../core/gateway';
 import { createSystemCheckTool } from '../../tools/system_check';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -16,11 +17,16 @@ export class LocalHostCapability implements Capability {
   name = 'Local host basics';
 
   canHandle(input: string): boolean {
-    return routeLocally(input) !== null || /\bgit\s+(status|branch|log)\b/i.test(input);
+    // Intent, not payload: quoted file content must never claim a
+    // capability (observed live: a dashboard write answered the date
+    // because its HTML mentioned "time"). Agents receive the full text.
+    const intent = stripQuoted(input);
+    return routeLocally(intent) !== null || /\bgit\s+(status|branch|log)\b/i.test(intent);
   }
 
   async execute(input: string): Promise<string> {
-    if (/\bgit\s+(status|branch|log)\b/i.test(input)) {
+    const stripped = stripQuoted(input);
+    if (/\bgit\s+(status|branch|log)\b/i.test(stripped)) {
       const args = /\bbranch\b/i.test(input)
         ? ['branch', '--show-current']
         : /\blog\b/i.test(input)
@@ -34,7 +40,7 @@ export class LocalHostCapability implements Capability {
       }
     }
 
-    const intent = routeLocally(input);
+    const intent = routeLocally(stripped);
     if (!intent) return 'No matching local capability.';
 
     if (intent.type === 'time') {

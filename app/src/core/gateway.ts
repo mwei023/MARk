@@ -13,8 +13,16 @@ import { routeLocally } from '../runtime/router';
  * `free` output routed to the memory capability instead of the kernel.
  */
 function stripQuoted(command: string): string {
-  return command.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+  // Escape-aware: payloads arrive JSON-quoted (\" inside), and a naive
+  // "[^"]*" stops at the first escaped quote, leaking payload shards that
+  // hijack classification. Observed live: dashboard HTML mentioning disk
+  // routed a file write to df. (?:[^"\\]|\\.) consumes escapes correctly.
+  return command
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''");
 }
+
+export { stripQuoted };
 
 /**
  * Explicit kernel-tool addressing: `field: value` syntax unique to kernel
