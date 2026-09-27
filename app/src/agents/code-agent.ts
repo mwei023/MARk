@@ -124,6 +124,28 @@ export class CodeAgent extends Agent {
       } catch (err) {
         await find(`Final verification failed safely: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`);
       }
+      // Gate 3/3 (new): repo-level check via safest script (typecheck > lint).
+      // Best-effort and reported, never blocking resolve on unrelated failures.
+      try {
+        const { readFileSync: readPkg, existsSync: existsPkg } = await import('node:fs');
+        if (existsPkg(`${repoPath}/package.json`)) {
+          const scripts = Object.keys(JSON.parse(readPkg(`${repoPath}/package.json`, 'utf8'))?.scripts ?? {});
+          const gate = scripts.includes('typecheck') ? 'typecheck' : scripts.includes('lint') ? 'lint' : null;
+          if (gate) {
+            const { execFile: execGate } = await import('node:child_process');
+            const { promisify: promGate } = await import('node:util');
+            try {
+              await promGate(execGate)('npm', ['run', gate], { cwd: repoPath, timeout: 120000 });
+              await find(`Verification gate 3/3: npm run ${gate} passed.`);
+            } catch (gateErr) {
+              const msg = gateErr instanceof Error ? gateErr.message : String(gateErr);
+              await find(`Verification gate 3/3: npm run ${gate} FAILED (non-blocking): ${msg.slice(0, 200)}`);
+            }
+          }
+        }
+      } catch {
+        // Gate 3/3 is informational only.
+      }
       const done = fixed > 0 && remaining === 0;
       // Push is explicit, never default: the request must carry push:true
       // (plus dry-run off). Pushed branches are the audit trail.

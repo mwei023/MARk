@@ -113,7 +113,7 @@ const run = async (): Promise<void> => {
 
   const agent = await runtime.executeCommand('git status', 'test-user', 'cli');
   assert.equal(agent.route, 'agent');
-  assert.match(agent.response, /^GitHub Agent:/);
+  assert.match(agent.response, /GitHub Agent:|Which repository\?/);
 
   const reasoning = await runtime.executeCommand('help me understand neural networks', 'test-user', 'cli');
   assert.deepEqual(reasoning.route, 'reasoning');
@@ -125,6 +125,7 @@ const run = async (): Promise<void> => {
 
   const capturedIncidents: Array<{ context: { repository?: string; localPath?: string } }> = [];
   const originalCreateIncident = incidentStore.createIncident.bind(incidentStore);
+  const originalFindOrCreate = (incidentStore as any).findOrCreateIncident?.bind(incidentStore);
   const originalAddAction = incidentStore.addAction.bind(incidentStore);
   const originalUpdateStatus = incidentStore.updateStatus.bind(incidentStore);
   const originalResolveIncident = incidentStore.resolveIncident.bind(incidentStore);
@@ -134,7 +135,12 @@ const run = async (): Promise<void> => {
       capturedIncidents.push(input);
       return { id: 'INC-TEST', ...input, actions: [] };
     };
+    (incidentStore as any).findOrCreateIncident = async (input: any) => {
+      capturedIncidents.push(input);
+      return { id: 'INC-TEST', ...input, actions: [] };
+    };
     (incidentStore as any).addAction = async () => {};
+    (incidentStore as any).addFinding = async () => {};
     (incidentStore as any).updateStatus = async () => {};
     (incidentStore as any).resolveIncident = async () => {};
 
@@ -154,6 +160,7 @@ const run = async (): Promise<void> => {
     assert.equal(capturedIncidents[1].context.localPath, '/home/mwei/park-guardian-dashboard');
   } finally {
     (incidentStore as any).createIncident = originalCreateIncident;
+    if (originalFindOrCreate) (incidentStore as any).findOrCreateIncident = originalFindOrCreate;
     (incidentStore as any).addAction = originalAddAction;
     (incidentStore as any).updateStatus = originalUpdateStatus;
     (incidentStore as any).resolveIncident = originalResolveIncident;

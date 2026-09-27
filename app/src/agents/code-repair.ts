@@ -340,7 +340,7 @@ async function tscErrorCount(repoPath: string): Promise<number | null> {
 export async function repairOneError(
   repoPath: string,
   target: LintError,
-  opts: { maxFileLines?: number; llmTimeoutMs?: number; ctx?: RepairRunContext } = {},
+  opts: { maxFileLines?: number; llmTimeoutMs?: number; ctx?: RepairRunContext; siblings?: LintError[] } = {},
 ): Promise<RepairOutcome> {
   const abs = `${repoPath}/${target.file}`;
   let original: string;
@@ -377,6 +377,7 @@ export async function repairOneError(
         skipLocal: tier === 'cloud',
         ctx,
         llmTimeoutMs: opts.llmTimeoutMs,
+        siblings: opts.siblings,
       });
       if (!attempt.proposal) {
         lastNote = `${tier}: ${attempt.note}`;
@@ -421,11 +422,19 @@ export async function repairOneError(
   return { target, fixed: false, via: 'none', detail: `${target.file}: final recount did not confirm improvement; reverted.` };
 }
 
+/** Shared context for coordinated repair: other errors in the same file so
+ * one fix does not contradict the next. Pure, unit-tested. */
+export function formatSiblingContext(target: LintError, siblings?: LintError[]): string {
+  const others = (siblings ?? []).filter(s => s.file === target.file && s.line !== target.line).slice(0, 5);
+  if (others.length === 0) return '';
+  return `Other errors in this file (fix consistently, do not contradict):\n${others.map(s => `- line ${s.line} [${s.ruleId}] ${s.message}`.slice(0, 160)).join('\n')}\n`;
+}
+
 /** Single proposal attempt: prompt, generate, splice, integrity-check. */
 async function proposeEdit(
   original: string,
   target: LintError,
-  opts: { skipLocal?: boolean; ctx: RepairRunContext; llmTimeoutMs?: number },
+  opts: { skipLocal?: boolean; ctx: RepairRunContext; llmTimeoutMs?: number; siblings?: LintError[] },
 ): Promise<{ proposal: string | null; via: 'local' | 'cloud'; note: string }> {
   // Windowed prompt: file head (imports) + ±25 lines around the error.
   // Small output (~a few lines) keeps inference fast and terminating.
@@ -436,7 +445,7 @@ async function proposeEdit(
   const window = allLines.slice(lo, hi);
   const numbered = window.map((l, i) => `${lo + i + 1}|${l}`).join('\n');
   const headBlock = lo <= 15 ? '' : `File head (line|code):\n${head.map((l, i) => `${i + 1}|${l}`).join('\n')}\n\n`;
-  const prompt = `File: ${target.file}\nESLint error at line ${target.line}, column ${target.column}: [${target.ruleId}] ${target.message}\n\n${headBlock}Repair window (line|code):\n${numbered}`;
+  const prompt = `File: ${target.file}\nESLint error at line ${target.line}, column ${target.column}: [${target.ruleId}] ${target.message}\n${formatSiblingContext(target, opts.siblings)}\n${headBlock}Repair window (line|code):\n${numbered}`;
   const budgetMs = opts.llmTimeoutMs ?? 180000;
   const { content, via } = await chatWithTimeout(
     () => completeRepair(prompt, 300, opts.ctx, { skipLocal: opts.skipLocal }),
@@ -490,7 +499,10 @@ export async function repairLintErrors(
   const ctx: RepairRunContext = { cloudCalls: 0, maxCloudCalls: opts.maxCloudCalls ?? config.markRepairMaxCloudCalls };
   const outcomes: RepairOutcome[] = [...skippedNonActionable];
   for (const target of queue) {
-    const outcome = await repairOneError(repoPath, target, { maxFileLines: opts.maxFileLines, ctx });
+    // Coordinated repair: each fix sees the file's other queued errors so
+    // passes stay consistent instead of contradicting each other.
+    const siblings = queue.filter(t => t !== target);
+    const outcome = await repairOneError(repoPath, target, { maxFileLines: opts.maxFileLines, ctx, siblings });
     outcomes.push(outcome);
     if (opts.onOutcome) await opts.onOutcome(outcome);
   }

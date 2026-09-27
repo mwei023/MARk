@@ -77,7 +77,13 @@ export class CapabilityResolver {
 
   /** Ranked candidates, best first. Empty for empty goals or no matches. */
   resolveAll(goal: string, opts: { gate?: boolean } = {}): RankedCapability[] {
-    const normalizedGoal = this.normalize(goal);
+    // Score intent, not payload: quoted `field: "value"` segments carry
+    // content vocabulary ("verify", "test" in pasted markdown) that must
+    // never outrank the intent verbs outside the quotes. Stripped before
+    // normalize (which would erase the quote boundaries). Observed live: a
+    // README write resolved to repo.verify_patch on payload words. Binding
+    // still sees the full goal — only scoring is stripped.
+    const normalizedGoal = this.normalize(stripPayload(goal));
 
     if (!normalizedGoal) return [];
 
@@ -112,6 +118,17 @@ export class CapabilityResolver {
         tokens: tokenSets.get(tool.id)!,
         idf: (term: string) => Math.log(tools.length / (1 + (documentFrequency.get(term) ?? 0))),
       }))
+      .map(candidate => {
+        // Explicit addressing wins outright: when the goal names a tool id
+        // verbatim ("execute repo.index"), that tool is the intent no matter
+        // what vocabulary overlaps say. Observed live: "execute repo.index"
+        // replayed a memorized repo.symbols workflow on term overlap plus
+        // reliability bonus.
+        if (goal.toLowerCase().includes(candidate.tool.id.toLowerCase())) {
+          return { ...candidate, score: candidate.score + 2.0, matchedTerms: [...candidate.matchedTerms, candidate.tool.id], idAnchor: true };
+        }
+        return candidate;
+      })
       .filter(candidate =>
         candidate.score >= MIN_RESOLUTION_SCORE &&
         // The evidence gate keeps weak single matches from firing tools
@@ -288,6 +305,14 @@ export class CapabilityResolver {
         .filter(token => token.length >= 2),
     );
   }
+}
+
+/**
+ * Removes double-quoted payload spans so resolution scores the intent verbs
+ * outside them. Single quotes are left alone (possessives, contractions).
+ */
+function stripPayload(value: string): string {
+  return value.replace(/"[^"]*"/g, ' ');
 }
 
 /**

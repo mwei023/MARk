@@ -652,14 +652,43 @@ export class KernelPlanner {
     // as new tools with required inputs arrive).
     if (producerBinding.missingRequired.length > 0) return this.plan(goal, availableTools);
 
+    // Goal-bound values beat composed references: when the goal already
+    // states the consumer's required inputs (e.g. an explicit url), chaining
+    // a producer in front only adds failure modes. Observed live: "open
+    // browser with url: http://localhost:..." composed search→open and fed
+    // open the search QUERY string as its url (string→string is compatible
+    // but semantically wrong). Fully-bound consumers run single-step.
+    if (consumerBinding.missingRequired.length === 0 && consumerBinding.matchedFields.length > 0) {
+      const direct: ExecutionPlan = {
+        id: createKernelId('plan'),
+        goal,
+        steps: [
+          {
+            id: createKernelId('step'),
+            toolId: best.consumer.id,
+            input: consumerBinding.input,
+            dependsOn: [],
+            expectedOutcome: best.consumer.description || `Execute "${best.consumer.id}"`,
+          },
+        ],
+        successCriteria: [`Capability "${best.consumer.id}" executes successfully to satisfy "${goal}".`],
+      };
+      if (validatePlan(direct, registry).valid) return direct;
+      // Fell through: direct plan invalid, try reference composition below.
+    }
+
     const producerStepId = createKernelId('step');
     const consumerStepId = createKernelId('step');
     const reference = `$steps.${producerStepId}.output.${best.producerPath.join('.')}`;
 
+    // References only fill fields the goal left empty — never overwrite
+    // values bound from the goal itself (see above).
     const consumerInput: Record<string, unknown> = {
       ...consumerBinding.input,
-      [best.field]: reference,
     };
+    if (!consumerBinding.matchedFields.includes(best.field)) {
+      consumerInput[best.field] = reference;
+    }
 
     const candidate: ExecutionPlan = {
       id: createKernelId('plan'),

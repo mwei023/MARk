@@ -675,8 +675,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
   },
 };
 
-export const mediaNowPlayingTool: ToolDescriptor = {
-  id: 'media.now_playing',
+export const mediaNowPlayingTool: ToolDescriptor = {  id: 'media.now_playing',
   name: 'What is playing',
   description: 'Check currently playing audio status: live player processes Mark started, what file or stream each plays. Ask this to check, confirm, or see what is playing right now. Answers "is music playing" honestly.',
   version: '1.0.0',
@@ -707,11 +706,25 @@ export const mediaNowPlayingImplementation: ToolImplementation = {
       }
       players.push({ pid, file: playerFiles.get(pid) ?? '(unknown)', alive });
     }
+    // Unmanaged players: same machine, started outside this process (other
+    // Mark sessions, the user's own VLC/mpv). Seen via process scan, reported
+    // separately — Mark must not claim silence while music plays.
+    const unmanaged: Array<{ pid: number; cmd: string }> = [];
+    try {
+      const { stdout } = await execFileAsync('pgrep', ['-af', 'mpv|vlc|cvlc|mpg123|ffplay'], { timeout: 10000 });
+      for (const line of stdout.split('\n')) {
+        const m = line.trim().match(/^(\d+)\s+(.+)$/);
+        if (!m || /pgrep/.test(m[2])) continue;
+        const pid = parseInt(m[1], 10);
+        if (!activePlayers.has(pid)) unmanaged.push({ pid, cmd: m[2].slice(0, 160) });
+      }
+    } catch { /* no scan means no unmanaged evidence, not silence */ }
     const live = players.filter(p => p.alive);
     const output = {
       playing: live.length > 0,
       count: live.length,
       players: live.map(p => ({ pid: p.pid, file: p.file })),
+      unmanagedPlayers: unmanaged,
       capturedAt: new Date().toISOString(),
     };
     return {
@@ -724,7 +737,9 @@ export const mediaNowPlayingImplementation: ToolImplementation = {
           subject: 'now-playing',
           summary: live.length > 0
             ? `Playing: ${live.map(p => `${p.file} (pid ${p.pid})`).join('; ').slice(0, 300)}`
-            : 'Nothing playing from Mark-managed players.',
+            : unmanaged.length > 0
+              ? `Nothing playing from Mark-managed players, but ${unmanaged.length} unmanaged audio process(es) detected: ${unmanaged.map(u => `${u.cmd.slice(0, 80)} (pid ${u.pid})`).join('; ').slice(0, 300)}`
+              : 'Nothing playing from Mark-managed players.',
           data: output,
           confidence: 1,
           observedAt: output.capturedAt,
@@ -735,13 +750,80 @@ export const mediaNowPlayingImplementation: ToolImplementation = {
   },
 };
 
-export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool, mediaNowPlayingTool];
+export const mediaStopTool: ToolDescriptor = {
+  id: 'media.stop',
+  name: 'Stop playback',
+  description: 'Stops Mark-managed audio playback: terminates live player processes it started (pause, quiet, halt, turn the music off). Only touches players Mark tracks — never anything else.',
+  version: '1.0.0',
+  domain: 'media',
+  risk: 'reversible',
+  available: true,
+  inputSchema: { type: 'object', properties: {}, required: [] },
+  capabilities: ['music-playback', 'media'],
+  supportedResourceKinds: ['unknown'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'media.native',
+};
+
+export const mediaStopImplementation: ToolImplementation = {
+  toolId: mediaStopTool.id,
+
+  async execute() {
+    const stopped: Array<{ pid: number; file: string }> = [];
+    for (const pid of [...activePlayers.keys()]) {
+      const file = playerFiles.get(pid) ?? '(unknown)';
+      try {
+        process.kill(pid, 'TERM');
+      } catch {
+        untrackPlayer(pid);
+        continue;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      try {
+        process.kill(pid, 0);
+        try { process.kill(pid, 'KILL'); } catch { /* exited between checks */ }
+      } catch {
+        // TERM worked.
+      }
+      untrackPlayer(pid);
+      stopped.push({ pid, file });
+    }
+    const output = {
+      stopped: stopped.length,
+      tracks: stopped.map(s => s.file),
+      capturedAt: new Date().toISOString(),
+    };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'output',
+          source: 'media.native',
+          subject: 'stop-playback',
+          summary: stopped.length > 0
+            ? `Stopped ${stopped.length} player(s): ${stopped.map(s => s.file).join('; ').slice(0, 300)}`
+            : 'Nothing was playing from Mark-managed players.',
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool, mediaNowPlayingTool, mediaStopTool];
 
 export const mediaNativeImplementations: ToolImplementation[] = [
   mediaFindTracksImplementation,
   mediaExtractTrackImplementation,
   mediaPlayTrackImplementation,
   mediaNowPlayingImplementation,
+  mediaStopImplementation,
 ];
 
 export const mediaDiscoveryProvider: DiscoveryProvider = {

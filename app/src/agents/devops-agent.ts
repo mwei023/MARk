@@ -47,7 +47,9 @@ export class DevOpsAgent extends Agent {
       event.type === 'github.deployment.succeeded' ||
       event.type === 'docker.container.health_status.unhealthy' ||
       event.type === 'docker.container.exited' ||
-      event.type === 'system.service.down'
+      event.type === 'system.service.down' ||
+      event.type === 'edge.obstacle' ||
+      event.type === 'edge.low_batt'
     );
   }
 
@@ -90,7 +92,7 @@ export class DevOpsAgent extends Agent {
 
   async handle(event: Event): Promise<void> {
     const data = (event.data ?? {}) as Record<string, any>;
-    const subject = data.containerName || data.container || data.service || data.environment || 'unknown-service';
+    const subject = data.containerName || data.container || data.service || data.node || data.environment || 'unknown-service';
     const repository = data.repository || data.full_name;
     const environment = data.environment || 'unknown';
 

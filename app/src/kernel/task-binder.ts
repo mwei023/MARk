@@ -155,8 +155,32 @@ export class TaskBinder {
     const explicitMatch = goal.match(fieldPattern);
 
     if (explicitMatch?.[1]) {
+      let raw = explicitMatch[1].trim();
+      // JSON-encoded payloads arrive with escapes intact (`\"`, `\\`, `\n`
+      // from a stringified draft). Decode when the value carries evidence of
+      // JSON encoding (double-backslash or escaped quote); plain values with
+      // lone backslashes (Windows paths) are left untouched. Observed live:
+      // a chat page landed with `/\\/+$/` because `\"` was never decoded.
+      const maybeDecoded = tryDecodeJsonString(raw);
+      if (maybeDecoded !== undefined) raw = maybeDecoded;
+      // Path-like fields must never swallow a trailing payload: single-field
+      // tools (file_read, directory_list) declare no `content` sibling, so
+      // the boundary above can't stop "path: a/b content: <html>". Cut at
+      // the first ` otherField:` marker and cap length. Observed live:
+      // directory_list scandir'd 'index.html" content: "...' as one path.
+      if (/^(path|file|dir|directory|repoPath|folder|localPath)$/i.test(field)) {
+        // Stop at ANY `otherField:` marker, not just declared siblings:
+        // sibling lists miss fields from other tools' schemas (observed
+        // live: repoPath swallowed `maxFiles: 10` because symbols has no
+        // maxFiles field). Genuine paths never contain ` word:` sequences.
+        raw = raw.split(/\s+(?=[A-Za-z_][\w$]*\s*[:=])/)[0].trim();
+        raw = raw.replace(/["']$/, '').trim();
+        if (raw.length > 500) raw = raw.slice(0, 500);
+      } else if (raw.length > 50000) {
+        raw = raw.slice(0, 50000);
+      }
       return this.coerceValue(
-        explicitMatch[1].trim(),
+        raw,
         definition.type,
       );
     }
@@ -209,6 +233,24 @@ export class TaskBinder {
   private escapeRegExp(value: string): string {
     return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
+}
+
+/**
+ * Decodes a JSON-encoded string value (escapes intact, surrounding quotes
+ * already stripped by the field pattern). Returns undefined when the value
+ * shows no evidence of JSON encoding or fails to parse, leaving the raw
+ * value untouched. Real newlines are escaped before parsing since encoded
+ * payloads mix them with literal `\n` sequences.
+ */
+function tryDecodeJsonString(raw: string): string | undefined {
+  if (!/\\\\|\\"/.test(raw)) return undefined;
+  try {
+    const decoded = JSON.parse(`"${raw.replace(/\r/g, '').replace(/\n/g, '\\n')}"`);
+    if (typeof decoded === 'string') return decoded;
+  } catch {
+    // Not decodable — caller keeps the raw value.
+  }
+  return undefined;
 }
 
 export interface SmartBindDeps {

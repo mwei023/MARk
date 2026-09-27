@@ -4,7 +4,8 @@
  *
  * Routes:
  * POST /webhooks/github  - GitHub events
- * POST /webhooks/docker  - Docker/container events
+  * POST /webhooks/docker  - Docker/container events
+  * POST /webhooks/edge    - Edge TinyML-node events (MQTT bridge)
  * GET  /api/incidents    - List open incidents
  * GET  /api/incidents/:id - Get incident details
  * POST /api/approve      - User approves action (incident)
@@ -22,6 +23,7 @@ import { incidentStore } from '../core/incident';
 import { agentRuntime } from '../core/agent-runtime';
 import { GitHubWebhookHandler } from '../webhooks/github';
 import { DockerWebhookHandler } from '../webhooks/docker';
+import { EdgeWebhookHandler } from '../webhooks/edge';
 import { eventBus } from '../core/event-bus';
 import { markRuntime } from '../core/mark-runtime';
 import { likeMeLoop, LikeMeMode } from '../core/like-me-loop';
@@ -50,6 +52,17 @@ app.use(express.json({
   },
 }));
 
+// CORS for browser clients (the static chat UI is served from another
+// origin/port). Preflight is answered before auth so browsers proceed.
+app.use((req: any, res: any, next: any) => {
+  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-token');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+});
+
 // ─────────────────────────────────────────────────────────────
 // Optional API auth: set API_TOKEN to require Bearer/x-api-token on /api/*.
 // Webhooks keep their own HMAC secrets and are excluded here.
@@ -73,6 +86,8 @@ const githubHandler = new GitHubWebhookHandler(eventBus);
 app.post('/webhooks/github', githubHandler.handler());
 const dockerHandler = new DockerWebhookHandler(eventBus);
 app.post('/webhooks/docker', dockerHandler.handler());
+const edgeHandler = new EdgeWebhookHandler(eventBus);
+app.post('/webhooks/edge', edgeHandler.handler());
 
 // ─────────────────────────────────────────────────────────────
 // API Endpoints

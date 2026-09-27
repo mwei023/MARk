@@ -116,7 +116,10 @@ describe('ops tool providers', () => {
     expect(ids).toContain('repo.map');
     expect(ids).toContain('repo.search_symbol');
     expect(ids).toContain('repo.read_window');
-    for (const t of repoSemanticTools) expect(t.risk).toBe('read');
+    for (const t of repoSemanticTools) {
+      if (t.id === 'repo.verify_patch' || t.id === 'repo.index') expect(t.risk).toBe('diagnostic');
+      else expect(t.risk).toBe('read');
+    }
   });
 
   it('exposes ops.verify gates', () => {

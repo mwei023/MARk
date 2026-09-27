@@ -55,8 +55,9 @@ const PLANNER_SYSTEM = `You compose execution plans for MARK from its tool catal
 Rules:
 - Use ONLY tool ids from the catalog, spelled exactly. Invent nothing.
 - Give every required input a concrete value. Prefer values stated in the goal; use "name: value" pairs from the goal text.
+- Write values plainly with NO surrounding quotes. Never emit "\"value\"" — emit value.
 - dependsOn lists EARLIER step indexes (0-based) whose outputs a step needs. Use [] for independent steps.
-- Keep plans short (1-4 steps). If the goal needs nothing or no tool fits, return {"steps": [], "successCriteria": []}.`;
+- Keep plans short (1-4 steps). If the goal needs nothing or no tool fits, return {"steps": [], "successCriteria": []}. Prefer the single most direct tool: an explicit open/read/write goal needs that tool only, never a search step first.`;
 
 export async function proposePlanWithLLM(
   goal: string,
@@ -109,6 +110,35 @@ export async function proposePlanWithLLM(
   }
 }
 
+/**
+ * Models quote values they copy ("url: \"http://x\""). The validator checks
+ * presence, not shape — so a quoted URL passes validation and dies at
+ * runtime (`new URL('"http://x"')` throws Invalid URL). Strip one layer of
+ * matching surrounding quotes here so planned inputs execute as proposed.
+ * Observed live: browser.open starved by its own plan's quoted url.
+ */
+export function sanitizeInputValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value;
+  let out = value.trim();
+  if (out.length >= 2) {
+    const first = out[0];
+    const last = out[out.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'") || (first === '`' && last === '`')) {
+      out = out.slice(1, -1).trim();
+    }
+  }
+  return out;
+}
+
+function sanitizeStepInput(input: unknown): Record<string, unknown> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const clean: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    clean[key] = sanitizeInputValue(value);
+  }
+  return clean;
+}
+
 function buildPlan(
   goal: string,
   content: string,
@@ -130,7 +160,7 @@ function buildPlan(
     steps.push({
       id,
       toolId: tool.id,
-      input: step.input && typeof step.input === 'object' ? step.input : {},
+      input: sanitizeStepInput(step.input),
       dependsOn: [],
       expectedOutcome: undefined,
     });

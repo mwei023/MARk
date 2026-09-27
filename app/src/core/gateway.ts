@@ -6,6 +6,37 @@
 import { Event, EventType } from './events';
 import { routeLocally } from '../runtime/router';
 
+/**
+ * Classifies intent, not payload: quoted `field: "value"` segments are
+ * stripped before keyword matching so embedded content (HTML, logs, file
+ * text) can never hijack routing. Observed live: a write goal carrying
+ * `free` output routed to the memory capability instead of the kernel.
+ */
+function stripQuoted(command: string): string {
+  return command.replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+}
+
+/**
+ * Explicit kernel-tool addressing: `field: value` syntax unique to kernel
+ * tools (repoPath:) or a verbatim tool id (repo.index, sys.exec, ...).
+ * Either means the user addresses a tool, not an agent. Observed live:
+ * deploy orders died in git-agent, sys.exec died on the word "status".
+ */
+export function isExplicitToolCall(command: string): boolean {
+  if (/\brepoPath\s*:/i.test(command)) return true;
+  // A bare tool-id mention ("repo.index builds...") is documentation, not
+  // addressing. It counts only beside an action verb ("execute sys.exec").
+  // Observed live: a draft goal describing tools bypassed to nowhere.
+  return /\b(execute|run|call|open|write|commit|push|create|index|search|perceive|draft|compose)\b/i.test(command) &&
+    /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident)\.[\w$.-]+/i.test(command);
+}
+export function isContentRequest(command: string): boolean {
+  // None of the specialist agents draft content — they answer status
+  // questions — so these skip agent routing entirely (reasoning still tries
+  // the kernel first for explicit file ops).
+  return /\b(draft|compose|autobiography|README|homepage|landing page|blog( post)?|poem|essay)\b/i.test(command);
+}
+
 export type RoutingPath = 'deterministic' | 'agent' | 'reasoning' | 'escalate';
 
 export interface RoutingDecision {
@@ -57,6 +88,26 @@ export class Gateway {
           needsLLM: false,
           priority: 'high',
           reasoning: 'Service unhealthy. Gather diagnostics, attempt restart.',
+        };
+
+      // Edge obstacle: physical ops triage by DevOps agent
+      case 'edge.obstacle':
+        return {
+          path: 'agent',
+          agent: 'devops-agent',
+          needsLLM: false,
+          priority: 'high',
+          reasoning: 'Obstacle reported by edge node. Stop-first triage, then reroute.',
+        };
+
+      // Edge low battery: physical ops triage by DevOps agent
+      case 'edge.low_batt':
+        return {
+          path: 'agent',
+          agent: 'devops-agent',
+          needsLLM: false,
+          priority: event.severity === 'critical' ? 'critical' : 'high',
+          reasoning: 'Battery low on edge node. Return-to-charge triage.',
         };
 
       // CI Test Failed: Deterministic patterns first
@@ -123,6 +174,16 @@ export class Gateway {
           reasoning: 'Approval response. Resume pending operation.',
         };
 
+      // Edge presence signals: bus-visible, no action needed
+      case 'edge.wake':
+      case 'edge.node.online':
+        return {
+          path: 'deterministic',
+          needsLLM: false,
+          priority: 'low',
+          reasoning: 'Edge presence signal. Logged on the bus, no triage.',
+        };
+
       // Everything else: escalate for manual review
       default:
         return {
@@ -145,13 +206,13 @@ export class Gateway {
       };
     }
 
-    const cmd = command;
+    const cmd = stripQuoted(command);
 
     // Agent intent patterns use whole-word matching only. Substring
     // `includes()` misroutes ("legitimate" -> git, "latest" -> test,
     // "somehow" -> how). Word boundaries keep specialist routing precise;
     // anything ambiguous falls through to kernel / reasoning.
-    const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up|repo\b|repository|repositories)\b/i;
+    const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up)\b/i;
     const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
     const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
     const WEB_RE = /\b(google|browse|browsing|look\s?up|search the web|research)\b/i;
@@ -171,7 +232,7 @@ export class Gateway {
       };
     }
 
-    if (routeLocally(command)) {
+    if (routeLocally(stripQuoted(command))) {
       // Storage-hog questions need measured directory sizes, not a df
       // snapshot. Route them past the fast local path so the kernel answers
       // from data. One concept-level rule — not one per situation.
@@ -188,6 +249,31 @@ export class Gateway {
         needsLLM: false,
         priority: 'normal',
         reasoning: 'A local host capability can answer this request.',
+      };
+    }
+
+    // Explicit kernel-tool calls bypass agent heuristics (see
+    // isExplicitToolCall): the user addresses a tool, not an agent.
+    // needsLLM stays true so reasoning remains the fallback when the kernel
+    // declines (creative guard) or cannot bind — otherwise the order strands
+    // as unroutable. Observed live: a draft describing tools bypassed, the
+    // kernel correctly refused, and nothing else could claim it.
+    if (isExplicitToolCall(cmd)) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Explicit kernel tool call. Kernel resolves and binds.',
+      };
+    }
+
+    // Content-creation goes straight to reasoning, past every agent.
+    if (isContentRequest(cmd)) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Content-creation request. Reasoning drafts; kernel handles explicit file ops.',
       };
     }
 

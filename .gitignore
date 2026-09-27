@@ -13,6 +13,8 @@ app/.env
 # ── Data & Databases ──────────────────────────
 data/
 app/data/
+# Independently versioned sample site (own repo + remote) — never nest as gitlink.
+app/mark-os-site/
 *.db
 *.sqlite
 *.rdb

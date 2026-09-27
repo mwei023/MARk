@@ -25,7 +25,8 @@ export type EventSource =
   | 'api'
   | 'voice'
   | 'system'
-  | 'market';
+  | 'market'
+  | 'edge';
 
 export type EventType =
   // GitHub / Git
@@ -92,7 +93,13 @@ export type EventType =
 
   // Deep research (research agent — exhaustive, self-improving)
   | 'research.requested'
-  | 'research.completed';
+  | 'research.completed'
+
+  // Edge hardware (TinyML nodes via MQTT bridge — Phase 3 merge)
+  | 'edge.obstacle'
+  | 'edge.low_batt'
+  | 'edge.wake'
+  | 'edge.node.online';
 
 /**
  * Specific event implementations

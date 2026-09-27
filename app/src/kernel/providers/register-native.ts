@@ -45,6 +45,21 @@ import {
 } from './repo-semantic';
 
 import {
+  gitDeployDiscoveryProvider,
+  gitDeployImplementations,
+} from './git-deploy';
+
+import {
+  worldPerceptionDiscoveryProvider,
+  worldPerceptionImplementations,
+} from './world-perception';
+
+import {
+  sysSandboxDiscoveryProvider,
+  sysSandboxImplementations,
+} from './sys-sandbox';
+
+import {
   opsVerifyDiscoveryProvider,
   opsVerifyImplementations,
 } from './ops-verify';
@@ -69,6 +84,9 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(investigateDiscoveryProvider);
   toolDiscovery.registerProvider(screenDiscoveryProvider);
   toolDiscovery.registerProvider(repoSemanticDiscoveryProvider);
+  toolDiscovery.registerProvider(gitDeployDiscoveryProvider);
+  toolDiscovery.registerProvider(worldPerceptionDiscoveryProvider);
+  toolDiscovery.registerProvider(sysSandboxDiscoveryProvider);
   toolDiscovery.registerProvider(opsVerifyDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
@@ -96,6 +114,18 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of repoSemanticImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of gitDeployImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of worldPerceptionImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of sysSandboxImplementations) {
     kernel.registerImplementation(implementation);
   }
 

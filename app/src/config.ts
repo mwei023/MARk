@@ -11,9 +11,9 @@ import os from 'os';
 
 function homeDir(): string {
   try {
-    return process.env.HOME || os.homedir() || '/home/mwei';
+    return process.env.HOME || os.homedir() || '/tmp';
   } catch {
-    return '/home/mwei';
+    return '/tmp';
   }
 }
 

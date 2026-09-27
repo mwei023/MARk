@@ -7,10 +7,17 @@
  * legacy Jarvis only as the current reasoning adapter.
  */
 import { MarkStatusCapability } from '../runtime/capabilities/mark-status';
+import { FieldProbeCapability } from '../runtime/capabilities/field-node';
+import {
+  FieldCamshotCapability,
+  FieldClickCapability,
+  FieldScreenshotCapability,
+  FieldTypeCapability,
+} from '../runtime/capabilities/field-actions';
 import { AgentRuntime, agentRuntime } from './agent-runtime';
 import { EventBus, eventBus } from './event-bus';
 import { Event } from './events';
-import { Gateway, gateway } from './gateway';
+import { Gateway, gateway, isContentRequest, isExplicitToolCall } from './gateway';
 import { CapabilityRegistry, capabilityRegistry } from '../runtime/capabilities/registry';
 import { LocalHostCapability } from '../runtime/capabilities/shell';
 import { GitAgent } from '../agents/git-agent';
@@ -31,6 +38,7 @@ import {
 import { config } from '../config.js';
 import { respondWithLLM } from '../llm/reasoner';
 import { classifyWithLLM } from './classifier';
+import { decideRoute } from '../llm/jev';
 import { TaskBinder } from '../kernel/task-binder';
 import type { ToolDescriptor } from '../kernel/types';
 
@@ -87,6 +95,21 @@ export class MarkRuntime {
     if (!this.capabilities.list().some(capability => capability.id === 'mark.status')) {
       this.capabilities.register(new MarkStatusCapability());
     }
+
+    if (!this.capabilities.list().some(capability => capability.id === 'field.probe')) {
+      this.capabilities.register(new FieldProbeCapability());
+    }
+
+    for (const capability of [
+      new FieldScreenshotCapability(),
+      new FieldCamshotCapability(),
+      new FieldClickCapability(),
+      new FieldTypeCapability(),
+    ]) {
+      if (!this.capabilities.list().some(existing => existing.id === capability.id)) {
+        this.capabilities.register(capability);
+      }
+    }
     if (this.agents.getAgentCount() === 0) {
       this.agents.registerAgent(new GitAgent());
       this.agents.registerAgent(new DevOpsAgent());
@@ -131,13 +154,35 @@ export class MarkRuntime {
       },
     });
 
-    // Smart routing: when keywords cannot claim the command, an LLM
-    // classifier gets one chance to upgrade to deterministic/agent.
-    // Deterministic and agent keyword routes never consult the LLM (fast,
-    // offline-safe, test-stable). Disabled with MARK_SMART=off.
-    if (process.env.MARK_SMART !== 'off' && (decision.path === 'reasoning' || decision.path === 'escalate')) {
+    // Smart routing: when keywords cannot claim the command, Jev (fast,
+    // cheap, typed) gets first shot at the fuzzy middle; the frontier LLM
+    // remains the final fallback. Deterministic and agent keyword routes
+    // never consult either (fast, offline-safe, test-stable). Explicit
+    // kernel-tool calls skip both too — the user addressed a tool, and
+    // classifiers second-guess them into agents (observed live: deploy
+    // orders re-routed to git-agent after the gateway correctly bypassed).
+    // Disabled with MARK_SMART=off.
+    if (process.env.MARK_SMART !== 'off' && (decision.path === 'reasoning' || decision.path === 'escalate') && !isExplicitToolCall(command) && !isContentRequest(command)) {
       try {
-        const smart = await classifyWithLLM(command);
+        const jev = await decideRoute(command);
+        if (jev) {
+          if (jev.route === 'deterministic') {
+            decision = { path: 'deterministic', needsLLM: false, priority: decision.priority, reasoning: `jev choice ${jev.route}` };
+          } else if (jev.route.startsWith('agent:')) {
+            decision = { path: 'agent', agent: jev.route.slice('agent:'.length), needsLLM: false, priority: decision.priority, reasoning: `jev choice ${jev.route}` };
+          } else if (jev.route === 'kernel') {
+            decision = { path: 'reasoning', needsLLM: true, priority: decision.priority, reasoning: 'jev routes to kernel tools' };
+          } else {
+            decision = { ...decision, needsLLM: true };
+          }
+          trace.push(`gateway → ${decision.path}${decision.agent ? ` (${decision.agent})` : ''} (jev, confidence ${jev.confidence.toFixed(2)}): ${jev.route}`.trim());
+        }
+      } catch {
+        // Jev failed — fell through to the LLM classifier below (it never throws, this is belt and braces).
+      }
+      try {
+        if (decision.path === 'reasoning' || decision.path === 'escalate') {
+          const smart = await classifyWithLLM(command);
         if (smart && smart.path === 'deterministic' && this.capabilities.findFor(command)) {
           decision = { ...smart, needsLLM: false };
           trace.push(
@@ -152,6 +197,7 @@ export class MarkRuntime {
           trace.push(
             `gateway → ${smart.path} (llm confirms, confidence ${smart.confidence.toFixed(2)}): ${smart.reasoning}`.trim(),
           );
+        }
         }
       } catch (err) {
         // LLM classifier failed — keyword routing decision stands.
@@ -264,9 +310,21 @@ export class MarkRuntime {
     try {
       const reused = this.kernelBridge.reuseWorkflow(command);
       const fresh = this.kernelBridge.resolveCapability(command);
-      if (reused && !isHollowReuse(reused.plan, command, this.kernelBridge.listTools(), (cmd, tool) => taskBinder.bind(cmd, tool), fresh)) {
+      // Explicit addressing beats memory: when the goal names a tool id
+      // verbatim ("execute repo.index") but the recalled plan runs another
+      // tool, the recall is stale for THIS goal no matter its scores.
+      // Observed live: index orders replayed a memorized symbols workflow.
+      const addressed = /([a-z0-9_.-]+\.[a-z0-9_.-]+)/i.exec(command)?.[1]?.toLowerCase();
+      const firstStep = reused?.plan.steps[0]?.toolId.toLowerCase();
+      const addressedMismatch = !!addressed && !!firstStep && addressed !== firstStep &&
+        this.kernelBridge.listTools().some(t => t.id.toLowerCase() === addressed);
+      if (reused && !addressedMismatch && !isHollowReuse(reused.plan, command, this.kernelBridge.listTools(), (cmd, tool) => taskBinder.bind(cmd, tool), fresh)) {
         const report = await this.kernelBridge.executePlanWithReport(reused.plan, { ...contextInput });
-        const succeeded = report.status === 'succeeded';
+        // Step status lies when tools fail closed: an implementation that
+        // resolves with {ok:false} output still records step "succeeded".
+        // Memory must learn the output truth, not the status label.
+        const stepsOk = report.steps.every(step => (step.output as Record<string, unknown> | undefined)?.ok !== false);
+        const succeeded = report.status === 'succeeded' && stepsOk;
         this.kernelBridge.recordWorkflowOutcome(reused.workflowId, succeeded);
         const stepSummary = report.steps.map(step => `${step.stepId.slice(0, 18)}…:${step.status}`).join(', ');
         // State what actually ran: "procedure succeeded" alone misleads for
@@ -298,6 +356,23 @@ export class MarkRuntime {
 
     let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
     try {
+      // Creative goals (compose/draft/homepage...) belong to the LLM unless
+      // the kernel has a strong, evidenced claim: an explicit fs/repo tool
+      // with 2+ matched terms and a solid score. Observed live: "compose
+      // homepage markup" planned process_summary + list_open — words only
+      // tasks must never become tool plans on thin matches.
+      if (isCreativeRequest(command)) {
+        try {
+          const pre = this.kernelBridge.resolveCapability(command);
+          const strong =
+            (pre.matchedTerms?.length ?? 0) >= 2 &&
+            (pre.score ?? 0) >= 1.0 &&
+            /^(fs\.|repo\.)/.test(pre.tool?.id ?? '');
+          if (!strong) return undefined;
+        } catch {
+          return undefined;
+        }
+      }
       // Real planner first for multi-word goals: composed DAG (investigate →
       // verify) beats linear single-tool execution when contracts validate.
       // Single-step fallback is automatic inside GoalExecutor.
@@ -342,6 +417,10 @@ export class MarkRuntime {
 
     if (!outcome.action || !outcome.result) {
       if (!outcome.resolution.tool) return undefined;
+      // Unbindable resolutions yield to reasoning for content requests: the
+      // user wants words, and "say it with name: value" is the wrong answer
+      // to a drafting goal. Tool-addressed goals keep the guidance.
+      if (isContentRequest(command)) return undefined;
       return {
         response:
           `Found ${outcome.resolution.tool.id} but could not bind inputs ` +
@@ -369,8 +448,14 @@ export class MarkRuntime {
         `Executed ${toolId}.`;
       const trace = [...head];
       // Learn read-only successes for next time. Writes are never
-      // auto-saved: a stale write input replayed later could harm.
-      const savedId = this.maybeSaveSuccess(command, outcome.plan);
+      // auto-saved: a stale write input replayed later could harm. And an
+      // output carrying ok:false is a failure wearing a success status
+      // (tools fail closed with output instead of throwing) — saving it
+      // replays the failure forever. Observed live: a failed repo.symbols
+      // probe memorized as a "known procedure".
+      const outputOk = (result.output as Record<string, unknown> | undefined)?.ok !== false;
+      const savedId = outputOk ? this.maybeSaveSuccess(command, outcome.plan) : undefined;
+      if (!outputOk) trace.push('memory → not saved: output reports ok:false');
       if (savedId) trace.push(`memory → saved workflow ${savedId} (read-only success)`);
       return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel', trace };
     }
@@ -496,6 +581,16 @@ export const markRuntime = new MarkRuntime();
 /** Explicit explanation framings: chat owns these unless tools match deeply. */
 function isExplanationRequest(command: string): boolean {
   return /\b(help me understand|explain|what (is|are)|define|tell me about|how (does|do)|why (is|are|do))\b/i.test(command);
+}
+
+/**
+ * Creative framings: the user wants original content, not a tool run.
+ * Mechanical file ops ("write file with path:", "create directory") never
+ * match — only composition words. Kernel may still claim when it has a
+ * strong evidenced resolve (explicit fs/repo tool, 2+ terms, score ≥ 1).
+ */
+function isCreativeRequest(command: string): boolean {
+  return /\b(compose|draft|homepage|landing page|blog( post)?|poem|short story|essay|markup)\b/i.test(command);
 }
 
 /**

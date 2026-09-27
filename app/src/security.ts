@@ -1,6 +1,7 @@
 import { createWriteStream } from 'fs';
 import { join } from 'path';
 import { z } from 'zod';
+import { config } from './config.js';
 
 // Allowlist: ONLY these command prefixes are permitted
 export const ALLOWED_COMMAND_PREFIXES = [
@@ -17,9 +18,9 @@ export const ALLOWED_COMMAND_PREFIXES = [
 
 // Schema for tool arguments (example: CSV tool)
 export const csvToolSchema = z.object({
-  filePath: z.string().refine(path => 
-    path.startsWith(process.env.ALLOWED_DATA_DIR || '/home/mwei/data'),
-    { message: `Path must be within ${process.env.ALLOWED_DATA_DIR}` }
+  filePath: z.string().refine(path =>
+    path.startsWith(process.env.ALLOWED_DATA_DIR || config.allowedDataDir),
+    { message: `Path must be within ${process.env.ALLOWED_DATA_DIR || config.allowedDataDir}` }
   ),
   format: z.string().optional(),
 });

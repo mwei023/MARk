@@ -10,7 +10,14 @@ const READ_MAX_BYTES = 200 * 1024;
 const FETCH_TIMEOUT_MS = 20000;
 
 function requireHttpUrl(raw: string): URL {
-  const url = new URL(String(raw ?? '').trim());
+  // Planned values sometimes arrive quoted (LLM copies "url: \"http://x\"").
+  // Strip one layer of surrounding quotes before parsing; the planner also
+  // sanitizes, this is the last line of defense. Observed live: Invalid URL.
+  let text = String(raw ?? '').trim().replace(/^["'`]|["'`]$/g, '').trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) {
+    text = text.slice(1, -1).trim();
+  }
+  const url = new URL(text);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new Error(`Refused: only http(s) URLs are allowed, got "${url.protocol}".`);
   }

@@ -21,7 +21,9 @@ export interface UnifiedDecision {
  */
 export function agentActionRisk(action: string): ToolRisk {
   const normalized = (action || '').toLowerCase();
-  if (normalized.includes('health_check') || normalized.includes('gather_logs') || normalized.includes('fetch_')) {
+  if (normalized.includes('health_check') || normalized.includes('gather_logs') || normalized.includes('fetch_') ||
+      normalized.includes('screenshot') || normalized.includes('camshot') || normalized.includes('cam_shot') ||
+      normalized.includes('field_screenshot') || normalized.includes('field_camshot')) {
     return 'read';
   }
   if (normalized.includes('diagnos') || normalized.includes('check_') || normalized.includes('triage') || normalized.includes('suggest_')) {

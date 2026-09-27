@@ -983,7 +983,22 @@ export const fsFileWriteImplementation: ToolImplementation = {
     }
     const { resolved } = resolveJailedPath(rawPath, context.workingDirectory);
 
-    const content = String(action.input.content ?? '');
+    // Payloads often arrive with literal escape sequences (binder passes
+    // `content: "<html>"` through verbatim, LLM drafts come JSON-quoted).
+    // When the value has no real newlines but carries `\n` literals, decode
+    // the common escapes so files land as authored, not escaped. Observed
+    // live: index.html written with literal \n and \" sequences.
+    let content = String(action.input.content ?? '');
+    if (!content.includes('\n') && /\\n/.test(content)) {
+      content = content
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, '\t')
+        .replace(/\\r/g, '\r')
+        .replace(/\\"/g, '"');
+    }
+    // Drop a leading language tag line ("html") some models prepend despite
+    // "code only" instructions.
+    content = content.replace(/^(html|css|javascript|js|typescript|ts)\n/i, '');
     if (Buffer.byteLength(content, 'utf8') > FILE_WRITE_MAX_BYTES) {
       throw new Error(`Refused: content exceeds ${FILE_WRITE_MAX_BYTES} bytes.`);
     }
