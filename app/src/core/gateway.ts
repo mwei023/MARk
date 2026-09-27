@@ -299,6 +299,19 @@ export class Gateway {
       };
     }
 
+    // Code repair commands — checked before CI/CD so "repair the lint
+    // errors" reaches the repairer, not the pipeline runner. Observed in
+    // eval: repair orders misrouted to cicd-agent on the word "lint".
+    if (/\b(repair|fix(ing|ed|es)?)\b/i.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'code-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Code repair operation',
+      };
+    }
+
     // CI/CD commands
     if (CICD_RE.test(cmd)) {
       return {

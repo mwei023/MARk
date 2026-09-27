@@ -14,6 +14,7 @@
     "test:like-me": "tsx src/core/like-me-loop.test.ts",
     "chat": "tsx src/repl.ts",
     "test:unit": "vitest run",
+    "eval": "tsx src/eval/run.ts",
     "db:migrate": "ts-node --transpile-only Scripts/migrate.ts"
   },
   "keywords": [],
