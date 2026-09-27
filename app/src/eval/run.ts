@@ -7,6 +7,7 @@
  *  3. repair     — scratch errors in an eslint repo, fixed-rate via real loop
  *  4. latency    — classify/resolve/command timings (p50)
  *  5. jev        — Jev route decisions vs keywords (skipped without key)
+ *  6. memory     — workflow recall precision, false-reuse rate, outcome recording
  *
  * Usage: set -a; source ../.env; set +a; npm run eval
  * Exit 0 with a printed report; suites that cannot run (no DB, no eslint
@@ -17,6 +18,7 @@ import { Gateway } from '../core/gateway';
 import { decideRoute } from '../llm/jev';
 import { indexRepo, searchCode } from '../code/indexer';
 import { repairLintErrors } from '../agents/code-repair';
+import { runMemorySuite } from './suites/memory';
 
 interface SuiteResult {
   suite: string;
@@ -208,12 +210,13 @@ async function suiteLatency(): Promise<void> {
   if (want('repair')) await suiteRepair();
   if (want('latency')) await suiteLatency();
   if (want('jev')) await suiteJev();
+  if (want('memory')) results.push(await runMemorySuite());
   const totalMs = Date.now() - t0;
   console.log('\n===== MARK EVAL =====');
   for (const r of results) {
     const score = r.skipped ? 'SKIPPED' : `${r.passed}/${r.total}`;
     console.log(`\n[${r.suite}] ${score} (${r.ms}ms)${r.skipped ? ` — ${r.skipped}` : ''}`);
-    for (const n of r.notes.slice(0, 8)) console.log(`  ${n}`);
+    for (const n of r.notes.slice(0, 16)) console.log(`  ${n}`);
   }
   console.log(`\nTotal ${totalMs}ms.`);
 })();

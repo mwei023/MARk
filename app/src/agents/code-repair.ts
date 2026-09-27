@@ -26,7 +26,7 @@ export interface RepairOutcome {
   fixed: boolean;
   skipped?: string;
   /** Which model tier produced the kept proposal: local, cloud, or none. */
-  via?: 'local' | 'cloud' | 'none';
+  via?: 'local' | 'cloud' | 'rule' | 'none';
   detail: string;
 }
 
@@ -359,35 +359,49 @@ export async function repairOneError(
   const tscBase = await tscErrorCount(repoPath);
 
   let proposal: string | null = null;
-  let via: 'local' | 'cloud' = 'local';
+  let via: 'local' | 'cloud' | 'rule' = 'local';
   let lastNote = '';
   const ctx = opts.ctx ?? { cloudCalls: 0, maxCloudCalls: config.markRepairMaxCloudCalls };
-  // Up to two tiers with per-tier verification: local first, then cloud
-  // escalation when the local proposal is unusable OR verification rejects
-  // it. Cloud is spent only on errors the free model demonstrably cannot
-  // fix — never speculatively. The file is reverted between tiers.
-  for (const tier of ['local', 'cloud'] as const) {
+  // Three tiers with per-tier verification: deterministic rules first (free,
+  // instant, exact), then local, then cloud escalation when the cheaper tiers
+  // are unusable OR verification rejects them. Cloud is spent only on errors
+  // the free paths demonstrably cannot fix — never speculatively. The file
+  // is reverted between tiers.
+  for (const tier of ['rule', 'local', 'cloud'] as const) {
     if (tier === 'cloud' && ctx.cloudCalls >= ctx.maxCloudCalls) {
       lastNote = `cloud budget spent (${ctx.cloudCalls}/${ctx.maxCloudCalls})`;
       break;
     }
     let candidate: string | null = null;
-    try {
-      const attempt = await proposeEdit(original, target, {
-        skipLocal: tier === 'cloud',
-        ctx,
-        llmTimeoutMs: opts.llmTimeoutMs,
-        siblings: opts.siblings,
-      });
-      if (!attempt.proposal) {
-        lastNote = `${tier}: ${attempt.note}`;
+    if (tier === 'rule') {
+      // Observed live: the local 3b model cannot follow the N|line format
+      // (it "fixed" an unused var with `: never`), so every fix cost a cloud
+      // call and eval repair capped at budget. Mechanical errors never reach
+      // any model now.
+      candidate = tryRuleFix(original, target);
+      if (!candidate) {
+        lastNote = 'rule: no mechanical fix applies';
         continue;
       }
-      candidate = attempt.proposal;
-      via = attempt.via;
-    } catch (err) {
-      lastNote = `${tier} call failed: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
-      continue;
+      via = 'rule';
+    } else {
+      try {
+        const attempt = await proposeEdit(original, target, {
+          skipLocal: tier === 'cloud',
+          ctx,
+          llmTimeoutMs: opts.llmTimeoutMs,
+          siblings: opts.siblings,
+        });
+        if (!attempt.proposal) {
+          lastNote = `${tier}: ${attempt.note}`;
+          continue;
+        }
+        candidate = attempt.proposal;
+        via = attempt.via;
+      } catch (err) {
+        lastNote = `${tier} call failed: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}`;
+        continue;
+      }
     }
     writeFileSync(abs, candidate);
     const mid = await fileErrorCount(repoPath, target.file);
@@ -428,6 +442,63 @@ export function formatSiblingContext(target: LintError, siblings?: LintError[]):
   const others = (siblings ?? []).filter(s => s.file === target.file && s.line !== target.line).slice(0, 5);
   if (others.length === 0) return '';
   return `Other errors in this file (fix consistently, do not contradict):\n${others.map(s => `- line ${s.line} [${s.ruleId}] ${s.message}`.slice(0, 160)).join('\n')}\n`;
+}
+
+/**
+ * Mechanical fixes for errors with exact remedies: no model, no cost, no
+ * latency. Every candidate still passes the same verify+revert gates as LLM
+ * proposals — this tier only skips the *generation* step, never validation.
+ * Any doubt returns null. Pure, unit-tested.
+ */
+export function tryRuleFix(original: string, target: LintError): string | null {
+  const lines = original.split('\n');
+  const idx = target.line - 1;
+  if (idx < 0 || idx >= lines.length) return null;
+  const line = lines[idx];
+
+  // 1. Unused simple declaration: whole line is `const|let|var NAME = ...;`
+  //    and NAME appears nowhere else. Delete the line.
+  if (/(^|\/)no-unused-vars$/.test(target.ruleId)) {
+    const declared = line.match(/^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/)?.[1]
+      ?? target.message.match(/^'([A-Za-z_$][\w$]*)' is defined but never used/)?.[1];
+    if (declared && /^\s*(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=.*;\s*$/.test(line)) {
+      const elsewhere = lines
+        .filter((_, i) => i !== idx)
+        .some(l => new RegExp(`\\b${declared}\\b`).test(l));
+      if (!elsewhere) {
+        const next = lines.slice(0, idx).concat(lines.slice(idx + 1));
+        return next.join('\n');
+      }
+    }
+    return null;
+  }
+
+  // 2. prefer-const: `let NAME = ...` with no reassignment elsewhere.
+  if (target.ruleId === 'prefer-const') {
+    const m = line.match(/^(\s*)let(\s+[A-Za-z_$][\w$]*\s*=.*)$/);
+    if (m) {
+      const name = m[2].split('=')[0].trim();
+      const reassigned = lines
+        .filter((_, i) => i !== idx)
+        .some(l => new RegExp(`(^|[^=!<>])\\b${name}\\b\\s*=(?![=>])`).test(l));
+      if (!reassigned) {
+        const next = [...lines];
+        next[idx] = `${m[1]}const${m[2]}`;
+        return next.join('\n');
+      }
+    }
+    return null;
+  }
+
+  // 3. semi: statement line missing its terminator.
+  if (target.ruleId === 'semi') {
+    if (/[;{}:]\s*$/.test(line) || line.trim().length === 0) return null;
+    const next = [...lines];
+    next[idx] = `${line};`;
+    return next.join('\n');
+  }
+
+  return null;
 }
 
 /** Single proposal attempt: prompt, generate, splice, integrity-check. */
