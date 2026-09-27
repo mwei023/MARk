@@ -5,7 +5,7 @@
  * Requires GROQ_API_KEY environment variable.
  */
 
-import { LLMProvider, LLMProviderConfig, Message, LLMResponse, ProviderMetadata } from '../provider';
+import { LLMProvider, LLMProviderConfig, Message, LLMResponse, ProviderMetadata, streamOpenAICompletions } from '../provider';
 
 // We'll use fetch directly since langchain/groq might not be installed yet
 // This avoids an immediate hard dependency while allowing the provider to be initialized
@@ -72,6 +72,28 @@ export class GroqProvider implements LLMProvider {
       console.error(`[Groq] Error: ${error.message}`);
       throw error;
     }
+  }
+
+  async stream(
+    messages: Message[],
+    config: Partial<LLMProviderConfig> | undefined,
+    onToken: (token: string) => void,
+  ): Promise<LLMResponse> {
+    if (!this.apiKey) {
+      throw new Error('Groq API key not configured');
+    }
+    const streamed = await streamOpenAICompletions(
+      `${this.baseUrl}/chat/completions`,
+      { 'Authorization': `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      {
+        model: this.modelName,
+        messages: messages.map(msg => ({ role: msg.role, content: msg.content })),
+        temperature: config?.temperature ?? 0.7,
+        max_tokens: config?.maxTokens,
+      },
+      onToken,
+    );
+    return { content: streamed.content.trim(), model: streamed.model || this.modelName, provider: 'groq', usage: streamed.usage };
   }
 
   getMetadata(): ProviderMetadata {

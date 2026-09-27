@@ -71,6 +71,27 @@ export class OllamaProvider implements LLMProvider {
     }
   }
 
+  async stream(
+    messages: Message[],
+    _config: Partial<LLMProviderConfig> | undefined,
+    onToken: (token: string) => void,
+  ): Promise<LLMResponse> {
+    const langchainMessages = messages.map((msg) => ({
+      role: msg.role as 'system' | 'user' | 'assistant',
+      content: msg.content,
+    }));
+    let content = '';
+    for await (const chunk of await this.model.stream(langchainMessages)) {
+      const text = typeof chunk.content === 'string' ? chunk.content : JSON.stringify(chunk.content);
+      if (text.length > 0) {
+        content += text;
+        onToken(text);
+      }
+    }
+    if (!content.trim()) throw new Error('Ollama returned an empty stream');
+    return { content: content.trim(), model: this.modelName, provider: 'ollama' };
+  }
+
   getMetadata(): ProviderMetadata {
     return {
       provider: 'ollama',

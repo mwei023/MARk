@@ -6,6 +6,7 @@
  *  2. retrieval  — scratch repo indexed, known queries vs expected files
  *  3. repair     — scratch errors in an eslint repo, fixed-rate via real loop
  *  4. latency    — classify/resolve/command timings (p50)
+ *  5. jev        — Jev route decisions vs keywords (skipped without key)
  *
  * Usage: set -a; source ../.env; set +a; npm run eval
  * Exit 0 with a printed report; suites that cannot run (no DB, no eslint
@@ -13,6 +14,7 @@
  */
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { Gateway } from '../core/gateway';
+import { decideRoute } from '../llm/jev';
 import { indexRepo, searchCode } from '../code/indexer';
 import { repairLintErrors } from '../agents/code-repair';
 
@@ -140,6 +142,46 @@ async function suiteRepair(): Promise<void> {
   }
 }
 
+// ─── 5. jev decisions ───────────────────────────────────────────────────────
+async function suiteJev(): Promise<void> {
+  const s = Date.now();
+  if (!process.env.JEV_API_KEY) {
+    results.push({ suite: 'jev', passed: 0, total: 0, skipped: 'no JEV_API_KEY — set one to measure the middle layer', ms: 0, notes: [] });
+    return;
+  }
+  const gw = new Gateway();
+  // Golden set: fuzzy commands where keywords abstain; Jev should decide.
+  const cases = [
+    'ship the dashboard when ready',
+    'the build is red again',
+    'summarize what broke overnight',
+    'is anyone using too much disk',
+    'write up what this system does',
+  ];
+  let decided = 0;
+  let agreed = 0;
+  const confs: number[] = [];
+  const notes: string[] = [];
+  for (const cmd of cases) {
+    const kw: any = gw.classify({ id: 'e', timestamp: new Date(), source: 'user_command', type: 'user.command.received', severity: 'info', data: { command: cmd } } as any);
+    const t = Date.now();
+    const d = await decideRoute(cmd);
+    const ms = Date.now() - t;
+    if (!d) {
+      notes.push(`ABSTAIN ${JSON.stringify(cmd)} (${ms}ms, keyword said ${kw.path})`);
+      continue;
+    }
+    decided++;
+    confs.push(d.confidence);
+    const kwRoute = kw.path === 'agent' ? `agent:${kw.agent}` : kw.path;
+    const agree = d.route === kwRoute || (kw.path === 'reasoning' && ['reasoning', 'kernel', 'escalate'].includes(d.route));
+    if (agree) agreed++;
+    notes.push(`${agree ? 'AGREE ' : 'SPLIT '} ${JSON.stringify(cmd)} jev=${d.route}@${d.confidence.toFixed(2)} kw=${kwRoute} (${ms}ms)`);
+  }
+  const avgConf = confs.length > 0 ? confs.reduce((a, b) => a + b, 0) / confs.length : 0;
+  notes.push(`decided ${decided}/${cases.length}, avg confidence ${avgConf.toFixed(2)}`);
+  results.push({ suite: 'jev', passed: agreed, total: decided, ms: Date.now() - s, notes });
+}
 // ─── 4. latency ─────────────────────────────────────────────────────────────
 async function suiteLatency(): Promise<void> {
   const s = Date.now();
@@ -165,6 +207,7 @@ async function suiteLatency(): Promise<void> {
   if (want('retrieval')) await suiteRetrieval();
   if (want('repair')) await suiteRepair();
   if (want('latency')) await suiteLatency();
+  if (want('jev')) await suiteJev();
   const totalMs = Date.now() - t0;
   console.log('\n===== MARK EVAL =====');
   for (const r of results) {

@@ -335,9 +335,52 @@ app.post('/api/command', async (req: any, res: any) => {
 });
 
 /**
- * POST /api/plan - Like-Me plan preview (never executes mutating steps)
- * Body: { goal: string, mode?: 'plan' | 'build' }
+ * POST /api/command/stream - Same as /api/command but streams reasoning
+ * tokens as SSE (`data: {"token": "..."}`), then a final
+ * `data: {"done": true, ...}` frame with route/eventId/response.
+ * Non-reasoning routes emit zero token frames and one done frame, so every
+ * client can consume one protocol unconditionally.
  */
+app.post('/api/command/stream', async (req: any, res: any) => {
+  try {
+    const { command, userId = 'unknown', source = 'api' } = req.body;
+
+    if (!command) {
+      return res.status(400).json({
+        success: false,
+        error: 'command required',
+      });
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    });
+
+    const send = (payload: unknown): void => {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    try {
+      const result = await markRuntime.executeCommand(
+        command,
+        userId,
+        source === 'voice' || source === 'cli' ? source : 'api',
+        { onToken: (token) => send({ token }) },
+      );
+      send({ done: true, success: true, response: result.response, route: result.route, eventId: result.eventId });
+    } catch (error: any) {
+      send({ done: true, success: false, error: error.message });
+    }
+    res.end();
+  } catch (error: any) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
 app.post('/api/plan', async (req: any, res: any) => {
   try {
     const { goal, mode = 'plan' } = req.body as { goal?: string; mode?: LikeMeMode };

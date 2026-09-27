@@ -36,7 +36,7 @@ import {
   extractGoalTerms,
 } from '../kernel/workflow-memory';
 import { config } from '../config.js';
-import { respondWithLLM } from '../llm/reasoner';
+import { respondWithLLM, respondWithLLMStream } from '../llm/reasoner';
 import { classifyWithLLM } from './classifier';
 import { decideRoute } from '../llm/jev';
 import { TaskBinder } from '../kernel/task-binder';
@@ -46,6 +46,8 @@ const taskBinder = new TaskBinder();
 
 export interface Reasoner {
   respond(input: string, userId: string): Promise<string>;
+  /** Optional token streaming; absent means emit the full text at once. */
+  stream?(input: string, userId: string, onToken: (token: string) => void): Promise<string>;
 }
 
 export interface MarkRuntimeDependencies {
@@ -69,6 +71,9 @@ export interface CommandResult {
 const markReasoner: Reasoner = {
   async respond(input, userId) {
     return respondWithLLM(input, userId);
+  },
+  async stream(input, userId, onToken) {
+    return respondWithLLMStream(input, userId, onToken);
   },
 };
 
@@ -126,7 +131,7 @@ export class MarkRuntime {
   }
 
   /** The single application command path for every MARK interface. */
-  async executeCommand(command: string, userId = config.defaultUser, source: 'api' | 'voice' | 'cli' = 'api'): Promise<CommandResult> {
+  async executeCommand(command: string, userId = config.defaultUser, source: 'api' | 'voice' | 'cli' = 'api', opts: { onToken?: (token: string) => void } = {}): Promise<CommandResult> {
     const event: Event = {
       id: `CMD-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date(),
@@ -243,7 +248,12 @@ export class MarkRuntime {
           trace.push(...kernelResult.trace);
         } else if (decision.path === 'reasoning' && decision.needsLLM) {
           try {
-            result = { response: await this.reasoner.respond(command, userId), route: 'reasoning', eventId: event.id };
+            // Streaming callers get tokens as they arrive; everyone else the
+            // full text. Non-reasoning routes ignore onToken entirely.
+            const respond = this.reasoner.stream && opts.onToken
+              ? () => this.reasoner.stream!(command, userId, opts.onToken!)
+              : () => this.reasoner.respond(command, userId);
+            result = { response: await respond(), route: 'reasoning', eventId: event.id };
             trace.push('kernel → no matching capability; reasoning → LLM answered (words only, no tools ran)');
           } catch (error: any) {
             const detail = error instanceof Error ? error.message : String(error);

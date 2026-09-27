@@ -107,6 +107,72 @@ export async function respondWithLLM(
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
+/**
+ * Streaming twin of respondWithLLM: same prompt building, memory, and
+ * single-retry discipline, but tokens flow to onToken as they arrive.
+ * Providers without native streaming emit the full text as one token, so
+ * callers always get incremental UI without caring which brain answered.
+ */
+export async function respondWithLLMStream(
+  input: string,
+  userId: string,
+  onToken: (token: string) => void,
+  deps: ReasonerDeps = {},
+): Promise<string> {
+  const timeoutMs = deps.timeoutMs ?? Number(process.env.MARK_LLM_TIMEOUT_MS ?? 45000);
+  const provider = deps.provider ?? await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
+
+  const [history, notes] = await Promise.all([
+    (deps.loadHistory ?? loadHistoryDefault)(userId).catch(() => ''),
+    looksLikeMemoryQuestion(input)
+      ? (deps.retrieve ?? retrieveDefault)(input).catch(() => '')
+      : Promise.resolve(''),
+  ]);
+
+  const contextBlocks: string[] = [];
+  if (history.trim()) contextBlocks.push(`Recent conversation:\n${history.trim().slice(0, 2000)}`);
+  if (notes.trim()) {
+    contextBlocks.push(
+      `Saved notes relevant to the question (paraphrase naturally, never mention tool names):\n${notes.trim().slice(0, 2000)}`,
+    );
+  } else if (looksLikeMemoryQuestion(input)) {
+    contextBlocks.push('No saved notes matched this question. Say you have nothing saved on that yet.');
+  }
+
+  const messages: Message[] = [
+    { role: 'system', content: REASONER_SYSTEM },
+    { role: 'user', content: contextBlocks.length > 0 ? `${contextBlocks.join('\n\n')}\n\nUser: ${input}` : input },
+  ];
+
+  const runStream = async (msgs: Message[]): Promise<string> => {
+    if (provider.stream) {
+      const response = await withTimeout(
+        provider.stream(msgs, undefined, (token) => onToken(token)),
+        timeoutMs,
+        'LLM stream',
+      );
+      return stripFences(response.content).trim();
+    }
+    const text = stripFences((await withTimeout(provider.chat(msgs), timeoutMs, 'LLM chat')).content).trim();
+    if (text) onToken(text);
+    return text;
+  };
+
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const text = await runStream(attempt === 1 ? messages : reinforced(messages));
+      if (!text) throw new Error('LLM returned an empty response');
+      await (deps.saveHistory ?? saveHistoryDefault)(userId, input, text).catch(() => {});
+      return text;
+    } catch (error: any) {
+      lastError = error;
+      if (!looksLikeToolCallRejection(error) || attempt === 2) break;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 function reinforced(messages: Message[]): Message[] {
   return [
     ...messages,
