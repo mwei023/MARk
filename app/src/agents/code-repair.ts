@@ -71,8 +71,8 @@ export async function collectEslintErrors(repoPath: string): Promise<LintError[]
   return targets;
 }
 
-/** Count errors in one file (used before/after to prove improvement). */
-async function fileErrorCount(repoPath: string, relFile: string): Promise<{ count: number; rules: string[] }> {
+/** Count errors in one file (used before/after to prove improvement). Content-keyed cache: identical bytes skip the eslint respawn. */
+async function fileErrorCount(repoPath: string, relFile: string, cache?: Map<string, { count: number; rules: string[] }>): Promise<{ count: number; rules: string[] }> {
   const tally = (out: string): { count: number; rules: string[] } => {
     // Read ONLY the summary line ("x problems (N errors, M warnings)") —
     // diagnostic lines contain "<line>:<col> error" which naive regexes mistake for counts.
@@ -85,12 +85,28 @@ async function fileErrorCount(repoPath: string, relFile: string): Promise<{ coun
     }
     return { count: summary ? parseInt(summary[1], 10) : 0, rules };
   };
+  const cacheKey = (() => {
+    if (!cache) return undefined;
+    try {
+      return `${relFile}::${hashContent(readFileSync(`${repoPath}/${relFile}`, 'utf8'))}`;
+    } catch {
+      return undefined;
+    }
+  })();
+  if (cacheKey) {
+    const hit = cache!.get(cacheKey);
+    if (hit) return hit;
+  }
+  const store = (result: { count: number; rules: string[] }): { count: number; rules: string[] } => {
+    if (cacheKey) cache!.set(cacheKey, result);
+    return result;
+  };
   try {
     const { stdout } = await execFilePromise('npx', ['--no-install', 'eslint', relFile], { cwd: repoPath, timeout: 120000 });
-    return tally(stdout);
+    return store(tally(stdout));
   } catch (err) {
     // Non-zero exit is the normal "errors found" path — parse its output.
-    return tally(String((err as { stdout?: unknown }).stdout ?? ''));
+    return store(tally(String((err as { stdout?: unknown }).stdout ?? '')));
   }
 }
 
@@ -132,6 +148,19 @@ async function chatWithTimeout<T>(
 export interface RepairRunContext {
   cloudCalls: number;
   maxCloudCalls: number;
+  /**
+   * Run-scoped verification cache. eslint counts are keyed by exact file
+   * content (same bytes → same count, always valid); the tsc baseline is
+   * computed once and refreshed only when a fix is kept. Observed live:
+   * 87s for two one-line fixes, nearly all of it respawned verifiers.
+   */
+  verify?: { eslint: Map<string, { count: number; rules: string[] }>; tscBase?: number | null };
+}
+
+function hashContent(content: string): string {
+  let hash = 5381;
+  for (let i = 0; i < content.length; i++) hash = ((hash << 5) + hash + content.charCodeAt(i)) | 0;
+  return `${content.length}:${hash}`;
 }
 
 async function completeRepair(
@@ -353,20 +382,23 @@ export async function repairOneError(
   if (lineCount > (opts.maxFileLines ?? 300)) {
     return { target, fixed: false, skipped: 'file too large', detail: `${target.file} has ${lineCount} lines (budget ${opts.maxFileLines ?? 300}); needs human or windowed repair.` };
   }
-  const before = await fileErrorCount(repoPath, target.file);
-  // Type baseline once, before any writes: the tsc gate later rejects
-  // proposals that silence eslint while breaking types.
-  const tscBase = await tscErrorCount(repoPath);
-
-  let proposal: string | null = null;
-  let via: 'local' | 'cloud' | 'rule' = 'local';
-  let lastNote = '';
   const ctx = opts.ctx ?? { cloudCalls: 0, maxCloudCalls: config.markRepairMaxCloudCalls };
+  if (!ctx.verify) ctx.verify = { eslint: new Map() };
+  const verify = ctx.verify;
+  const before = await fileErrorCount(repoPath, target.file, verify.eslint);
+  // Type baseline once per run, before any writes: the tsc gate later rejects
+  // proposals that silence eslint while breaking types. Refreshed below every
+  // time a fix is kept, so later errors measure against current truth.
+  if (verify.tscBase === undefined) verify.tscBase = await tscErrorCount(repoPath);
+  const tscBase = verify.tscBase;
   // Three tiers with per-tier verification: deterministic rules first (free,
   // instant, exact), then local, then cloud escalation when the cheaper tiers
   // are unusable OR verification rejects them. Cloud is spent only on errors
   // the free paths demonstrably cannot fix — never speculatively. The file
   // is reverted between tiers.
+  let proposal: string | null = null;
+  let via: 'local' | 'cloud' | 'rule' = 'local';
+  let lastNote = '';
   for (const tier of ['rule', 'local', 'cloud'] as const) {
     if (tier === 'cloud' && ctx.cloudCalls >= ctx.maxCloudCalls) {
       lastNote = `cloud budget spent (${ctx.cloudCalls}/${ctx.maxCloudCalls})`;
@@ -404,7 +436,7 @@ export async function repairOneError(
       }
     }
     writeFileSync(abs, candidate);
-    const mid = await fileErrorCount(repoPath, target.file);
+    const mid = await fileErrorCount(repoPath, target.file, verify.eslint);
     if (mid.count < before.count) {
       proposal = candidate;
       break; // verified improvement — keep, stop escalating
@@ -417,8 +449,11 @@ export async function repairOneError(
   }
   // tsc gate: an eslint improvement that introduces type errors is not a
   // fix. Unavailable tsc (null) skips the gate openly, never silently.
+  // The surviving count refreshes the run baseline so later errors measure
+  // against current truth instead of repaying a full tsc spawn.
+  let tscNow: number | null = null;
   if (tscBase !== null) {
-    const tscNow = await tscErrorCount(repoPath);
+    tscNow = await tscErrorCount(repoPath);
     if (tscNow === null) {
       lastNote = 'tsc verification unavailable after edit; keeping eslint-verified fix';
     } else if (tscNow > tscBase) {
@@ -428,8 +463,9 @@ export async function repairOneError(
   }
   // Final recount guards against verifier flakiness between the tier check
   // and this return: only a recount-confirmed drop counts as fixed.
-  const after = await fileErrorCount(repoPath, target.file);
+  const after = await fileErrorCount(repoPath, target.file, verify.eslint);
   if (after.count < before.count) {
+    if (typeof tscNow === 'number') verify.tscBase = tscNow;
     return { target, fixed: true, via, detail: `${target.file}: ${before.count} → ${after.count} errors via ${via}.` };
   }
   writeFileSync(abs, original);
