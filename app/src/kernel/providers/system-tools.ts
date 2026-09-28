@@ -1476,7 +1476,8 @@ function checkServiceName(value: unknown, what: string): string {
 }
 
 function checkTail(value: unknown): number {
-  const n = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  if (value === undefined || value === null || String(value).trim() === '') return 100;
+  const n = typeof value === 'number' ? value : Number(String(value).trim());
   if (!Number.isFinite(n)) return 100;
   return Math.min(Math.max(Math.floor(n), 1), LOG_TAIL_MAX);
 }

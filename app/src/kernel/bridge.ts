@@ -45,6 +45,7 @@ import { episodeMemory } from './episode-memory';
 import { proposePlanWithLLM } from './llm-planner';
 import {
   executeTeam,
+  evidenceFromOutput,
   type TeamInput,
   type TeamResult,
   type WorkerResult,
@@ -273,12 +274,16 @@ export class MARKKernelBridge {
           const status = outcome.result?.status === 'succeeded' ? 'succeeded'
             : outcome.result?.status === 'blocked' ? 'blocked' : 'failed';
           const summaries = (outcome.result?.observations ?? []).map(o => o.summary).filter(Boolean);
+          const observations = (outcome.result?.observations ?? []).slice();
+          if (observations.length === 0 && outcome.result?.status === 'succeeded' && outcome.result?.output !== undefined) {
+            observations.push(evidenceFromOutput(outcome.action?.toolId ?? 'unknown-tool', outcome.result.output));
+          }
           return {
             subtask,
             status,
             summary: summaries.slice(-3).join(' / ').slice(0, 600) ||
               (outcome.result?.error ?? 'Worker produced no output.').slice(0, 600),
-            observations: outcome.result?.observations ?? [],
+            observations,
             tokens: {
               inputTokens: outcome.tokens?.inputTokens ?? 0,
               outputTokens: outcome.tokens?.outputTokens ?? 0,

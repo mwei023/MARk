@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { executeTeam, type TeamDeps, type TeamSubtask, type WorkerResult } from './team.js';
+import { executeTeam, evidenceFromOutput, type TeamDeps, type TeamSubtask, type WorkerResult } from './team.js';
+import { attestAcceptance } from './attestation.js';
 import type { Strategy } from './strategy.js';
 import type { Posterior } from './strategy.js';
 
@@ -136,5 +137,19 @@ describe('team.execute', () => {
     }
     // research class offers parallel-team + solo; sampling must stay inside the class
     for (const id of seen) expect(['parallel-team', 'solo']).toContain(id);
+  });
+
+  it('evidenceFromOutput gives attestation something to match', () => {
+    const obs = evidenceFromOutput('repo.map', { ok: true, count: 2, files: ['src/auth.ts', 'src/db.ts'] });
+    const v = attestAcceptance(['output names auth.ts', 'output names db.ts'], [obs]);
+    expect(v.allPass).toBe(true);
+  });
+
+  it('evidence summaries stay structural, never raw content', () => {
+    const big = 'x'.repeat(5000);
+    const obs = evidenceFromOutput('fs.file_read', { content: big, path: 'a/b' });
+    expect(obs.summary.length).toBeLessThanOrEqual(450);
+    expect(obs.summary).toContain('a/b');
+    expect(obs.summary).not.toContain(big.slice(0, 200));
   });
 });

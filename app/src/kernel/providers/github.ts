@@ -40,7 +40,8 @@ function checkNumber(n: unknown): number | undefined {
 }
 
 function checkLimit(l: unknown): number {
-  const v = typeof l === 'number' ? l : Number(String(l ?? '').trim());
+  if (l === undefined || l === null || String(l).trim() === '') return 10;
+  const v = typeof l === 'number' ? l : Number(String(l).trim());
   if (!Number.isFinite(v)) return 10;
   return Math.min(Math.max(Math.floor(v), 1), MAX_ITEMS);
 }

@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   computeUtility, binaryOutcome, posteriorFor, posteriorMean,
   betaSample, thompsonPick, probSuperior,
-  strategiesFor, DEFAULT_WEIGHTS, STRATEGY_REGISTRY,
+  strategiesFor, failureTypeToTaskClass,
+  DEFAULT_WEIGHTS, STRATEGY_REGISTRY,
 } from './strategy.js';
 
 /** Deterministic RNG (mulberry32) so distribution tests are stable. */
@@ -109,6 +110,18 @@ describe('strategy registry', () => {
     );
     expect(strategiesFor('repo_bugfix').map(s => s.id)).toContain('solo');
     expect(strategiesFor('repo_bugfix').map(s => s.id)).toContain('supervised-team');
+    // Solo is the universal fallback/control: it serves every class.
+    for (const cls of ['repo_bugfix', 'large_refactor', 'repo_analysis', 'system_diagnosis', 'incident_triage', 'incident_recovery', 'research', 'shell_task']) {
+      expect(strategiesFor(cls).map(s => s.id)).toContain('solo');
+    }
     expect(strategiesFor('shell_task')).toEqual([expect.objectContaining({ id: 'solo' })]);
+  });
+
+  it('maps known failure types, skips the rest (never shoehorns)', () => {
+    expect(failureTypeToTaskClass('TYPE_ERROR')).toBe('repo_bugfix');
+    expect(failureTypeToTaskClass('lint_failure')).toBe('repo_bugfix');
+    expect(failureTypeToTaskClass('UNKNOWN')).toBe('incident_triage');
+    expect(failureTypeToTaskClass('SELF_IMPROVEMENT_GAP')).toBeUndefined();
+    expect(failureTypeToTaskClass('')).toBeUndefined();
   });
 });
