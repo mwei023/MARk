@@ -220,7 +220,7 @@ export const skillListTool: ToolDescriptor = {
   id: 'skill.list',
   name: 'List agent skills',
   description:
-    'Lists the agent skills present in the local skills directories, with their names and descriptions. Use to answer what skills you have, which are present, or what is available.',
+    'Shows the agent skills and plugins present in the local skills directories, with their names and descriptions. Use to answer what skills you have, which are present, whether there are any, or what is available.',
   version: '1.0.0',
   domain: 'skills',
   risk: 'read',
@@ -265,8 +265,21 @@ export const skillListImplementation: ToolImplementation = {
   async execute({ context }) {
     const base = path.resolve(context.workingDirectory ?? process.cwd());
     const home = process.env.HOME ?? os.homedir();
-    const candidates = [path.join(base, '.agents', 'skills'), path.join(home, '.agents', 'skills')];
+    // Project installs live in a repo-root .agents/skills while the kernel
+    // works a level or two deeper (e.g. app/). Walk up a few ancestors so
+    // "what skills do you have" sees the project install, not an empty
+    // working-dir answer. Fixed locations only, read-only.
+    const candidates: string[] = [path.join(base, '.agents', 'skills')];
+    let cursor = base;
+    for (let depth = 0; depth < 3; depth++) {
+      const parent = path.dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+      candidates.push(path.join(cursor, '.agents', 'skills'));
+    }
+    candidates.push(path.join(home, '.agents', 'skills'));
     const skills: Array<{ name: string; description: string; path: string }> = [];
+    const seen = new Set<string>();
     const scanned: string[] = [];
     for (const dir of candidates) {
       let entries;
@@ -278,8 +291,13 @@ export const skillListImplementation: ToolImplementation = {
       scanned.push(dir);
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        const info = await readSkillName(path.join(dir, entry.name, 'SKILL.md'));
-        if (info) skills.push({ ...info, path: path.join(dir, entry.name) });
+        const skillPath = path.join(dir, entry.name);
+        if (seen.has(skillPath)) continue;
+        const info = await readSkillName(path.join(skillPath, 'SKILL.md'));
+        if (info) {
+          seen.add(skillPath);
+          skills.push({ ...info, path: skillPath });
+        }
       }
     }
     const output = { skills, directories: scanned, capturedAt: new Date().toISOString() };

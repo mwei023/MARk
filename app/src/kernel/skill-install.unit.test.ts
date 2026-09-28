@@ -111,7 +111,13 @@ describe('skill.list routing + behavior', () => {
     // part: skill.list gates in with 2+ matches, so the candidate loop
     // can fall back to it when the installer cannot bind.
     const r = resolverWithSkills();
-    for (const goal of ['what skills do you have installed', 'list my installed skills']) {
+    for (const goal of [
+      'what skills do you have installed',
+      'list my installed skills',
+      'any plugins installed?',
+      'show installed plugins',
+      'do I have any skills',
+    ]) {
       const found = r.resolveAll(goal).find(c => c.tool.id === 'skill.list');
       expect(found).toBeDefined();
       expect(found!.matchedTerms.length).toBeGreaterThanOrEqual(2);
@@ -130,6 +136,26 @@ describe('skill.list routing + behavior', () => {
         action: act('skill.list', {}), context: ctx(work),
       } as any) as any;
       expect(output.skills.map((s: any) => s.name)).toContain('demo-skill');
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
+  it('finds a repo-root install from a nested working dir (offline)', async () => {
+    const work = join(tmpdir(), `mark-skill-nested-${Date.now()}`);
+    const deep = join(work, 'app', 'src');
+    mkdirSync(join(work, '.agents', 'skills', 'demo-skill'), { recursive: true });
+    mkdirSync(deep, { recursive: true });
+    writeFileSync(
+      join(work, '.agents', 'skills', 'demo-skill', 'SKILL.md'),
+      '---\nname: demo-skill\ndescription: >\n  A demo skill for tests.\n---\n\n# Demo\n',
+    );
+    try {
+      const { output } = await skillListImplementation.execute({
+        action: act('skill.list', {}), context: ctx(deep),
+      } as any) as any;
+      expect(output.skills.map((s: any) => s.name)).toContain('demo-skill');
+      expect(output.directories.some((d: string) => d === join(work, '.agents', 'skills'))).toBe(true);
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
