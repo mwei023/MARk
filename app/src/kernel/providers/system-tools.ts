@@ -1369,7 +1369,8 @@ export const fsDirectorySizesImplementation: ToolImplementation = {
   },
 };
 
-export const systemContainerListTool: ToolDescriptor = {  id: 'system.container_list',
+export const systemContainerListTool: ToolDescriptor = {
+  id: 'system.container_list',
   name: 'Container list',
   description: 'Lists Docker containers and their status without modifying anything.',
   version: '1.0.0',
@@ -1462,6 +1463,190 @@ export const systemContainerListImplementation: ToolImplementation = {
   },
 };
 
+const NAME_RE = /^[A-Za-z0-9_.-]+$/;
+const LOG_TAIL_MAX = 500;
+const LOG_CHARS_MAX = 20000;
+
+function checkServiceName(value: unknown, what: string): string {
+  const name = String(value ?? '').trim();
+  if (!NAME_RE.test(name) || name.length > 128) {
+    throw new Error(`Refused: invalid ${what} name ${JSON.stringify(name).slice(0, 80)}.`);
+  }
+  return name;
+}
+
+function checkTail(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(String(value ?? '').trim());
+  if (!Number.isFinite(n)) return 100;
+  return Math.min(Math.max(Math.floor(n), 1), LOG_TAIL_MAX);
+}
+
+async function runLogProc(
+  bin: string,
+  args: string[],
+  subject: string,
+  tail: number,
+) {
+  try {
+    const { stdout, stderr } = await execFileAsync(bin, args, { timeout: 20000, maxBuffer: 2 * 1024 * 1024 });
+    const text = (stdout || stderr || '(no log output)').trim();
+    const logs = text.length > LOG_CHARS_MAX ? `${text.slice(0, LOG_CHARS_MAX)}\n… (truncated)` : text;
+    const output = { subject, tail, logs, capturedAt: new Date().toISOString() };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'system' as const,
+          source: 'native.system',
+          subject,
+          summary: `Read last ${tail} log lines for ${subject}.`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; message?: string };
+    const detail = `${e.stderr ?? ''}`.trim().slice(0, 200) || (e.message ?? 'log read failed').slice(0, 200);
+    throw new Error(`Log read failed for ${subject}: ${detail}`);
+  }
+}
+
+export const systemContainerLogsTool: ToolDescriptor = {
+  id: 'system.container_logs',
+  name: 'Container logs',
+  description:
+    'Shows recent logs from a Docker container by name, tailing the last lines. Use to diagnose crashing or unhealthy containers and deployments.',
+  version: '1.0.0',
+  domain: 'containers',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      container: { type: 'string', description: 'Container name, e.g. jarvis-db.' },
+      tail: { type: 'number', description: 'Last N log lines (1-500, default 100).' },
+    },
+    required: ['container'],
+  },
+  capabilities: ['container-logs', 'service-management'],
+  supportedResourceKinds: ['service'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const systemContainerLogsImplementation: ToolImplementation = {
+  toolId: systemContainerLogsTool.id,
+  async execute({ action }) {
+    const input = action.input as Record<string, unknown>;
+    const container = checkServiceName(input.container, 'container');
+    const tail = checkTail(input.tail);
+    return runLogProc('docker', ['logs', '--tail', String(tail), container], `container:${container}`, tail);
+  },
+};
+
+export const systemServiceLogsTool: ToolDescriptor = {
+  id: 'system.service_logs',
+  name: 'Service logs',
+  description:
+    'Shows recent journal logs for a systemd service by name, tailing the last lines. Use to diagnose failing host services and deployments.',
+  version: '1.0.0',
+  domain: 'system',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      service: { type: 'string', description: 'Systemd service name, e.g. Mousepad.' },
+      tail: { type: 'number', description: 'Last N log lines (1-500, default 100).' },
+    },
+    required: ['service'],
+  },
+  capabilities: ['service-logs', 'local-environment'],
+  supportedResourceKinds: ['service'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const systemServiceLogsImplementation: ToolImplementation = {
+  toolId: systemServiceLogsTool.id,
+  async execute({ action }) {
+    const input = action.input as Record<string, unknown>;
+    const service = checkServiceName(input.service, 'service');
+    const tail = checkTail(input.tail);
+    return runLogProc(
+      'journalctl', ['-u', service, '--no-pager', '-n', String(tail)], `service:${service}`, tail,
+    );
+  },
+};
+
+export const systemServiceStatusTool: ToolDescriptor = {
+  id: 'system.service_status',
+  name: 'Service status',
+  description:
+    'Checks whether a systemd service is active and enabled. Use to answer is-X-running questions with ground truth.',
+  version: '1.0.0',
+  domain: 'system',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      service: { type: 'string', description: 'Systemd service name, e.g. Mousepad.' },
+    },
+    required: ['service'],
+  },
+  capabilities: ['service-status', 'local-environment'],
+  supportedResourceKinds: ['service'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'native.system',
+};
+
+export const systemServiceStatusImplementation: ToolImplementation = {
+  toolId: systemServiceStatusTool.id,
+  async execute({ action }) {
+    const service = checkServiceName((action.input as Record<string, unknown>).service, 'service');
+    const run = async (args: string[]): Promise<string> => {
+      try {
+        const { stdout } = await execFileAsync('systemctl', args, { timeout: 15000 });
+        return stdout.trim() || 'unknown';
+      } catch {
+        return 'unknown';
+      }
+    };
+    const [active, enabled] = await Promise.all([
+      run(['is-active', service]),
+      run(['is-enabled', service]),
+    ]);
+    const output = { service, active, enabled, capturedAt: new Date().toISOString() };
+    return {
+      output,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'system',
+          source: 'native.system',
+          subject: `service:${service}`,
+          summary: `Service ${service}: ${active} (${enabled}).`,
+          data: output,
+          confidence: 1,
+          observedAt: output.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
 export const nativeSystemTools: ToolDescriptor[] = [
   systemMachineInfoTool,
   systemProcessSummaryTool,
@@ -1475,6 +1660,9 @@ export const nativeSystemTools: ToolDescriptor[] = [
   fsFileWriteTool,
   systemContainerRestartTool,
   systemContainerListTool,
+  systemContainerLogsTool,
+  systemServiceLogsTool,
+  systemServiceStatusTool,
   fsDirectorySizesTool,
 ];
 
@@ -1491,6 +1679,9 @@ export const nativeSystemImplementations: ToolImplementation[] = [
   fsFileWriteImplementation,
   systemContainerRestartImplementation,
   systemContainerListImplementation,
+  systemContainerLogsImplementation,
+  systemServiceLogsImplementation,
+  systemServiceStatusImplementation,
   fsDirectorySizesImplementation,
 ];
 
