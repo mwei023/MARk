@@ -25,6 +25,8 @@ export interface PlanStep {
   input: Record<string, unknown>;
   dependsOn?: KernelId[];
   expectedOutcome?: string;
+  /** Verifiable acceptance criteria this step must satisfy (attested at DECIDE). */
+  acceptance?: string[];
 }
 
 export interface ExecutionPlan {

@@ -611,6 +611,7 @@ const repoVerifyPatchTool: ToolDescriptor = {
     properties: {
       repoPath: { type: 'string', description: 'Local repository path.' },
       check: { type: 'string', description: 'Preferred check: typecheck | lint | test. Default typecheck.' },
+      requirements: { type: 'array', description: 'Requirement ids (REQ-001) this check attests. Stamped onto observations.' },
     },
     required: ['repoPath'],
   },
@@ -628,6 +629,25 @@ const repoVerifyPatchImplementation: ToolImplementation = {
     const repoPath = requireRepoPath(action.input);
     if (!repoPath) return { output: failOutput('no local checkout at repoPath') };
     const preferred = typeof action.input.check === 'string' ? action.input.check : 'typecheck';
+    const requirements = Array.isArray(action.input.requirements)
+      ? (action.input.requirements as unknown[]).map(String).filter(r => /^REQ-\d+$/i.test(r.trim())).slice(0, 20)
+      : [];
+    const stamp = (summary: string, attestation: 'pass' | 'fail', data: unknown) => ({
+      output: data,
+      observations: requirements.map((requirementId, i) => ({
+        id: `observation-${Date.now()}-${i}`,
+        kind: 'output' as const,
+        source: 'repo.semantic',
+        subject: repoPath,
+        summary,
+        data,
+        confidence: 1,
+        observedAt: new Date().toISOString(),
+        relatedResourceIds: [],
+        requirementId: requirementId.toUpperCase(),
+        attestation,
+      }))
+    });
     try {
       let scripts: Record<string, string> = {};
       try {
@@ -651,11 +671,15 @@ const repoVerifyPatchImplementation: ToolImplementation = {
       try {
         const { stdout, stderr } = await execFileP('npm', ['run', chosen], { cwd: repoPath, timeout: 120000, maxBuffer: 4 * 1024 * 1024 });
         const out = `${stdout}\n${stderr}`.slice(0, 2000);
-        return { output: okOutput({ check: chosen, passed: true, detail: out.slice(0, 500) }) };
+        const output = okOutput({ check: chosen, passed: true, detail: out.slice(0, 500) });
+        if (requirements.length === 0) return { output };
+        return stamp(`${chosen} passed — attests ${requirements.join(', ')}`, 'pass', output);
       } catch (err: unknown) {
         const e = err as { stdout?: string; stderr?: string; message?: string };
         const out = `${e.stdout ?? ''}\n${e.stderr ?? ''}\n${e.message ?? ''}`.slice(0, 2000);
-        return { output: okOutput({ check: chosen, passed: false, detail: out.slice(0, 800) }) };
+        const output = okOutput({ check: chosen, passed: false, detail: out.slice(0, 800) });
+        if (requirements.length === 0) return { output };
+        return stamp(`${chosen} failed — attests ${requirements.join(', ')}`, 'fail', output);
       }
     } catch (err) {
       return { output: failOutput(err instanceof Error ? err.message : String(err)) };

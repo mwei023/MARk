@@ -159,6 +159,10 @@ export interface Observation {
   relatedActionId?: KernelId;
   relatedResourceIds?: KernelId[];
   metadata?: Record<string, unknown>;
+  /** Requirement this observation attests (REQ-001 form or acceptance text key). */
+  requirementId?: string;
+  /** Explicit attestation; absent means the attestor must infer from text. */
+  attestation?: 'pass' | 'fail';
 }
 
 export interface WorkflowStep {
