@@ -75,6 +75,11 @@ import {
 } from './github';
 
 import {
+  kbDiscoveryProvider,
+  kbImplementations,
+} from './kb';
+
+import {
   MARKKernel,
   markKernel,
 } from '../kernel';
@@ -100,6 +105,7 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(opsVerifyDiscoveryProvider);
   toolDiscovery.registerProvider(skillInstallDiscoveryProvider);
   toolDiscovery.registerProvider(githubDiscoveryProvider);
+  toolDiscovery.registerProvider(kbDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
     kernel.registerImplementation(implementation);
@@ -150,6 +156,10 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of githubImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of kbImplementations) {
     kernel.registerImplementation(implementation);
   }
 

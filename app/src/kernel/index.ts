@@ -156,6 +156,13 @@ export {
   githubDiscoveryProvider,
 } from './providers/github';
 
+export {
+  kbTools,
+  kbImplementations,
+  kbDiscoveryProvider,
+  vaultRoot,
+} from './providers/kb';
+
 export { validateOutput } from './output-contracts';
 export type { OutputValidationResult } from './output-contracts';
 

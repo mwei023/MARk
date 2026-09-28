@@ -197,6 +197,22 @@ export class GoalExecutor {
             if (smartArbitrated.complete && smartArbitrated.matchedFields.length > 0 && !smartArbitrated.freeText) {
               return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, smartArbitrated);
             }
+            // Explicit judgment outranks zero-evidence inertia: when the
+            // picked tool binds completely but the rank fallback carries no
+            // binding evidence at all (zero matched fields), run the pick —
+            // the model understood the goal better than overlap did.
+            // Approval gates still hold for mutating/reversible tools, and
+            // whole-goal guesses keep waiting (the play_track lesson).
+            // Observed live: "remember that the db password rotates" would
+            // otherwise execute container.restart on a name coincidence
+            // while kb.note_write sat complete-but-unpicked.
+            const zeroEvidenceFallback = fallback && fallback.binding.complete
+              && fallback.binding.matchedFields.length === 0;
+            for (const judged of [arbitrated, smartArbitrated]) {
+              if (judged.complete && !judged.freeText && zeroEvidenceFallback) {
+                return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, judged);
+              }
+            }
             if (smartArbitrated.complete && smartArbitrated.freeText) smartGuessed.push({ tool: pick, binding: smartArbitrated });
           }
         }
