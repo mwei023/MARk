@@ -2,6 +2,7 @@ import {
   ActionRequest,
   ActionResult,
   ExecutionContext,
+  Observation,
   ToolDescriptor,
   WorkflowDefinition,
   WorkflowResult,
@@ -42,6 +43,12 @@ import {
 import { reliabilityTracker } from './reliability';
 import { episodeMemory } from './episode-memory';
 import { proposePlanWithLLM } from './llm-planner';
+import {
+  executeTeam,
+  type TeamInput,
+  type TeamResult,
+  type WorkerResult,
+} from './team';
 
 
 export interface KernelBridgeOptions {
@@ -243,6 +250,71 @@ export class MARKKernelBridge {
     const context = this.createContext(contextInput);
 
     return this.kernel.executeGoal(goal, context, options);
+  }
+
+  /**
+   * team.execute with real kernel deps: workers run subtasks through full
+   * goal execution (resolve/bind/authority included, so mutating worker
+   * actions still gate on confirmation), verifiers run as tools.
+   */
+  async executeTeam(
+    input: TeamInput,
+    contextInput: Parameters<MARKKernel['createContext']>[0],
+  ): Promise<TeamResult> {
+    const base = this.createContext(contextInput);
+    return executeTeam(input, {
+      runWorker: async (subtask): Promise<WorkerResult> => {
+        const started = Date.now();
+        try {
+          const outcome = await this.kernel.executeGoal(subtask.task, {
+            ...base,
+            metadata: { ...base.metadata, teamWorker: subtask.agent ?? 'kernel' },
+          });
+          const status = outcome.result?.status === 'succeeded' ? 'succeeded'
+            : outcome.result?.status === 'blocked' ? 'blocked' : 'failed';
+          const summaries = (outcome.result?.observations ?? []).map(o => o.summary).filter(Boolean);
+          return {
+            subtask,
+            status,
+            summary: summaries.slice(-3).join(' / ').slice(0, 600) ||
+              (outcome.result?.error ?? 'Worker produced no output.').slice(0, 600),
+            observations: outcome.result?.observations ?? [],
+            tokens: {
+              inputTokens: outcome.tokens?.inputTokens ?? 0,
+              outputTokens: outcome.tokens?.outputTokens ?? 0,
+            },
+            durationMs: Date.now() - started,
+          };
+        } catch (err) {
+          return {
+            subtask, status: 'failed',
+            summary: `Worker threw: ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`,
+            observations: [], tokens: { inputTokens: 0, outputTokens: 0 }, durationMs: Date.now() - started,
+          };
+        }
+      },
+      verify: async (specs) => {
+        const out: Observation[] = [];
+        for (const spec of specs) {
+          try {
+            const action = {
+              id: `ACT-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              toolId: spec.toolId,
+              input: spec.input,
+              requestedBy: base.userId,
+              createdAt: new Date().toISOString(),
+              metadata: { source: 'team-verify' },
+            };
+            const result = await this.kernel.execute(action, base);
+            out.push(...(result.observations ?? []));
+          } catch {
+            // One verifier failing must not sink verification; the
+            // attestation simply lacks its evidence (likely unresolved).
+          }
+        }
+        return out;
+      },
+    });
   }
 
   planGoal(goal: string): ExecutionPlan {
