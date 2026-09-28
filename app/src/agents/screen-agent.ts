@@ -58,7 +58,60 @@ async function seeScreenshot(repoHint: string): Promise<{ imageBase64: string; w
 
 async function askVision(task: string, imageBase64: string, history: string[]): Promise<VisionVerdict> {
   const key = config.openrouterApiKey;
-  if (!key) throw new Error('No OPENROUTER_API_KEY: vision unavailable.');
+  const content = await (key ? askVisionOpenRouter(key, task, imageBase64, history) : askVisionOllama(task, imageBase64, history));
+  return parseVisionVerdict(content);
+}
+
+/** Shared verdict parsing for both vision backends (cloud + local). */
+export function parseVisionVerdict(content: string): VisionVerdict {
+  const start = content.indexOf('{');
+  const end = content.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error(`Vision returned no JSON (excerpt: ${content.slice(0, 120)})`);
+  const parsed = JSON.parse(content.slice(start, end + 1)) as Partial<VisionVerdict>;
+  return {
+    observation: typeof parsed.observation === 'string' ? parsed.observation : 'no observation',
+    done: parsed.done === true,
+    action: parsed.action && typeof parsed.action.tool === 'string' ? { tool: parsed.action.tool, input: parsed.action.input ?? {} } : null,
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+  };
+}
+
+/**
+ * Local vision via Ollama (e.g. moondream): free, offline, private. Used
+ * whenever no OpenRouter key is configured. Same verdict contract.
+ */
+async function askVisionOllama(task: string, imageBase64: string, history: string[]): Promise<string> {
+  const model = process.env.MARK_VISION_MODEL_OLLAMA ?? 'moondream';
+  let res: Response;
+  try {
+    res = await fetch(`${config.ollamaHost}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        stream: false,
+        options: { temperature: 0 },
+        messages: [
+          { role: 'system', content: VISION_SYSTEM },
+          {
+            role: 'user',
+            content: `Task: ${task}\n${history.length > 0 ? `Prior steps:\n${history.slice(-6).join('\n')}\n` : ''}Decide the next step.`,
+            images: [imageBase64],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout(180000),
+    });
+  } catch (err) {
+    throw new Error(`Local vision unavailable (Ollama ${model}): ${err instanceof Error ? err.message.slice(0, 120) : String(err)}. Run "ollama pull ${model}" or set OPENROUTER_API_KEY.`);
+  }
+  if (!res.ok) throw new Error(`Local vision failed: HTTP ${res.status}. Run "ollama pull ${model}" or set OPENROUTER_API_KEY.`);
+  const body = (await res.json()) as { message?: { content?: string }; error?: string };
+  if (body.error) throw new Error(`Local vision error: ${body.error}`);
+  return body.message?.content ?? '';
+}
+
+async function askVisionOpenRouter(key: string, task: string, imageBase64: string, history: string[]): Promise<string> {
   const model = process.env.MARK_VISION_MODEL ?? 'deepseek/deepseek-v4-flash-vision-exp';
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -83,17 +136,7 @@ async function askVision(task: string, imageBase64: string, history: string[]): 
   if (!res.ok) throw new Error(`Vision call failed: HTTP ${res.status}`);
   const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }>; error?: { message?: string } };
   if (body.error) throw new Error(`Vision error: ${body.error.message}`);
-  const content = body.choices?.[0]?.message?.content ?? '';
-  const start = content.indexOf('{');
-  const end = content.lastIndexOf('}');
-  if (start < 0 || end <= start) throw new Error(`Vision returned no JSON (excerpt: ${content.slice(0, 120)})`);
-  const parsed = JSON.parse(content.slice(start, end + 1)) as Partial<VisionVerdict>;
-  return {
-    observation: typeof parsed.observation === 'string' ? parsed.observation : 'no observation',
-    done: parsed.done === true,
-    action: parsed.action && typeof parsed.action.tool === 'string' ? { tool: parsed.action.tool, input: parsed.action.input ?? {} } : null,
-    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
-  };
+  return body.choices?.[0]?.message?.content ?? '';
 }
 
 export class ScreenAgent extends Agent {
