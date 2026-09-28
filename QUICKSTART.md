@@ -1,310 +1,105 @@
-# ⚡ Quick Start: Get Mark Running In 5 Minutes
+# MARK Quickstart: complete incident lifecycle in under 10 minutes
+
+This is the Phase-3 exit proof: a new developer sets up the system, fires
+a test webhook, and sees a complete incident lifecycle — create,
+investigate, approve, execute, resolve-ready — with every step timed.
+Reference run: **6 seconds** for the live loop (server boot included).
 
 ## Prerequisites
-- PostgreSQL running with `mark_db` database
+
 - Node.js 18+
-- Ollama running (optional, for LLM reasoning layer later)
+- PostgreSQL running with a `mark_db` database
+- No API keys needed (deterministic paths first; LLM is last resort)
 
----
-
-## Step 1: Database Setup (2 min)
-
-```bash
-# Create the incident tracking schema
-psql mark_db < app/Scripts/schema-v2.sql
-
-# Verify tables were created
-psql mark_db -c "\dt"
-```
-
-**Expected output:**
-```
-              List of relations
- Schema | Name                 | Type  | Owner
---------+----------------------+-------+-------
- public | incidents            | table | mwei
- public | incident_actions     | table | mwei
- public | event_log            | table | mwei
- public | approval_requests    | table | mwei
-```
-
----
-
-## Step 2: Update package.json (1 min)
+## Step 1 — Install (one time, ~3 min)
 
 ```bash
-# Make sure these scripts are in your package.json
-cat >> app/package.json << 'EOF'
-{
-  "scripts": {
-    "dev": "ts-node app/src/api/server-v2.ts",
-    "dev:old": "ts-node app/src/api/server.ts",
-    "test": "jest"
-  }
-}
-EOF
-```
-
----
-
-## Step 3: Start the Server (1 min)
-
-```bash
-cd app
-npm run dev
-```
-
-**Expected output:**
-```
-    ╔═══════════════════════════════════════╗
-    ║    🤖 MARK v0.2 Autonomous Operations ║
-    ║           API Server Started          ║
-    ╠═══════════════════════════════════════╣
-    ║  Port: 3001                           ║
-    ║  Event Bus: Active                    ║
-    ║  Agents: Ready                        ║
-    ╚═══════════════════════════════════════╝
-```
-
----
-
-## Step 4: Test the System (1 min)
-
-### Health Check
-```bash
-curl http://localhost:3001/api/health
-```
-
-### Create a Test Incident via GitHub Webhook
-```bash
-curl -X POST http://localhost:3001/webhooks/github \
-  -H "X-GitHub-Event: workflow_run" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "workflow_run": {
-      "id": 12345,
-      "conclusion": "failure",
-      "head_sha": "abc123def456",
-      "head_branch": "main"
-    },
-    "workflow": {
-      "name": "CI"
-    },
-    "repository": {
-      "full_name": "mwei023/mark"
-    }
-  }'
-```
-
-### View Incidents
-```bash
-curl http://localhost:3001/api/incidents | jq
-```
-
-**Expected response:**
-```json
-{
-  "success": true,
-  "count": 1,
-  "incidents": [
-    {
-      "id": "INC-1693...",
-      "title": "Build failed: mwei023/mark",
-      "status": "investigating",
-      "severity": "warning",
-      "assignedAgent": "git-agent",
-      "actions": [...]
-    }
-  ]
-}
-```
-
-### View Incident Details
-```bash
-curl http://localhost:3001/api/incidents/INC-1693... | jq
-```
-
----
-
-## ✅ Verification Checklist
-
-- [ ] Server started (port 3001)
-- [ ] Health check returns `ok`
-- [ ] Can POST to `/webhooks/github`
-- [ ] Can GET `/api/incidents`
-- [ ] Incident was created automatically
-- [ ] Git agent classified the failure
-- [ ] Actions are logged in incident
-
----
-
-## 🔥 Common Issues & Fixes
-
-### Issue: Connection refused to PostgreSQL
-```
-Error: connect ECONNREFUSED 127.0.0.1:5432
-```
-
-**Fix:**
-```bash
-# Start PostgreSQL
-brew services start postgresql
-# or
-docker run --name postgres -e POSTGRES_PASSWORD=password -d postgres
-```
-
-### Issue: Database schema not found
-```
-Error: relation "incidents" does not exist
-```
-
-**Fix:**
-```bash
-# Run schema migration again
-psql mark_db < app/Scripts/schema-v2.sql
-```
-
-### Issue: Module not found errors
-```
-Error: Cannot find module '@langchain/core'
-```
-
-**Fix:**
-```bash
-cd app
+git clone <repo> jarvis-core && cd jarvis-core/app
 npm install
 ```
 
-### Issue: 404 on webhook POST
-```
-Cannot POST /webhooks/github
-```
+## Step 2 — Configure + migrate (~1 min)
 
-**Fix:** Make sure you're using the `-v2` server:
 ```bash
-npm run dev  # Should use server-v2.ts
+# .env needs DATABASE_URL (see .env.example). Then:
+npm run db:migrate   # numbered migrations 001-010, tracked in _migrations
 ```
 
----
+## Step 3 — Boot (~5 s)
 
-## 📊 What's Running
-
-```
-Event Bus
-  ↓
-  ├→ GitHub Webhook Receiver (listening on /webhooks/github)
-  │   └→ Converts GitHub events to internal events
-  │
-  ├→ Gateway Classifier
-  │   └→ Routes to appropriate agent
-  │
-  └→ Agent Runtime
-      └→ GitAgent 
-          ├→ Classifies build failures
-          ├→ Suggests fixes
-          └→ Logs to Incident Store (PostgreSQL)
-
-API Endpoints:
-  GET  /api/health          - Server health
-  GET  /api/incidents       - List all incidents
-  GET  /api/incidents/:id   - Get incident details
-  POST /api/approve         - Approve/deny action
-  POST /api/command         - Send user command
-  POST /webhooks/github     - GitHub webhook
-```
-
----
-
-## 🧪 Test Scenarios
-
-### Scenario 1: Build Failure Detection
 ```bash
-# Send a workflow failure event
+npm run dev          # server-v2.ts on :3001
+curl http://localhost:3001/api/health
+```
+
+## Step 4 — Fire a test webhook (~1 s)
+
+```bash
 curl -X POST http://localhost:3001/webhooks/github \
   -H "X-GitHub-Event: workflow_run" \
   -H "Content-Type: application/json" \
   -d '{
-    "workflow_run": { "conclusion": "failure", ... },
-    "repository": { "full_name": "your/repo" }
+    "repository": { "id": 9, "full_name": "quickstart/demo" },
+    "workflow": { "name": "ci" },
+    "workflow_run": { "id": 4242, "conclusion": "failure",
+      "head_sha": "abc123", "head_branch": "main",
+      "jobs_url": "https://x/j", "html_url": "https://x/w" }
   }'
-
-# Check incident was created
-curl http://localhost:3001/api/incidents | jq '.incidents[0]'
-
-# Expected: GitAgent investigating the failure
+# => {"status":"received"} (unsigned OK in dev; set GITHUB_WEBHOOK_SECRET to enforce HMAC)
 ```
 
-### Scenario 2: View Investigation Results
+## Step 5 — See the incident lifecycle (~4 s)
+
 ```bash
-# Get incident ID from previous response
-INCIDENT_ID="INC-..."
+curl http://localhost:3001/api/incidents | jq '.incidents[0] | {id, status}'
+# => git-agent owns it; status escalated after investigation
 
-# View full investigation
-curl http://localhost:3001/api/incidents/$INCIDENT_ID | jq '.incident.actions'
-
-# Expected: Actions showing logs fetched, diff analyzed, failure classified
+curl http://localhost:3001/api/incidents/INC-... | jq '.summary'
+# => { findings: [...4 human-readable...], actionCount: 3, confidence, status, durationMs }
 ```
 
-### Scenario 3: User Command
+What just happened: webhook → `github.workflow.failed` → Gateway →
+GitAgent (fetch logs → classify with confidence → findings written back)
+→ incident correlated → escalation JSON line appended to `app/audit.log`.
+
+## Step 6 — Approval leg: propose, approve, execute (~2 s)
+
+Kernel mutations always pause for confirmation. Address a tool
+explicitly, approve the confirmation, watch it execute:
+
 ```bash
-# Send a command
 curl -X POST http://localhost:3001/api/command \
   -H "Content-Type: application/json" \
-  -d '{
-    "command": "check git status",
-    "userId": "me",
-    "source": "api"
-  }'
+  -d '{"command": "fs.directory_create with path: quickstart-probe", "userId": "quickstart"}'
+# => ⏳ ... needs approval ... confirmation confirm_... Approve with confirmation confirm_...
 
-# Check if command was processed
-curl http://localhost:3001/api/incidents | jq '.incidents[-1]'
+curl -X POST http://localhost:3001/api/approve \
+  -H "Content-Type: application/json" \
+  -d '{"confirmationId": "confirm_...", "approved": true}'
+# => {"success": true, ...} and app/quickstart-probe/ exists on disk
+rmdir app/quickstart-probe 2>/dev/null; true
 ```
 
----
+## Step 7 — World model (~1 s)
 
-## 🎯 Next Steps
-
-1. **Verify this works** - Complete all verification items above
-2. **Read IMPLEMENTATION_GUIDE.md** - Understand the architecture
-3. **Implement DevOpsAgent** - Handle health checks & rollback (next milestone)
-4. **Delete old code** - Follow CLEANUP_CHECKLIST.md
-5. **Add more agents** - CICD, monitoring, etc.
-
----
-
-## 📚 Documentation Map
-
-- **New?** Start here → `SYSTEM_COMPLETE.md`
-- **Architecture?** → `ARCHITECTURE.md`
-- **Steps to build?** → `IMPLEMENTATION_GUIDE.md`
-- **Cleanup?** → `CLEANUP_CHECKLIST.md`
-- **Get running fast?** → **You are here** (`QUICKSTART.md`)
-
----
-
-## 💬 Debugging
-
-Enable verbose logging:
 ```bash
-export DEBUG=*
-npm run dev
+curl http://localhost:3001/api/status/ops | jq '{incidents: .openIncidents.total, degraded: .degraded}'
+tail -1 app/audit.log | jq '{level, incidentId, title, severity}'
 ```
 
-Check logs:
-```bash
-# In another terminal
-tail -f logs/*.log
-```
+## Verification checklist
 
-Database queries:
-```bash
-psql mark_db
-SELECT * FROM incidents ORDER BY created_at DESC LIMIT 1;
-SELECT * FROM incident_actions WHERE incident_id = 'INC-...';
-```
+- [ ] `db:migrate` applies cleanly (001-010)
+- [ ] Webhook returns `{"status":"received"}`
+- [ ] One incident appears with git-agent findings + ≥1 action
+- [ ] `audit.log` gains an `ESCALATION` JSON line
+- [ ] Approval executes the gated action (directory on disk)
+- [ ] `/api/status/ops` returns data with `degraded: []`
+- [ ] Total wall time under 10 minutes
 
----
+## Troubleshooting
 
-**Status:** ✅ Ready to go
-
-**Next:** Run the server and test!
+- **Postgres refused**: `pg_isready`; create `mark_db`; re-run `db:migrate`.
+- **401 on webhook**: unset in dev unless `GITHUB_WEBHOOK_SECRET` is set — then sign with `sha256=` HMAC.
+- **"could not bind inputs"**: name tools explicitly (`fs.directory_create with path: ...`); see `isExplicitToolCall` in `gateway.ts`.
+- **Stale docs**: historical design notes live in `docs/archive/`; `ARCHITECTURE.md` is current.
