@@ -14,6 +14,7 @@
 export type JevRoute =
   | 'deterministic'
   | 'agent:git-agent'
+  | 'agent:system-agent'
   | 'agent:devops-agent'
   | 'agent:cicd-agent'
   | 'agent:code-agent'
@@ -32,6 +33,7 @@ export interface JevDecision {
 const ROUTE_CRITERIA: Record<string, string> = {
   deterministic: 'answerable on this machine right now: time, date, files, disk, memory, CPU, MARK own status',
   'agent:git-agent': 'git operations, branches, commits, repo status, build failure investigation',
+  'agent:system-agent': 'machine inspection: hardware, cpu, memory, disk, processes, services, ports, network, environment, software versions, system diagnosis (read-only)',
   'agent:devops-agent': 'deployments, rollbacks, restarts, docker containers, service health',
   'agent:cicd-agent': 'pipelines, builds, tests, lint runs',
   'agent:code-agent': 'repairing code errors in source files',

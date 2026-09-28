@@ -5,6 +5,7 @@
 
 import { Event, EventType } from './events';
 import { routeLocally } from '../runtime/router';
+import { SystemAgent } from '../agents/system-agent';
 
 /**
  * Classifies intent, not payload: quoted `field: "value"` segments are
@@ -282,6 +283,22 @@ export class Gateway {
         needsLLM: true,
         priority: 'normal',
         reasoning: 'Content-creation request. Reasoning drafts; kernel handles explicit file ops.',
+      };
+    }
+
+    // Machine-inspection commands — checked before git/devops/cicd so
+    // "is postgres running" and "list running services" reach the
+    // read-only SystemAgent, not git-agent (status) or devops-agent.
+    // Deterministic local intents (disk/memory/cpu/time) and MARK's own
+    // "system status" config answer already returned above; this owns
+    // what they miss. Single source of truth: SystemAgent.isSystemCommand.
+    if (SystemAgent.isSystemCommand(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'system-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'System inspection operation',
       };
     }
 

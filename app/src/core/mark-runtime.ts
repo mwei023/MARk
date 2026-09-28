@@ -21,6 +21,7 @@ import { Gateway, gateway, isContentRequest, isExplicitToolCall } from './gatewa
 import { CapabilityRegistry, capabilityRegistry } from '../runtime/capabilities/registry';
 import { LocalHostCapability } from '../runtime/capabilities/shell';
 import { GitAgent } from '../agents/git-agent';
+import { SystemAgent } from '../agents/system-agent';
 import { DevOpsAgent } from '../agents/devops-agent';
 import { CICDAgent } from '../agents/cicd-agent';
 import { CodeAgent } from '../agents/code-agent';
@@ -116,6 +117,11 @@ export class MarkRuntime {
       }
     }
     if (this.agents.getAgentCount() === 0) {
+      // SystemAgent first: AgentRuntime.handleCommand picks the first
+      // canHandle match, and "system status"-adjacent words (status,
+      // server, services) overlap git/devops. Gateway already routes
+      // explicitly, but registration order is the backstop.
+      this.agents.registerAgent(new SystemAgent());
       this.agents.registerAgent(new GitAgent());
       this.agents.registerAgent(new DevOpsAgent());
       this.agents.registerAgent(new CICDAgent());
