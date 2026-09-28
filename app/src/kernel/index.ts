@@ -163,6 +163,13 @@ export {
   vaultRoot,
 } from './providers/kb';
 
+export {
+  assistantTools,
+  assistantImplementations,
+  assistantDiscoveryProvider,
+  parseWhen,
+} from './providers/assistant';
+
 export { validateOutput } from './output-contracts';
 export type { OutputValidationResult } from './output-contracts';
 

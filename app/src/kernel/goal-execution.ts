@@ -128,6 +128,33 @@ export class GoalExecutor {
     const resolution = this.dependencies.resolveCapability(goal);
 
     if (!resolution.tool) {
+      // No keyword evidence at all: ask the model (SMART only) whether any
+      // floor-passing candidate actually fits, instead of always yielding
+      // to chat. "remind me to X" and "show my tasks" match no metadata
+      // twice yet name exact tools; chat cannot act, so an arbitrated pick
+      // that binds may run (approval gates still hold for writes).
+      // Guesses still yield to chat; nothing fitting yields to chat.
+      if (process.env.MARK_SMART !== 'off' && this.dependencies.bindTaskSmart && this.dependencies.resolveCandidates) {
+        const pool = this.dependencies.resolveCandidates(goal).slice(0, 5);
+        if (pool.length > 0) {
+          const offered = pool.map(candidate => candidate.tool);
+          const pick = this.dependencies.arbitrate
+            ? await this.dependencies.arbitrate(goal, offered).catch(() => null)
+            : await arbitrateTool(goal, offered);
+          if (pick && offered.some(tool => tool.id === pick.id)) {
+            const sync = this.dependencies.bindTask(goal, pick);
+            if (sync.complete && !sync.freeText) {
+              return this.executeBound(goal, context, plan, validation,
+                { tool: pick, score: 0, matchedTerms: [], reason: 'LLM arbitration over ungated candidates' }, sync);
+            }
+            const smart = await this.dependencies.bindTaskSmart(goal, pick);
+            if (smart.complete && !smart.freeText) {
+              return this.executeBound(goal, context, plan, validation,
+                { tool: pick, score: 0, matchedTerms: [], reason: 'LLM arbitration over ungated candidates' }, smart);
+            }
+          }
+        }
+      }
       return {
         goal,
         resolution,
