@@ -93,7 +93,8 @@ export interface Posterior {
 }
 
 export function posteriorFor(binaries: Array<0 | 1>): Posterior {
-  const wins = binaries.reduce((a, b) => a + b, 0);
+  let wins = 0;
+  for (const b of binaries) wins += b;
   return { alpha: 1 + wins, beta: 1 + binaries.length - wins };
 }
 
@@ -178,7 +179,9 @@ export function probSuperior(
 export const STRATEGY_REGISTRY: Strategy[] = [
   {
     id: 'solo', version: 'v1',
-    taskClasses: ['repo_bugfix', 'shell_task', 'system_diagnosis', 'research', 'incident_triage'],
+    // Solo serves every class: it is the universal fallback and the
+    // control arm every team topology must beat.
+    taskClasses: ['repo_bugfix', 'large_refactor', 'repo_analysis', 'system_diagnosis', 'incident_triage', 'incident_recovery', 'research', 'shell_task'],
     topology: 'solo',
     constraints: ['single agent owns the goal end to end'],
     budgetPolicy: 'one execution budget, no fan-out cost',
@@ -220,6 +223,21 @@ export const STRATEGY_REGISTRY: Strategy[] = [
 
 export function strategiesFor(taskClass: string): Strategy[] {
   return STRATEGY_REGISTRY.filter(s => s.taskClasses.includes(taskClass));
+}
+
+/**
+ * Maps historical incident failure types to task classes for prior
+ * seeding. Unknown types return undefined and are SKIPPED, never
+ * shoehorned — a fabricated class poisons the posterior it feeds.
+ */
+export function failureTypeToTaskClass(failureType: string): string | undefined {
+  const t = String(failureType ?? '').toUpperCase().trim();
+  if ([
+    'MISSING_DEPENDENCY', 'TYPE_ERROR', 'LINT_FAILURE', 'TEST_FAILURE',
+    'BUILD_FAILURE', 'OOM_ERROR', 'NETWORK_ERROR', 'TIMEOUT', 'PERMISSION_ERROR',
+  ].includes(t)) return 'repo_bugfix';
+  if (t === 'UNKNOWN') return 'incident_triage';
+  return undefined;
 }
 
 // ─── Trial store ──────────────────────────────────────────────────────────

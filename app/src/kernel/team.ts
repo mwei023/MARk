@@ -179,6 +179,56 @@ function timedOutWorker(subtask: TeamSubtask, ms: number): WorkerResult {
   };
 }
 
+/**
+ * Evidence fallback: some tools return output without observations
+ * (repo.* readers especially). Without a synthesized trail the DECIDE
+ * gate sees nothing and REJECTs good work. Structural summary only —
+ * short strings inline (filenames are evidence), never raw content.
+ */
+export function evidenceFromOutput(toolId: string, output: unknown): Observation {
+  const parts: string[] = [];
+  const walk = (value: unknown, depth: number): void => {
+    if (parts.join(' ').length > 350 || depth > 2) return;
+    if (Array.isArray(value)) {
+      parts.push(`[${value.length}]`);
+      for (const item of value.slice(0, 8)) {
+        if (typeof item === 'string' && item.length <= 120) parts.push(item);
+        else if (typeof item === 'number' || typeof item === 'boolean') parts.push(String(item));
+      }
+      return;
+    }
+    if (value !== null && typeof value === 'object') {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>).slice(0, 12)) {
+        if (typeof v === 'string' && v.length <= 120) parts.push(`${k}=${v}`);
+        else if (typeof v === 'number' || typeof v === 'boolean') parts.push(`${k}=${v}`);
+        else if (Array.isArray(v)) {
+          parts.push(`${k}[${v.length}]`);
+          for (const item of v.slice(0, 5)) {
+            if (typeof item === 'string' && item.length <= 120) parts.push(item);
+          }
+        } else if (v !== null && typeof v === 'object') {
+          parts.push(`${k}{${Object.keys(v as object).slice(0, 6).join(',')}}`);
+        }
+      }
+      return;
+    }
+    if (typeof value === 'string') parts.push(value.slice(0, 150));
+  };
+  walk(output, 0);
+  const summary = `${toolId} succeeded with output: ${parts.join(' ').slice(0, 400) || '(empty)'}`;
+  return {
+    id: `observation-${Date.now()}`,
+    kind: 'output',
+    source: 'team.evidence',
+    subject: toolId,
+    summary,
+    data: output,
+    confidence: 0.8,
+    observedAt: new Date().toISOString(),
+    relatedResourceIds: [],
+  };
+}
+
 /** Strategies whose write mechanics are not built yet run supervised (noted). */
 export async function executeTeam(input: TeamInput, deps: TeamDeps = {}): Promise<TeamResult> {
   const started = Date.now();

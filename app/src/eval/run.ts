@@ -19,6 +19,7 @@ import { decideRoute } from '../llm/jev';
 import { indexRepo, searchCode } from '../code/indexer';
 import { repairLintErrors } from '../agents/code-repair';
 import { runMemorySuite } from './suites/memory';
+import { runTeamReplaySuite } from './suites/team-replay';
 
 interface SuiteResult {
   suite: string;
@@ -211,6 +212,7 @@ async function suiteLatency(): Promise<void> {
   if (want('latency')) await suiteLatency();
   if (want('jev')) await suiteJev();
   if (want('memory')) results.push(await runMemorySuite());
+  if (want('team-replay')) results.push(await runTeamReplaySuite());
   const totalMs = Date.now() - t0;
   console.log('\n===== MARK EVAL =====');
   for (const r of results) {

@@ -57,4 +57,20 @@ describe('attestation verdicts', () => {
     );
     expect(v.decisions[0].status).toBe('fail');
   });
+
+  it('negated failures read as pass, not fail', () => {
+    const v = attestAcceptance(
+      ['typecheck gate passes with zero errors'],
+      [obs('typecheck passed with zero errors in 4s')],
+    );
+    expect(v.decisions[0].status).toBe('pass');
+  });
+
+  it('reporting verbs attest matched evidence', () => {
+    const v = attestAcceptance(
+      ['pool in store.ts'],
+      [obs('Read 6 lines from src/store.ts', { data: { content: 'const pool = {}; const retry = true;' } })],
+    );
+    expect(v.decisions[0].status).toBe('pass');
+  });
 });

@@ -34,9 +34,18 @@ const STOP = new Set([
   'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'for', 'with',
   'is', 'are', 'be', 'that', 'this', 'it', 'as', 'at', 'by', 'from',
   'must', 'should', 'when', 'then', 'than', 'into', 'remain', 'existing',
+  'you', 'we', 'do', 'so', 'no', 'up', 'out', 'off', 'its', 'our',
+  'am', 'go', 'he', 'if', 'me', 'my', 'us', 'ex', 'ox', 'ax', 'ad',
 ]);
 
-const PASS_WORDS = ['pass', 'passed', 'passing', 'success', 'succeeded', 'verified', 'clean', 'zero', '0 errors', 'all good'];
+const PASS_WORDS = [
+  'pass', 'passed', 'passing', 'success', 'succeeded', 'verified', 'clean',
+  'zero', '0 errors', 'all good',
+  // Reporting verbs: a matched observation that reports findings with no
+  // failure vocabulary is successful evidence (fail words still win first).
+  'read', 'reads', 'listed', 'lists', 'found', 'returned', 'returns',
+  'showing', 'shows', 'contains', 'includes', 'completed', 'retrieved',
+];
 const FAIL_WORDS = ['fail', 'failed', 'failing', 'failure', 'error', 'errors', 'regression', 'broken', 'missing', 'did not', 'does not', 'not found', 'unresolved'];
 
 function singular(value: string): string {
@@ -47,9 +56,12 @@ function singular(value: string): string {
 }
 
 function terms(text: string): string[] {
+  // Floor at 2 chars so short identifiers (db, api, os) match; two-letter
+  // glue is covered by STOP instead. Threshold (>=2 shared) still guards
+  // against single-term coincidence.
   return [...new Set(
     text.toLowerCase().split(/[^a-z0-9]+/)
-      .filter(t => /\d/.test(t) ? t.length >= 3 : t.length >= 4)
+      .filter(t => t.length >= 2)
       .filter(t => !STOP.has(t))
       .map(singular),
   )];
@@ -60,11 +72,24 @@ function reqId(text: string): string | undefined {
 }
 
 function summaryOf(obs: Observation): string {
-  return `${obs.summary} ${typeof obs.data === 'string' ? obs.data : ''}`.toLowerCase();
+  const dataText = typeof obs.data === 'string' ? obs.data : safeJson(obs.data);
+  return `${obs.summary} ${dataText}`.toLowerCase();
+}
+
+function safeJson(data: unknown): string {
+  try {
+    const text = JSON.stringify(data) ?? '';
+    return text.length > 2000 ? text.slice(0, 2000) : text;
+  } catch {
+    return '';
+  }
 }
 
 function inferredStatus(summary: string): 'pass' | 'fail' | undefined {
-  if (FAIL_WORDS.some(w => summary.includes(w))) return 'fail';
+  // Negated failures ("zero errors", "no errors found") are pass signals,
+  // not failures: strip the negated span before the fail check.
+  const cleaned = summary.replace(/\b(zero|no|without|0)\b[^.]{0,24}?\berrors?\b/g, '');
+  if (FAIL_WORDS.some(w => cleaned.includes(w))) return 'fail';
   if (PASS_WORDS.some(w => summary.includes(w))) return 'pass';
   return undefined;
 }
