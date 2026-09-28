@@ -863,8 +863,8 @@ export const fsDirectoryCreateTool: ToolDescriptor = {
   id: 'fs.directory_create',
   name: 'Directory create',
   description:
-    'Creates a directory inside the working directory without touching anything outside it. Fails when the directory already exists.',
-  version: '1.0.0',
+    'Creates a directory inside the working directory without touching anything outside it, creating missing parents as needed. Fails when the directory already exists.',
+  version: '1.1.0',
   domain: 'filesystem',
   risk: 'reversible',
   available: true,
@@ -900,7 +900,16 @@ export const fsDirectoryCreateImplementation: ToolImplementation = {
 
   async execute({ action, context }) {
     const { resolved } = resolveJailedPath(String(action.input.path ?? ''), context.workingDirectory);
-    await fs.mkdir(resolved);
+    try {
+      const stats = await fs.stat(resolved);
+      if (stats.isDirectory()) {
+        const output = { path: resolved, created: false, capturedAt: new Date().toISOString() };
+        return { output };
+      }
+    } catch {
+      // Missing — create below, including parents.
+    }
+    await fs.mkdir(resolved, { recursive: true });
     const output = { path: resolved, created: true, capturedAt: new Date().toISOString() };
     return {
       output,
@@ -937,8 +946,8 @@ export const fsFileWriteTool: ToolDescriptor = {
   id: 'fs.file_write',
   name: 'File write',
   description:
-    'Writes text content to a file inside the working directory. Refuses credential paths and never overwrites unless explicitly allowed.',
-  version: '1.0.0',
+    'Writes text content to a file inside the working directory. Refuses credential paths and never overwrites unless explicitly allowed. Appends instead of replacing when append is true.',
+  version: '1.1.0',
   domain: 'filesystem',
   risk: 'mutating',
   available: true,
@@ -951,6 +960,7 @@ export const fsFileWriteTool: ToolDescriptor = {
       },
       content: { type: 'string', description: 'Text content to write (max 50KB).' },
       overwrite: { type: 'boolean', description: 'Allow overwriting an existing file (default false).' },
+      append: { type: 'boolean', description: 'Append to an existing file instead of replacing it (default false).' },
     },
     required: ['path', 'content'],
   },
@@ -1004,22 +1014,30 @@ export const fsFileWriteImplementation: ToolImplementation = {
     }
 
     let existed = false;
+    let sizeBefore = 0;
     try {
       const stats = await fs.stat(resolved);
       existed = stats.isFile();
+      sizeBefore = stats.size;
     } catch {
       existed = false;
     }
-    if (existed && action.input.overwrite !== true) {
+    if (existed && action.input.overwrite !== true && action.input.append !== true) {
       throw new Error(`Refused: "${resolved}" exists and overwrite was not allowed.`);
     }
 
     await fs.mkdir(path.dirname(resolved), { recursive: true });
-    await fs.writeFile(resolved, content, 'utf8');
+    if (existed && action.input.append === true) {
+      await fs.appendFile(resolved, content, 'utf8');
+    } else {
+      await fs.writeFile(resolved, content, 'utf8');
+    }
     const output = {
       path: resolved,
       bytesWritten: Buffer.byteLength(content, 'utf8'),
-      overwritten: existed,
+      overwritten: existed && action.input.append !== true,
+      appended: existed && action.input.append === true,
+      sizeBefore: existed ? sizeBefore : 0,
       capturedAt: new Date().toISOString(),
     };
     return {
@@ -1043,12 +1061,14 @@ export const fsFileWriteImplementation: ToolImplementation = {
   async verify({ output }) {
     const file = String((output as any)?.path ?? '');
     const expectedBytes = Number((output as any)?.bytesWritten ?? NaN);
+    const sizeBefore = Number((output as any)?.sizeBefore ?? 0);
     if (!file) return { ok: false, detail: 'no file path in output to verify' };
     try {
       const stats = await fs.stat(file);
       if (!stats.isFile()) return { ok: false, detail: `"${file}" exists but is not a file` };
-      if (Number.isFinite(expectedBytes) && stats.size !== expectedBytes) {
-        return { ok: false, detail: `"${file}" is ${stats.size} bytes, expected ${expectedBytes}` };
+      const expected = (output as any)?.appended === true ? sizeBefore + expectedBytes : expectedBytes;
+      if (Number.isFinite(expected) && stats.size !== expected) {
+        return { ok: false, detail: `"${file}" is ${stats.size} bytes, expected ${expected}` };
       }
       return { ok: true, detail: `file "${file}" exists (${stats.size} bytes)` };
     } catch {
