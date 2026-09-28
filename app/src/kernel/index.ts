@@ -150,6 +150,12 @@ export {
   skillInstallDiscoveryProvider,
 } from './providers/skill-install';
 
+export {
+  githubTools,
+  githubImplementations,
+  githubDiscoveryProvider,
+} from './providers/github';
+
 export { validateOutput } from './output-contracts';
 export type { OutputValidationResult } from './output-contracts';
 

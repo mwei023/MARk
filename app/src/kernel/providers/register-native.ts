@@ -70,6 +70,11 @@ import {
 } from './skill-install';
 
 import {
+  githubDiscoveryProvider,
+  githubImplementations,
+} from './github';
+
+import {
   MARKKernel,
   markKernel,
 } from '../kernel';
@@ -94,6 +99,7 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(sysSandboxDiscoveryProvider);
   toolDiscovery.registerProvider(opsVerifyDiscoveryProvider);
   toolDiscovery.registerProvider(skillInstallDiscoveryProvider);
+  toolDiscovery.registerProvider(githubDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
     kernel.registerImplementation(implementation);
@@ -140,6 +146,10 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of skillImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of githubImplementations) {
     kernel.registerImplementation(implementation);
   }
 
