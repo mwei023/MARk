@@ -34,6 +34,7 @@ import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
 import { repositoryRegistry } from '../repositories/registry';
 import { opsObjective } from '../ops/objective';
+import { buildOpsSnapshot } from './ops-snapshot';
 
 // Load env: repo-root .env first (LLM keys), then app/.env fills gaps.
 import * as path from 'path';
@@ -518,76 +519,20 @@ app.get('/api/health', (req: any, res: any) => {
 
 /**
  * GET /api/status/ops - Ops world-model snapshot: what MARK knows about its
- * environment. Composes incident, memory, baseline, and registry state.
- * Never 500s on a missing database: unavailable sections report degraded
- * with null data instead of failing the whole snapshot.
+ * environment. Single canonical handler (see ops-snapshot.ts): the phase-3
+ * shape (openIncidents, repoHealth, anomalies, autoFix, selfKnowledge)
+ * with degraded-mode resilience (sections fail to null independently,
+ * never a 500). Previously registered twice — the second res.json
+ * crashed every request with headers-already-sent.
  */
-app.get('/api/status/ops', async (req: any, res: any) => {
-  const snapshot: Record<string, any> = { timestamp: new Date().toISOString(), degraded: [] as string[] };
-
-  // Persistent objective: always present, never depends on the database.
-  snapshot.objective = opsObjective.snapshot();
-
-  let openList: Array<{ id: string; title: string; status: string; severity: string; tags?: string[]; context?: unknown }> | null = null;
+app.get('/api/status/ops', async (_req: any, res: any) => {
   try {
-    const open = await incidentStore.getOpenIncidents();
-    openList = open;
-    const bySeverity: Record<string, number> = {};
-    const byRepo: Record<string, number> = {};
-    for (const inc of open) {
-      bySeverity[inc.severity] = (bySeverity[inc.severity] ?? 0) + 1;
-      const repo = (inc.context as any)?.repository ?? 'unknown';
-      byRepo[repo] = (byRepo[repo] ?? 0) + 1;
-    }
-    snapshot.openIncidents = { total: open.length, bySeverity };
-    const baselines = await repoBaseline.list().catch(() => null);
-    if (!baselines) {
-      snapshot.degraded.push('baselines');
-    }
-    const repos = await repositoryRegistry.loadFromDatabase().catch(() => repositoryRegistry.list());
-    snapshot.monitoredRepos = repos.map(r => {
-      const base = baselines?.find(b => b.repository === r.fullName);
-      return {
-        fullName: r.fullName,
-        localPath: r.localPath ?? null,
-        openIncidents: byRepo[r.fullName] ?? 0,
-        totalIncidents: base?.totalIncidents ?? null,
-        avgIncidentsPerDay: base?.avgIncidentsPerDay ?? null,
-        avgResolutionMs: base?.avgResolutionMs ?? null,
-        mostCommonType: base?.mostCommonType ?? null,
-        baselineUpdatedAt: base?.updatedAt ?? null,
-      };
-    });
-  } catch {
-    snapshot.degraded.push('incidents');
-    snapshot.openIncidents = null;
-    snapshot.monitoredRepos = null;
+    const snapshot = await buildOpsSnapshot();
+    res.json({ success: true, ...snapshot });
+  } catch (error: any) {
+    // buildOpsSnapshot never throws by contract; this is belt and braces.
+    res.status(500).json({ success: false, error: error?.message ?? 'snapshot failed' });
   }
-
-  try {
-    snapshot.autoFix = await opsMemory.overallFixRate(30);
-  } catch {
-    snapshot.degraded.push('autofix');
-    snapshot.autoFix = null;
-  }
-
-  // Self-improvement queue: filed problem statements awaiting an operator
-  // to route them (CodeAgent handles lint-class fixes; feature work needs
-  // a human dispatch decision — never auto-assigned).
-  snapshot.selfImprovement = openList
-    ? openList
-      .filter(i => (i.tags ?? []).includes('self-improvement'))
-      .map(i => ({ id: i.id, title: i.title, status: i.status, severity: i.severity }))
-    : null;
-
-  try {
-    snapshot.mostCommonFailureThisWeek = await opsMemory.mostCommonFailureType(7);
-  } catch {
-    snapshot.degraded.push('failures');
-    snapshot.mostCommonFailureThisWeek = null;
-  }
-
-  res.json({ success: true, ops: snapshot });
 });
 
 /**
@@ -607,95 +552,6 @@ app.get('/api/status', async (req: any, res: any) => {
       status: 'error',
       error: error.message,
     });
-  }
-});
-
-/**
- * GET /api/status/ops — World model snapshot for the ops domain.
- *
- * Returns:
- * {
- *   openIncidents: { total, bySeverity },
- *   repoHealth: [{ repository, baseline, anomaly? }],
- *   autoFix: { attempts, successes, rate, mostCommonFailureType },
- *   anomalies: AnomalyReport[],
- *   selfKnowledge: { totalMemoryRecords, trustedFixTypes, kernelStatus }
- * }
- */
-app.get('/api/status/ops', async (_req: any, res: any) => {
-  try {
-    const [
-      openIncidents,
-      baselines,
-      anomalies,
-      fixRate,
-      mostCommonType,
-    ] = await Promise.all([
-      incidentStore.getOpenIncidents(),
-      repoBaseline.list(),
-      repoBaseline.detectAnomalies(),
-      opsMemory.overallFixRate(30),
-      opsMemory.mostCommonFailureType(7),
-    ]);
-
-    // Severity breakdown
-    const bySeverity: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
-    for (const inc of openIncidents) {
-      bySeverity[inc.severity] = (bySeverity[inc.severity] ?? 0) + 1;
-    }
-
-    // Repo health — merge baselines with anomaly signals
-    const anomalyMap = new Map(anomalies.map(a => [a.repository, a]));
-    const repoHealth = baselines.map(b => ({
-      repository: b.repository,
-      avgIncidentsPerDay: b.avgIncidentsPerDay,
-      avgResolutionMs: b.avgResolutionMs,
-      mostCommonType: b.mostCommonType,
-      totalIncidents: b.totalIncidents,
-      lastUpdated: b.updatedAt,
-      anomaly: anomalyMap.get(b.repository) ?? null,
-    }));
-
-    // Trusted fix types
-    const trustedFixTypes: string[] = [];
-    for (const type of ['MISSING_DEPENDENCY', 'LINT_FAILURE']) {
-      if (await opsMemory.isTrusted(type)) trustedFixTypes.push(type);
-    }
-
-    // Self-knowledge: total memory records
-    let totalMemoryRecords = 0;
-    try {
-      const { getPool } = await import('../db/postgres.js');
-      const r = await getPool().query<{ n: string }>('SELECT COUNT(*)::int AS n FROM ops_incident_memory');
-      totalMemoryRecords = Number(r.rows[0]?.n ?? 0);
-    } catch { /* DB may be offline */ }
-
-    const kernelStatus = markRuntime.kernelStatus();
-
-    res.json({
-      success: true,
-      timestamp: new Date().toISOString(),
-      openIncidents: {
-        total: openIncidents.length,
-        bySeverity,
-      },
-      repoHealth,
-      anomalies,
-      autoFix: {
-        attempts: fixRate.attempts,
-        successes: fixRate.successes,
-        rate: Math.round(fixRate.rate * 1000) / 10, // percentage with 1dp
-        mostCommonFailureTypeThisWeek: mostCommonType,
-      },
-      selfKnowledge: {
-        totalMemoryRecords,
-        trustedFixTypes,
-        kernelInitialized: kernelStatus.initialized,
-        kernelToolCount: kernelStatus.availableTools.length,
-      },
-    });
-  } catch (error: any) {
-    res.status(500).json({ success: false, error: error.message });
   }
 });
 
