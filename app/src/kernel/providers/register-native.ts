@@ -65,6 +65,11 @@ import {
 } from './ops-verify';
 
 import {
+  skillInstallDiscoveryProvider,
+  skillImplementations,
+} from './skill-install';
+
+import {
   MARKKernel,
   markKernel,
 } from '../kernel';
@@ -88,6 +93,7 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(worldPerceptionDiscoveryProvider);
   toolDiscovery.registerProvider(sysSandboxDiscoveryProvider);
   toolDiscovery.registerProvider(opsVerifyDiscoveryProvider);
+  toolDiscovery.registerProvider(skillInstallDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
     kernel.registerImplementation(implementation);
@@ -130,6 +136,10 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of opsVerifyImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of skillImplementations) {
     kernel.registerImplementation(implementation);
   }
 

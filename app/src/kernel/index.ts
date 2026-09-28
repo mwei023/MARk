@@ -138,8 +138,19 @@ export {
   mediaDiscoveryProvider,
 } from './providers/media';
 
-export { validateOutput } from './output-contracts';
+export {
+  skillInstallTool,
+  skillInstallImplementation,
+  skillInstallTools,
+  skillInstallImplementations,
+  skillListTool,
+  skillListImplementation,
+  skillTools,
+  skillImplementations,
+  skillInstallDiscoveryProvider,
+} from './providers/skill-install';
 
+export { validateOutput } from './output-contracts';
 export type { OutputValidationResult } from './output-contracts';
 
 export { scoreCompatibility, resolveSchemaPath, listSchemaLeafPaths } from './compatibility';
