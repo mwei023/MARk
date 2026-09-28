@@ -16,6 +16,31 @@ export interface TaskBinding {
    * now_playing for "confirm if any music is playing").
    */
   freeText?: boolean;
+  /** LLM tokens spent producing this binding (smart path only). */
+  usage?: TokenUsage;
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export function emptyUsage(): TokenUsage {
+  return { inputTokens: 0, outputTokens: 0 };
+}
+
+export function addUsage(a: TokenUsage, b?: TokenUsage): TokenUsage {
+  return {
+    inputTokens: a.inputTokens + (b?.inputTokens ?? 0),
+    outputTokens: a.outputTokens + (b?.outputTokens ?? 0),
+  };
+}
+
+function usageOf(response: { usage?: { promptTokens?: number; completionTokens?: number } }): TokenUsage {
+  return {
+    inputTokens: response.usage?.promptTokens ?? 0,
+    outputTokens: response.usage?.completionTokens ?? 0,
+  };
 }
 
 export interface TaskBinderDependencies {}
@@ -300,8 +325,9 @@ export async function bindTaskSmart(
       { role: 'user', content: `Goal: ${goal.slice(0, 500)}\n\nMissing fields:\n${catalog}` },
     ];
     const response = await withTimeout(provider.chat(messages, { temperature: 0 }), timeoutMs, 'LLM bind');
+    const callUsage = usageOf(response);
     const extracted = parseExtraction(response.content);
-    if (!extracted) return base;
+    if (!extracted) return { ...base, usage: callUsage };
 
     const input = { ...base.input };
     const matchedFields = [...base.matchedFields];
@@ -324,6 +350,7 @@ export async function bindTaskSmart(
           ? `Bound goal values to "${tool.id}" with LLM assistance (${matchedFields.join(', ')}).`
           : base.reason,
       ...(base.freeText ? { freeText: true as const } : {}),
+      usage: callUsage,
     };
   } catch {
     return base;

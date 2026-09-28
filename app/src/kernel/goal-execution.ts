@@ -14,6 +14,9 @@ import { getLLMProviderCached, Message } from '../llm';
 import {
   TaskBinder,
   TaskBinding,
+  TokenUsage,
+  emptyUsage,
+  addUsage,
 } from './task-binder';
 
 import {
@@ -39,6 +42,14 @@ export interface GoalExecutionResult {
   planReport?: import('./planner').PlanExecutionReport;
   /** How the goal was executed: single tool vs multi-step plan. */
   executionMode?: 'single' | 'plan';
+  /** LLM spend inside this goal (arbitration + smart binding rounds). */
+  tokens?: CostSummary;
+}
+
+export interface CostSummary {
+  inputTokens: number;
+  outputTokens: number;
+  llmCalls: number;
 }
 
 export interface GoalExecutionDependencies {
@@ -83,6 +94,18 @@ export class GoalExecutor {
     context: ExecutionContext,
     options: GoalExecutionOptions = {},
   ): Promise<GoalExecutionResult> {
+    const spent: TokenUsage = emptyUsage();
+    let llmCalls = 0;
+    const charge = (u?: TokenUsage): void => {
+      if (!u) return;
+      spent.inputTokens += u.inputTokens;
+      spent.outputTokens += u.outputTokens;
+      llmCalls++;
+    };
+    const finish = (result: GoalExecutionResult): GoalExecutionResult => {
+      result.tokens = { inputTokens: spent.inputTokens, outputTokens: spent.outputTokens, llmCalls };
+      return result;
+    };
     const plan = this.dependencies.planGoal
       ? this.dependencies.planGoal(goal)
       : undefined;
@@ -110,14 +133,14 @@ export class GoalExecutor {
         if (composedValidation?.valid && trimmed.steps.length > 1) {
           const planReport = await this.dependencies.executePlanReport(trimmed, context);
           const resolution = this.dependencies.resolveCapability(goal);
-          return {
+          return finish({
             goal,
             resolution,
             plan: trimmed,
             validation: composedValidation,
             planReport,
             executionMode: 'plan',
-          };
+          });
         }
       } catch (err) {
         // Planner path is best-effort: fall through to single-tool execution.
@@ -138,29 +161,32 @@ export class GoalExecutor {
         const pool = this.dependencies.resolveCandidates(goal).slice(0, 5);
         if (pool.length > 0) {
           const offered = pool.map(candidate => candidate.tool);
-          const pick = this.dependencies.arbitrate
-            ? await this.dependencies.arbitrate(goal, offered).catch(() => null)
+          const arbitrated = this.dependencies.arbitrate
+            ? { pick: await this.dependencies.arbitrate(goal, offered).catch(() => null), usage: emptyUsage() as TokenUsage }
             : await arbitrateTool(goal, offered);
+          charge(arbitrated.usage);
+          const pick = arbitrated.pick;
           if (pick && offered.some(tool => tool.id === pick.id)) {
             const sync = this.dependencies.bindTask(goal, pick);
             if (sync.complete && !sync.freeText) {
-              return this.executeBound(goal, context, plan, validation,
-                { tool: pick, score: 0, matchedTerms: [], reason: 'LLM arbitration over ungated candidates' }, sync);
+              return finish(await this.executeBound(goal, context, plan, validation,
+                { tool: pick, score: 0, matchedTerms: [], reason: 'LLM arbitration over ungated candidates' }, sync));
             }
             const smart = await this.dependencies.bindTaskSmart(goal, pick);
+            charge(smart.usage);
             if (smart.complete && !smart.freeText) {
-              return this.executeBound(goal, context, plan, validation,
-                { tool: pick, score: 0, matchedTerms: [], reason: 'LLM arbitration over ungated candidates' }, smart);
+              return finish(await this.executeBound(goal, context, plan, validation,
+                { tool: pick, score: 0, matchedTerms: [], reason: 'LLM arbitration over ungated candidates' }, smart));
             }
           }
         }
       }
-      return {
+      return finish({
         goal,
         resolution,
         plan,
         validation,
-      };
+      });
     }
 
     // Candidate loop: the top-ranked tool is not always the right one (a
@@ -182,7 +208,7 @@ export class GoalExecutor {
       const attempt = this.dependencies.bindTask(goal, tool);
       if (!fallback && attempt.complete) fallback = { tool, binding: attempt };
       if (attempt.complete && attempt.matchedFields.length > 0 && !attempt.freeText) {
-        return this.executeBound(goal, context, plan, validation, { ...resolution, tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, attempt);
+        return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, attempt));
       }
       // Whole-goal guesses wait their turn in rank order: a guessed binding
       // must not jump ahead of an evidenced one (observed live: play_track's
@@ -206,9 +232,11 @@ export class GoalExecutor {
         const pool = this.dependencies.resolveCandidates(goal).slice(0, 5);
         if (pool.length > 0) {
           const offered = pool.map(candidate => candidate.tool);
-          const pick = this.dependencies.arbitrate
-            ? await this.dependencies.arbitrate(goal, offered).catch(() => null)
+          const arbitratedPick = this.dependencies.arbitrate
+            ? { pick: await this.dependencies.arbitrate(goal, offered).catch(() => null), usage: emptyUsage() as TokenUsage }
             : await arbitrateTool(goal, offered);
+          charge(arbitratedPick.usage);
+          const pick = arbitratedPick.pick;
           // Membership enforced even for injected arbitrators: only pooled
           // tools may run. Unknown picks fall through to the fallback below.
           if (pick && offered.some(tool => tool.id === pick.id)) {
@@ -218,11 +246,12 @@ export class GoalExecutor {
             // Guessed bindings (whole-goal text) wait like their sync kin.
             const arbitrated = this.dependencies.bindTask(goal, pick);
             if (arbitrated.complete && arbitrated.matchedFields.length > 0 && !arbitrated.freeText) {
-              return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, arbitrated);
+              return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, arbitrated));
             }
             const smartArbitrated = await this.dependencies.bindTaskSmart(goal, pick);
+            charge(smartArbitrated.usage);
             if (smartArbitrated.complete && smartArbitrated.matchedFields.length > 0 && !smartArbitrated.freeText) {
-              return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, smartArbitrated);
+              return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, smartArbitrated));
             }
             // Explicit judgment outranks zero-evidence inertia: when the
             // picked tool binds completely but the rank fallback carries no
@@ -237,7 +266,7 @@ export class GoalExecutor {
               && fallback.binding.matchedFields.length === 0;
             for (const judged of [arbitrated, smartArbitrated]) {
               if (judged.complete && !judged.freeText && zeroEvidenceFallback) {
-                return this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, judged);
+                return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool: pick }, judged));
               }
             }
             if (smartArbitrated.complete && smartArbitrated.freeText) smartGuessed.push({ tool: pick, binding: smartArbitrated });
@@ -246,8 +275,9 @@ export class GoalExecutor {
       }
       for (const tool of candidates) {
         const smart = await this.dependencies.bindTaskSmart(goal, tool);
+        charge(smart.usage);
         if (smart.complete && smart.matchedFields.length > 0 && !smart.freeText) {
-          return this.executeBound(goal, context, plan, validation, { ...resolution, tool }, smart);
+          return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool }, smart));
         }
         if (smart.complete && smart.freeText) smartGuessed.push({ tool, binding: smart });
         if (!fallback && smart.complete) fallback = { tool, binding: smart };
@@ -267,7 +297,7 @@ export class GoalExecutor {
       && (fallback.tool.risk === 'read' || fallback.tool.risk === 'diagnostic');
     if (fallback && fallback.binding.complete && !fallback.binding.freeText && !fallbackHollow) {
       const { tool, binding } = fallback;
-      return this.executeBound(goal, context, plan, validation, { ...resolution, tool }, binding);
+      return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool }, binding));
     }
     const allGuessed = [...guessed, ...smartGuessed];
     // A guessed read never satisfies an action goal either (same hollow
@@ -277,19 +307,19 @@ export class GoalExecutor {
       : allGuessed;
     const winner = actionableGuessed[0] as { tool: ToolDescriptor; binding: TaskBinding } | undefined;
     if (winner) {
-      return this.executeBound(goal, context, plan, validation, { ...resolution, tool: winner.tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, winner.binding);
+      return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool: winner.tool, score: resolution.score, matchedTerms: resolution.matchedTerms }, winner.binding));
     }
 
     if (fallback) {
       const { tool, binding } = fallback;
       if (binding.complete) {
-        return this.executeBound(goal, context, plan, validation, { ...resolution, tool }, binding);
+        return finish(await this.executeBound(goal, context, plan, validation, { ...resolution, tool }, binding));
       }
-      return { goal, resolution: { ...resolution, tool }, binding, plan, validation };
+      return finish({ goal, resolution: { ...resolution, tool }, binding, plan, validation });
     }
 
     const binding = this.dependencies.bindTask(goal, resolution.tool);
-    return { goal, resolution, binding, plan, validation };
+    return finish({ goal, resolution, binding, plan, validation });
   }
 
   private async executeBound(
@@ -357,9 +387,10 @@ export class GoalExecutor {
  * anything else (or any failure) yields null and the caller falls back.
  * Never throws.
  */
-async function arbitrateTool(goal: string, tools: ToolDescriptor[]): Promise<ToolDescriptor | null> {
+async function arbitrateTool(goal: string, tools: ToolDescriptor[]): Promise<{ pick: ToolDescriptor | null; usage: TokenUsage }> {
+  const none: TokenUsage = emptyUsage();
   try {
-    if (tools.length === 0) return null;
+    if (tools.length === 0) return { pick: null, usage: none };
     const timeoutMs = Number(process.env.MARK_LLM_TIMEOUT_MS ?? 30000);
     const provider = await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
     const catalog = tools
@@ -373,14 +404,18 @@ async function arbitrateTool(goal: string, tools: ToolDescriptor[]): Promise<Too
       { role: 'user', content: `Goal: ${goal.slice(0, 500)}\n\nCandidates:\n${catalog}` },
     ];
     const response = await withTimeout(provider.chat(messages, { temperature: 0 }), timeoutMs, 'LLM arbitrate');
+    const usage: TokenUsage = {
+      inputTokens: response.usage?.promptTokens ?? 0,
+      outputTokens: response.usage?.completionTokens ?? 0,
+    };
     const start = response.content.indexOf('{');
     const end = response.content.lastIndexOf('}');
-    if (start < 0 || end <= start) return null;
+    if (start < 0 || end <= start) return { pick: null, usage };
     const raw = JSON.parse(response.content.slice(start, end + 1)) as { toolId?: unknown };
-    if (typeof raw.toolId !== 'string') return null;
-    return tools.find(tool => tool.id === raw.toolId) ?? null;
+    if (typeof raw.toolId !== 'string') return { pick: null, usage };
+    return { pick: tools.find(tool => tool.id === raw.toolId) ?? null, usage };
   } catch {
-    return null;
+    return { pick: null, usage: none };
   }
 }
 
