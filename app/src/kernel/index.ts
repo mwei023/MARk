@@ -170,6 +170,12 @@ export {
   parseWhen,
 } from './providers/assistant';
 
+export {
+  emailTools,
+  emailImplementations,
+  emailDiscoveryProvider,
+} from './providers/email';
+
 export { validateOutput } from './output-contracts';
 export type { OutputValidationResult } from './output-contracts';
 
