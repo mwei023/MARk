@@ -101,6 +101,18 @@ describe('project-reference routing', () => {
     expect(classify('play some music').agent).not.toBe('git-agent');
   });
 
+  it('link checks reach web-agent, not git-agent', () => {
+    for (const cmd of [
+      'is the linkedin link in the portfolio working?',
+      'check on the link',
+      'test the links in the docs',
+    ]) {
+      const d = classify(cmd);
+      expect(d.path).toBe('agent');
+      expect(d.agent).toBe('web-agent');
+    }
+  });
+
   it('isProjectReference mirrors the routing', () => {
     expect(isProjectReference('check on institution OS')).toBe(true);
     expect(isProjectReference('my portfolio')).toBe(true);

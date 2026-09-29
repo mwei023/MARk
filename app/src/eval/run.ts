@@ -70,6 +70,8 @@ async function suiteRouting(): Promise<void> {
     ['check on my portfolio project', 'agent', 'git-agent'],
     ['deploy the project to staging', 'agent', 'devops-agent'],
     ['is the operating system healthy', 'agent', 'system-agent'],
+    ['is the linkedin link working', 'agent', 'web-agent'],
+    ['check on the link', 'agent', 'web-agent'],
   ];
   let passed = 0;
   const notes: string[] = [];

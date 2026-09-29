@@ -6,7 +6,13 @@
  * the research agent, not the web agent).
  */
 import { describe, it, expect } from 'vitest';
-import { WebAgent, expandQuery, synthesizeAnswer } from './web-agent.js';
+import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  WebAgent, expandQuery, synthesizeAnswer, isLinkCheck,
+  extractUrls, findProjectLinks, checkLinks, formatLinkReport,
+} from './web-agent.js';
 
 describe('expandQuery', () => {
   it('adds an angle to a plain query', () => {
@@ -98,5 +104,65 @@ describe('WebAgent.canHandle', () => {
     expect(agent.canHandle({
       type: 'user.command.received', data: { command: 'state of the art in retrieval' },
     } as any)).toBe(false);
+  });
+
+  it('claims link checks (classifier contract)', () => {
+    for (const cmd of [
+      'is the linkedin link in the portfolio working?',
+      'check on the link',
+      'verify the docs urls',
+      'test the links on the homepage',
+      'are the portfolio urls alive',
+    ]) {
+      expect(isLinkCheck(cmd)).toBe(true);
+      expect(agent.canHandle({
+        type: 'user.command.received', data: { command: cmd },
+      } as any)).toBe(true);
+    }
+    for (const cmd of ['link my repo to the tracker', 'play some music', 'deploy the project']) {
+      expect(agent.canHandle({
+        type: 'user.command.received', data: { command: cmd },
+      } as any)).toBe(false);
+    }
+  });
+});
+
+describe('link checking (offline)', () => {
+  it('extracts and dedupes URLs', () => {
+    expect(extractUrls('see https://a.com/x, and https://a.com/x!')).toEqual(['https://a.com/x']);
+    expect(extractUrls('no links here')).toEqual([]);
+    expect(extractUrls('ftp://x.com/y')).toEqual([]);
+  });
+
+  it('harvests project links, skipping lockfiles and infra URLs', () => {
+    const root = join(tmpdir(), `mark-links-${Date.now()}`);
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'index.html'), '<a href="https://example.com/me">me</a><link href="https://fonts.googleapis.com/x">');
+    writeFileSync(join(root, 'package-lock.json'), '{"url": "https://registry.npmjs.org/x"}');
+    writeFileSync(join(root, 'node_modules', 'a.js'), '/* https://evil.example/y */');
+    try {
+      const found = findProjectLinks(root);
+      expect(found.map(f => f.url)).toContain('https://example.com/me');
+      expect(found.map(f => f.url).some(u => u.includes('fonts.g'))).toBe(false);
+      expect(found.map(f => f.url).some(u => u.includes('registry.npmjs'))).toBe(false);
+      expect(found.map(f => f.url).some(u => u.includes('evil.example'))).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('checks through an injected checker and reports honestly', async () => {
+    const results = await checkLinks(
+      ['https://a.example/ok', 'https://b.example/dead'],
+      async (url: string) => url.includes('/ok')
+        ? { alive: true, status: 200, ms: 12 }
+        : { alive: false, status: 0, ms: 3 },
+    );
+    expect(results).toHaveLength(2);
+    const report = formatLinkReport(results);
+    expect(report).toContain('1 dead');
+    expect(report).toContain('✓ https://a.example/ok → 200');
+    expect(report).toContain('✗ https://b.example/dead → dead');
+    expect(formatLinkReport(results.filter(r => r.alive))).toContain('all alive');
   });
 });

@@ -322,12 +322,118 @@ export const browserOpenImplementation: ToolImplementation = {
   },
 };
 
-export const browserNativeTools: ToolDescriptor[] = [browserSearchTool, browserReadTool, browserOpenTool];
+export const browserCheckTool: ToolDescriptor = {
+  id: 'browser.check',
+  name: 'Check link',
+  description:
+    'Checks whether a URL is alive: status code, final URL after redirects, and latency. Use to verify links work without reading the page.',
+  version: '1.0.0',
+  domain: 'browser',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      url: { type: 'string', description: 'http(s) URL to check.' },
+      timeoutMs: { type: 'number', description: 'Timeout in ms (1000-30000, default 15000).' },
+    },
+    required: ['url'],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      url: { type: 'string' },
+      alive: { type: 'boolean' },
+      status: { type: 'number' },
+      finalUrl: { type: 'string' },
+      ms: { type: 'number' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['url', 'alive', 'status', 'finalUrl', 'ms', 'capturedAt'],
+  },
+  capabilities: ['web-reading', 'link-checking'],
+  supportedResourceKinds: ['web'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'browser.native',
+};
+
+export const browserCheckImplementation: ToolImplementation = {
+  toolId: browserCheckTool.id,
+
+  async execute({ action }) {
+    const url = requireHttpUrl(String(action.input.url ?? ''));
+    const rawTimeout = action.input.timeoutMs;
+    const timeoutMs = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout)
+      ? Math.min(Math.max(Math.floor(rawTimeout), 1000), 30000)
+      : 15000;
+    const started = Date.now();
+    // HEAD first (cheap); some servers reject HEAD, so fall back to a
+    // ranged GET that fetches (almost) nothing.
+    const attempt = async (method: string): Promise<Response> =>
+      fetch(url.toString(), {
+        method,
+        headers: method === 'GET' ? { Range: 'bytes=0-0', 'User-Agent': 'MARK/1.0 (link check)' } : { 'User-Agent': 'MARK/1.0 (link check)' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    try {
+      let res: Response;
+      try {
+        res = await attempt('HEAD');
+        if (res.status === 405 || res.status === 501) res = await attempt('GET');
+      } catch (headErr) {
+        // Network-level HEAD failure (not HTTP status): one GET retry before
+        // calling it dead, since some hosts drop HEAD at the edge.
+        try {
+          res = await attempt('GET');
+        } catch {
+          throw headErr;
+        }
+      }
+      try { await res.arrayBuffer(); } catch { /* body irrelevant; status is the answer */ }
+      const ms = Date.now() - started;
+      const alive = res.status >= 200 && res.status < 400;
+      const output = {
+        url: url.toString(), alive, status: res.status,
+        finalUrl: res.url || url.toString(), ms, capturedAt: new Date().toISOString(),
+      };
+      return {
+        output,
+        observations: [
+          {
+            id: `observation-${Date.now()}`,
+            kind: 'web',
+            source: 'browser.native',
+            subject: url.toString(),
+            summary: `${url.toString()} → ${res.status} in ${ms}ms (${alive ? 'alive' : 'dead'}).`,
+            data: output,
+            confidence: 1,
+            observedAt: output.capturedAt,
+            relatedResourceIds: [],
+          },
+        ],
+      };
+    } catch (err) {
+      const ms = Date.now() - started;
+      const output = {
+        url: url.toString(), alive: false, status: 0,
+        finalUrl: url.toString(), ms, capturedAt: new Date().toISOString(),
+        error: err instanceof Error ? err.message.slice(0, 160) : String(err),
+      };
+      return { output };
+    }
+  },
+};
+
+export const browserNativeTools: ToolDescriptor[] = [browserSearchTool, browserReadTool, browserOpenTool, browserCheckTool];
 
 export const browserNativeImplementations: ToolImplementation[] = [
   browserSearchImplementation,
   browserReadImplementation,
   browserOpenImplementation,
+  browserCheckImplementation,
 ];
 
 export const browserDiscoveryProvider: DiscoveryProvider = {

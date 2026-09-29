@@ -236,6 +236,14 @@ export class Gateway {
     const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
     const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
     const WEB_RE = /\b(google|browse|browsing|look\s?up|search the web|research)\b/i;
+    // Link checking ("is the linkedin link working", "check on the link").
+    // Kept in sync with WebAgent's LINK_CHECK_RE deliberately — the
+    // classifier and the agent must agree, or routing promises an agent
+    // that declines (observed live: "check on the link" → web-agent
+    // "not available"). Before CI/CD so "test the links" checks links
+    // instead of running pipelines.
+    const LINK_CHECK_RE = /\b(check|checks|verify|verifying|test|testing|is|are)\b.{0,50}\b(links?|urls?)\b/i;
+    const LINK_STATUS_RE = /\b(links?|urls?)\b.{0,30}\b(work(ing|s)?|broken|valid|alive|dead|up|down)\b/i;
     const DEEP_RESEARCH_RE = /\b(deep research|deep dive|thorough(ly)? research|exhaust(ive|ively)|investigate thoroughly|literature review|state of the art|sota|survey the field|map the field)\b/i;
     const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;
 
@@ -348,6 +356,19 @@ export class Gateway {
         needsLLM: false,
         priority: 'normal',
         reasoning: 'Code repair operation',
+      };
+    }
+
+    // Link checking — before CI/CD so "test the links" verifies links
+    // instead of running pipelines. WebAgent extracts URLs from the
+    // command or resolves project context (lastRepo / named checkout).
+    if (LINK_CHECK_RE.test(cmd) || LINK_STATUS_RE.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'web-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Link check operation',
       };
     }
 
