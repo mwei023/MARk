@@ -10,6 +10,7 @@ import { execFile } from 'child_process';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { promisify } from 'util';
 import { config } from '../config.js';
+import { collectDiagnostics } from '../kernel/providers/lsp.js';
 
 const execFilePromise = promisify(execFile);
 
@@ -38,8 +39,7 @@ export interface RepairSummary {
 }
 
 /** Parse `eslint --format json` into individual errors (not warnings). */
-export async function collectEslintErrors(repoPath: string): Promise<LintError[]> {
-  let raw = '';
+export async function collectEslintErrors(repoPath: string): Promise<LintError[]> {  let raw = '';
   let exitCode = 0;
   try {
     await execFilePromise('npx', ['--no-install', 'eslint', '.', '--format', 'json'], { cwd: repoPath, timeout: 180000 });
@@ -69,6 +69,30 @@ export async function collectEslintErrors(repoPath: string): Promise<LintError[]
     throw new Error('eslint JSON output could not be parsed; refusing to report "no errors".');
   }
   return targets;
+}
+
+/**
+ * Collect TypeScript compiler errors via the in-process language service.
+ * These are the errors eslint cannot see (wrong types across files,
+ * missing properties, bad assignments). Mapped into LintError with
+ * ruleId `TS<code>` so the repair loop treats them uniformly; the loop
+ * verifies TS targets with the same service instead of eslint counts.
+ */
+export async function collectLspDiagnostics(repoPath: string): Promise<LintError[]> {
+  return collectDiagnostics(repoPath).map(d => ({
+    file: d.file,
+    line: d.line,
+    column: d.character,
+    ruleId: `TS${d.code}`,
+    message: d.message,
+  }));
+}
+
+/** Count type errors in one file via LSP (verification for TS targets). */
+export async function lspFileErrorCount(repoPath: string, relFile: string): Promise<{ count: number; rules: string[] }> {
+  const all = await collectLspDiagnostics(repoPath);
+  const mine = all.filter(e => e.file === relFile);
+  return { count: mine.length, rules: [...new Set(mine.map(e => e.ruleId))] };
 }
 
 /** Count errors in one file (used before/after to prove improvement). Content-keyed cache: identical bytes skip the eslint respawn. */
@@ -385,7 +409,12 @@ export async function repairOneError(
   const ctx = opts.ctx ?? { cloudCalls: 0, maxCloudCalls: config.markRepairMaxCloudCalls };
   if (!ctx.verify) ctx.verify = { eslint: new Map() };
   const verify = ctx.verify;
-  const before = await fileErrorCount(repoPath, target.file, verify.eslint);
+  // TS targets verify against the language service (eslint counts never
+  // move for type errors); everything else keeps the eslint counter.
+  const isTsTarget = /^TS\d+$/.test(target.ruleId);
+  const countErrors = async (file: string): Promise<{ count: number; rules: string[] }> =>
+    isTsTarget ? lspFileErrorCount(repoPath, file) : fileErrorCount(repoPath, file, verify.eslint);
+  const before = await countErrors(target.file);
   // Type baseline once per run, before any writes: the tsc gate later rejects
   // proposals that silence eslint while breaking types. Refreshed below every
   // time a fix is kept, so later errors measure against current truth.
@@ -436,7 +465,7 @@ export async function repairOneError(
       }
     }
     writeFileSync(abs, candidate);
-    const mid = await fileErrorCount(repoPath, target.file, verify.eslint);
+    const mid = await countErrors(target.file);
     if (mid.count < before.count) {
       proposal = candidate;
       break; // verified improvement — keep, stop escalating
@@ -463,7 +492,7 @@ export async function repairOneError(
   }
   // Final recount guards against verifier flakiness between the tier check
   // and this return: only a recount-confirmed drop counts as fixed.
-  const after = await fileErrorCount(repoPath, target.file, verify.eslint);
+  const after = await countErrors(target.file);
   if (after.count < before.count) {
     if (typeof tscNow === 'number') verify.tscBase = tscNow;
     return { target, fixed: true, via, detail: `${target.file}: ${before.count} → ${after.count} errors via ${via}.` };
@@ -552,7 +581,7 @@ async function proposeEdit(
   const window = allLines.slice(lo, hi);
   const numbered = window.map((l, i) => `${lo + i + 1}|${l}`).join('\n');
   const headBlock = lo <= 15 ? '' : `File head (line|code):\n${head.map((l, i) => `${i + 1}|${l}`).join('\n')}\n\n`;
-  const prompt = `File: ${target.file}\nESLint error at line ${target.line}, column ${target.column}: [${target.ruleId}] ${target.message}\n${formatSiblingContext(target, opts.siblings)}\n${headBlock}Repair window (line|code):\n${numbered}`;
+  const prompt = `File: ${target.file}\n${/^TS\d+$/.test(target.ruleId) ? 'TypeScript compiler' : 'ESLint'} error at line ${target.line}, column ${target.column}: [${target.ruleId}] ${target.message}\n${formatSiblingContext(target, opts.siblings)}\n${headBlock}Repair window (line|code):\n${numbered}`;
   const budgetMs = opts.llmTimeoutMs ?? 180000;
   const { content, via } = await chatWithTimeout(
     () => completeRepair(prompt, 300, opts.ctx, { skipLocal: opts.skipLocal }),
@@ -577,14 +606,16 @@ async function proposeEdit(
 }
 
 /**
- * Repair loop over a repo's eslint errors, bounded by maxErrors.
- * Returns a summary; callers decide commit/push from it.
+ * Repair loop over a repo's errors, bounded by maxErrors.
+ * source 'eslint' (default) collects lint errors; 'lsp' collects compiler
+ * type errors eslint cannot see. Returns a summary; callers decide
+ * commit/push from it.
  */
 export async function repairLintErrors(
   repoPath: string,
-  opts: { maxErrors?: number; maxFileLines?: number; maxCloudCalls?: number; onOutcome?: (o: RepairOutcome) => void | Promise<void> } = {},
+  opts: { maxErrors?: number; maxFileLines?: number; maxCloudCalls?: number; source?: 'eslint' | 'lsp'; onOutcome?: (o: RepairOutcome) => void | Promise<void> } = {},
 ): Promise<RepairSummary> {
-  const all = await collectEslintErrors(repoPath);
+  const all = opts.source === 'lsp' ? await collectLspDiagnostics(repoPath) : await collectEslintErrors(repoPath);
   const budget = opts.maxErrors ?? 5;
   // Triage before spending budget: vendored bundles and oversized files are
   // not repairable by this loop (ignores fix and human/windowed repair own

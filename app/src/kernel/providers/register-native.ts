@@ -90,6 +90,11 @@ import {
 } from './email';
 
 import {
+  lspDiscoveryProvider,
+  lspImplementations,
+} from './lsp';
+
+import {
   MARKKernel,
   markKernel,
 } from '../kernel';
@@ -118,6 +123,7 @@ export function registerNativeSystemProvider(
   toolDiscovery.registerProvider(kbDiscoveryProvider);
   toolDiscovery.registerProvider(assistantDiscoveryProvider);
   toolDiscovery.registerProvider(emailDiscoveryProvider);
+  toolDiscovery.registerProvider(lspDiscoveryProvider);
 
   for (const implementation of nativeSystemImplementations) {
     kernel.registerImplementation(implementation);
@@ -180,6 +186,10 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of emailImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of lspImplementations) {
     kernel.registerImplementation(implementation);
   }
 

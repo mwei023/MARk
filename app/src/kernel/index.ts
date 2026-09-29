@@ -176,6 +176,13 @@ export {
   emailDiscoveryProvider,
 } from './providers/email';
 
+export {
+  lspTools,
+  lspImplementations,
+  lspDiscoveryProvider,
+  collectDiagnostics,
+} from './providers/lsp';
+
 export { validateOutput } from './output-contracts';
 export type { OutputValidationResult } from './output-contracts';
 
