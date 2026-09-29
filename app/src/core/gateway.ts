@@ -6,6 +6,7 @@
 import { Event, EventType } from './events';
 import { routeLocally } from '../runtime/router';
 import { SystemAgent } from '../agents/system-agent';
+import { hasProjectWord, findProjectDirs } from './project-index';
 
 /**
  * Classifies intent, not payload: quoted `field: "value"` segments are
@@ -39,11 +40,21 @@ export function isExplicitToolCall(command: string): boolean {
   return /\b(execute|run|call|open|write|commit|push|create|index|search|perceive|draft|compose)\b/i.test(command) &&
     /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident)\.[\w$.-]+/i.test(command);
 }
-export function isContentRequest(command: string): boolean {
-  // None of the specialist agents draft content — they answer status
+export function isContentRequest(command: string): boolean {  // None of the specialist agents draft content — they answer status
   // questions — so these skip agent routing entirely (reasoning still tries
   // the kernel first for explicit file ops).
   return /\b(draft|compose|autobiography|README|homepage|landing page|blog( post)?|poem|essay)\b/i.test(command);
+}
+
+/**
+ * Project reference: explicit project words, or a command mentioning a
+ * known local project directory ("institution OS" vs the operating
+ * system). Used to veto the SystemAgent hijack and as the last agent
+ * branch. Cached scan — cheap on the hot path.
+ */
+export function isProjectReference(command: string): boolean {
+  if (hasProjectWord(command)) return true;
+  return findProjectDirs(command).length > 0;
 }
 
 export type RoutingPath = 'deterministic' | 'agent' | 'reasoning' | 'escalate';
@@ -291,8 +302,11 @@ export class Gateway {
     // read-only SystemAgent, not git-agent (status) or devops-agent.
     // Deterministic local intents (disk/memory/cpu/time) and MARK's own
     // "system status" config answer already returned above; this owns
-    // what they miss. Single source of truth: SystemAgent.isSystemCommand.
-    if (SystemAgent.isSystemCommand(cmd)) {
+    // what they miss. Project references veto the hijack: "institution OS
+    // project" names a checkout, not the operating system (the OS token
+    // matched first, observed live). Single source of truth:
+    // SystemAgent.isSystemCommand; project veto: isProjectReference.
+    if (SystemAgent.isSystemCommand(cmd) && !isProjectReference(cmd)) {
       return {
         path: 'agent',
         agent: 'system-agent',
@@ -368,6 +382,22 @@ export class Gateway {
         needsLLM: false,
         priority: 'normal',
         reasoning: 'Web research operation',
+      };
+    }
+
+    // Project references — last agent branch, after every specialist verb
+    // (so "deploy the project" stays devops). Catches what keywords miss:
+    // "institution OS project", "my portfolio", "check on wakulima".
+    // GitAgent answers with a repo heads-up (status, checks, incidents,
+    // remembered resolutions) or a disambiguation question — never machine
+    // facts about the operating system.
+    if (isProjectReference(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'git-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Project reference: repo heads-up, not machine inspection',
       };
     }
 

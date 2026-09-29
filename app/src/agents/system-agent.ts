@@ -11,6 +11,7 @@ import { promisify } from 'util';
 import { Agent } from '../core/agent-runtime';
 import { Event } from '../core/events';
 import type { CapabilityRegistry } from '../runtime/capabilities/registry';
+import { findProjectDirs } from '../core/project-index';
 
 const execFilePromise = promisify(execFile);
 const PROBE_TIMEOUT = 15000;
@@ -50,6 +51,13 @@ export class SystemAgent extends Agent {
   }
 
   static isSystemCommand(command: string): boolean {
+    // Project references are never machine inspection, even when they
+    // contain OS words ("institution OS project" names a checkout).
+    // Covers explicit project words AND known local directory names, so
+    // AgentRuntime's first-canHandle ordering cannot override the gateway
+    // (which vetoes the same way before routing to git-agent).
+    if (/\b(portfolios?|projects?|repos?|repositories)\b/i.test(command)) return false;
+    if (findProjectDirs(command).length > 0) return false;
     // "what is running?" is anchored separately: a trailing \b after \s*$
     // can never match (golden eval caught it falling through to reasoning).
     if (/what is running\?*\s*$/i.test(command)) return true;

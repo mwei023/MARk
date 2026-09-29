@@ -27,6 +27,7 @@ import { config } from '../config.js';
 import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
 import { interactionStream } from '../core/interaction';
+import { hasProjectWord, findProjectDirs, rankedProjectDirs, spacedMention } from '../core/project-index';
 import { opsObjective } from '../ops/objective';
 import { repairEslintTypescriptSkew } from './dependency-repair';
 import { repairLintErrors } from './code-repair';
@@ -115,11 +116,17 @@ export class GitAgent extends Agent {
   canHandle(event: Event): boolean {
     if (event.type === 'user.command.received') {
       const command = String((event.data as Record<string, any>).command || '');
-      // Matches handleCommand below: git operations AND repo-status
-      // questions (status/heads-up/repo). Kept in sync deliberately —
-      // canHandle gating what handleCommand answers was the exact bug
-      // behind "git-agent not available" on status questions.
-      return /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up|repo\b|repository|repositories)\b/i.test(command);
+      // Matches handleCommand below: git operations, repo-status
+      // questions (status/heads-up/repo), project references
+      // ("institution OS project", "my portfolio"), AND known local
+      // project directories by name ("check on institution OS" — the
+      // gateway routes those here, and the preferred-agent lookup
+      // requires canHandle to agree).
+      // Kept in sync deliberately — canHandle gating what handleCommand
+      // answers was the exact bug behind "git-agent not available" on
+      // status questions.
+      return /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up|repo\b|repository|repositories|project|projects|portfolio)\b/i.test(command) ||
+        findProjectDirs(command).length > 0;
     }
     return [
       'github.workflow.failed',
@@ -133,9 +140,10 @@ export class GitAgent extends Agent {
 
   async handleCommand(event: Event, capabilities: CapabilityRegistry): Promise<string> {
     const command = String((event.data as Record<string, any>).command || '');
-    if (/\b(status|branch|commit)\b/i.test(command)) {
-      // A status-style question names (or implies) a repo: answer it with a
-      // heads-up instead of delegating to a generic capability.
+    if (/\b(status|branch|commit)\b/i.test(command) || hasProjectWord(command) || findProjectDirs(command).length > 0) {
+      // A status-style question OR a project reference names (or implies)
+      // a repo: answer it with a heads-up instead of delegating to a
+      // generic capability.
       const status = await this.answerRepoStatus(command);
       if (status) return status;
       const result = await capabilities.execute(command);
@@ -145,31 +153,93 @@ export class GitAgent extends Agent {
   }
 
   /**
-   * "Heads up on <repo>": resolve (by name, owner/name, discovery scan, or
-   * session memory), then report git state + checks + open incidents +
-   * remembered resolutions. Returns null when no repo can be determined.
+   * "Heads up on <repo>": resolve (by name, owner/name, discovery scan,
+   * local project directories, or session memory), then report git state
+   * + checks + open incidents + remembered resolutions. Local project
+   * dirs that match by name but have no remote get a checkout-level
+   * heads-up without registry writes; multiple matches ask which one.
+   * Returns null when no repo can be determined.
    */
   private async answerRepoStatus(command: string): Promise<string | null> {
+    // Fresh mentions beat stale memory: "my portfolio" after an
+    // institution-OS question must not return institution-IO. Session
+    // memory (lastRepo) is consulted only when the command names nothing.
     const candidates = this.extractRepoRefs(command);
-    const remembered = interactionStream.getContext<string>('lastRepo');
-    if (remembered) candidates.push(remembered);
     let repo = null;
     for (const ref of candidates) {
       repo = repositoryRegistry.resolve(ref);
       if (repo) break;
     }
-    if (!repo) {
-      return 'Which repository? Name it (owner/name or local name) and I will give you a heads-up — e.g. "status of mwei023/wakulima".';
+    if (repo) {
+      interactionStream.setContext('lastRepo', repo.fullName);
+      return this.repoHeadsUp(repo.fullName, repo.localPath);
     }
-    interactionStream.setContext('lastRepo', repo.fullName);
-    const lines = [`Heads-up on ${repo.fullName}${repo.localPath ? ` (${repo.localPath})` : ' (no local checkout)'}.`];
-    if (repo.localPath && existsSync(repo.localPath)) {
-      const log = await this.shellOut('git', ['-C', repo.localPath, 'log', '--oneline', '-3']);
+    // Local project fallback: "institution OS" (~/institution-os) vs the
+    // operating system; "my portfolio" with no git remote. Ranked so an
+    // exact spaced-name mention beats a bare substring ("my portfolio"
+    // picks MyPortfolio over peter-mwei-portfolio).
+    const dirs = rankedProjectDirs(command);
+    const exact = dirs.filter(d => spacedMention(command, d.name));
+    const fuzzy = dirs.filter(d => !spacedMention(command, d.name));
+    // Exact mentions: registry hit wins, else direct local heads-up (an
+    // exact directory mention is strong evidence — never skip it for a
+    // fuzzy remote match).
+    for (const d of exact) {
+      repo = repositoryRegistry.resolve(d.name, d.localPath);
+      if (repo) {
+        interactionStream.setContext('lastRepo', repo.fullName);
+        return this.repoHeadsUp(repo.fullName, repo.localPath);
+      }
+    }
+    const exactProjectish = exact.filter(d => d.projectish);
+    if (exactProjectish.length === 1) {
+      interactionStream.setContext('lastRepo', exactProjectish[0].name);
+      return this.repoHeadsUp(exactProjectish[0].name, exactProjectish[0].localPath);
+    }
+    if (exactProjectish.length > 1) {
+      return `Which project? I found ${exactProjectish.slice(0, 5).map(d => d.name).join(', ')} — name one and I'll give you a heads-up.`;
+    }
+    // Fuzzy mentions: registry resolution only (no guessing at directories).
+    for (const d of fuzzy) {
+      repo = repositoryRegistry.resolve(d.name, d.localPath);
+      if (repo) {
+        interactionStream.setContext('lastRepo', repo.fullName);
+        return this.repoHeadsUp(repo.fullName, repo.localPath);
+      }
+    }
+    const remembered = interactionStream.getContext<string>('lastRepo');
+    if (remembered) {
+      repo = repositoryRegistry.resolve(remembered);
+      if (repo) return this.repoHeadsUp(repo.fullName, repo.localPath);
+      const redirs = rankedProjectDirs(remembered);
+      if (redirs.length === 1 && redirs[0].projectish) {
+        return this.repoHeadsUp(redirs[0].name, redirs[0].localPath);
+      }
+    }
+    const projectish = dirs.filter(d => d.projectish);
+    if (projectish.length === 1) {
+      interactionStream.setContext('lastRepo', projectish[0].name);
+      return this.repoHeadsUp(projectish[0].name, projectish[0].localPath);
+    }
+    if (projectish.length > 1) {
+      return `Which project? I found ${projectish.slice(0, 5).map(d => d.name).join(', ')} — name one and I'll give you a heads-up.`;
+    }
+    if (dirs.length > 0) {
+      return `I found ${dirs.slice(0, 5).map(d => d.name).join(', ')} but none looks like a project checkout — name a repository (owner/name) and I'll give you a heads-up, e.g. "status of mwei023/MARk".`;
+    }
+    return 'Which repository? Name it (owner/name or local name) and I will give you a heads-up — e.g. "status of mwei023/MARk".';
+  }
+
+  /** Heads-up lines for a resolved repo or a raw local checkout directory. */
+  private async repoHeadsUp(fullName: string, localPath?: string): Promise<string> {
+    const lines = [`Heads-up on ${fullName}${localPath ? ` (${localPath})` : ' (no local checkout)'}.`];
+    if (localPath && existsSync(localPath)) {
+      const log = await this.shellOut('git', ['-C', localPath, 'log', '--oneline', '-3']);
       if (log) lines.push(`Recent: ${log.split('\n').join(' | ').slice(0, 220)}`);
-      const status = await this.shellOut('git', ['-C', repo.localPath, 'status', '--porcelain']);
+      const status = await this.shellOut('git', ['-C', localPath, 'status', '--porcelain']);
       lines.push(status === '' ? 'Tree: clean.' : status === null ? 'Tree: unknown.' : `Tree has uncommitted changes: ${status.split('\n').slice(0, 4).join(', ').slice(0, 160)}`);
       try {
-        const pkg = JSON.parse(readFileSync(`${repo.localPath}/package.json`, 'utf8'));
+        const pkg = JSON.parse(readFileSync(`${localPath}/package.json`, 'utf8'));
         const scripts = Object.keys(pkg?.scripts ?? {});
         lines.push(scripts.length > 0 ? `Checks: ${scripts.join(', ')}.` : 'No npm scripts declared.');
       } catch {
@@ -178,13 +248,13 @@ export class GitAgent extends Agent {
     }
     try {
       const open = await incidentStore.getOpenIncidents();
-      const mine = open.filter(i => (i.context as Record<string, unknown>)?.repository === repo.fullName);
+      const mine = open.filter(i => (i.context as Record<string, unknown>)?.repository === fullName);
       lines.push(mine.length > 0 ? `Open incidents: ${mine.length} (${mine.slice(0, 3).map(i => `${i.id} ${i.status}`).join('; ')}).` : 'No open incidents.');
     } catch {
       lines.push('Incident store unreachable.');
     }
     try {
-      const prior = await opsMemory.recall('github.workflow.failed', 'UNKNOWN', repo.fullName);
+      const prior = await opsMemory.recall('github.workflow.failed', 'UNKNOWN', fullName);
       if (prior) lines.push(`Remembered: "${prior.record.resolution.slice(0, 160)}" (${prior.matchReason}).`);
     } catch { /* memory is best-effort here */ }
     return lines.join('\n');

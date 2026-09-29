@@ -191,8 +191,22 @@ export class AgentRuntime {
     }
   }
 
-  /** Route a user command to a specialist and return its user-facing result. */
-  async handleCommand(event: Event, capabilities: CapabilityRegistry): Promise<string | null> {
+  /**
+   * Route a user command to a specialist and return its user-facing result.
+   * When the caller names the gateway-chosen agent, that agent is preferred
+   * (it both claims and handles the command); otherwise the first claiming
+   * agent wins as before. The preference keeps gateway routing authoritative
+   * instead of letting registration order silently override it — observed
+   * live: gateway said git-agent for "institution OS project" while the
+   * runtime handed it to SystemAgent on the "OS" token.
+   */
+  async handleCommand(event: Event, capabilities: CapabilityRegistry, preferredAgent?: string): Promise<string | null> {
+    if (preferredAgent) {
+      const named = this.agents.find(agent => agent.getName() === preferredAgent);
+      if (named && named.canHandle(event) && named.handleCommand) {
+        return named.handleCommand(event, capabilities);
+      }
+    }
     const handler = this.agents.find(agent => agent.canHandle(event));
     if (!handler || !handler.handleCommand) return null;
     return handler.handleCommand(event, capabilities);

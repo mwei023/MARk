@@ -19,19 +19,19 @@ export interface ClassifierDeps {
   minConfidence?: number;
 }
 
-const KNOWN_AGENTS = ['git-agent', 'devops-agent', 'cicd-agent'];
+const KNOWN_AGENTS = ['git-agent', 'devops-agent', 'cicd-agent', 'code-agent', 'web-agent', 'research-agent', 'system-agent'];
 const VALID_PATHS = ['deterministic', 'agent', 'reasoning', 'escalate'];
 
 const CLASSIFIER_SYSTEM = `You route user commands for MARK, a local operations assistant. Reply with EXACTLY one JSON object, no other text:
-{"path": "deterministic|agent|reasoning|escalate", "agent": "git-agent|devops-agent|cicd-agent|null", "priority": "low|normal|high|critical", "reasoning": "short reason", "confidence": 0.0-1.0}
+{"path": "deterministic|agent|reasoning|escalate", "agent": "git-agent|devops-agent|cicd-agent|code-agent|web-agent|research-agent|system-agent|null", "priority": "low|normal|high|critical", "reasoning": "short reason", "confidence": 0.0-1.0}
 
 Routes:
 - deterministic: answerable locally with NO tools and NO agents — current time/date, listing files, disk/memory/cpu snapshots, MARK's own configuration. SHALLOW snapshots only. Any question involving comparison, measurement, ranking, or finding what is biggest/most/eating/filling/using up disk space -> reasoning (a measurement step runs before chat, and chat alone cannot measure). When torn between deterministic and reasoning for a measurement-flavored question, choose reasoning.
-- agent: git/branch/commit -> git-agent; deploy/rollback/restart/docker/container/health -> devops-agent; pipeline/build/test/lint failures -> cicd-agent.
-- reasoning: explanations, general knowledge, chat, greetings, vague goals ("help", "hi i need help"), anything needing thought before action.
-- escalate: empty, dangerous, or incomprehensible requests.
+- agent: git/branch/commit/repo/project/portfolio -> git-agent; deploy/rollback/restart/docker/container/health -> devops-agent; pipeline/build/test/lint failures -> cicd-agent; repair/fix code errors -> code-agent; web lookup/search -> web-agent; deep research -> research-agent; machine inspection (hardware, processes, services, ports) -> system-agent.
+- reasoning: explanations, general knowledge, chat, greetings, vague goals ("help", "hi i need help"), follow-ups needing conversation context (pronouns, fragments), anything needing thought before action.
+- escalate: empty or dangerous requests only.
 
-Be conservative: when torn between acting and chatting, choose reasoning with high confidence. Greetings are always reasoning with confidence >= 0.9.`;
+Be conservative: when torn between acting and chatting, choose reasoning with high confidence. Greetings are always reasoning with confidence >= 0.9. Describe the routing factually and neutrally; never characterize the user or their request.`;
 
 export async function classifyWithLLM(
   command: string,

@@ -1,5 +1,6 @@
 import { ToolDescriptor } from './types';
 import { getLLMProviderCached, LLMProvider, Message } from '../llm';
+import { homedir, tmpdir } from 'node:os';
 
 export interface TaskBinding {
   input: Record<string, unknown>;
@@ -44,6 +45,29 @@ function usageOf(response: { usage?: { promptTokens?: number; completionTokens?:
 }
 
 export interface TaskBinderDependencies {}
+
+/** Path-like field names eligible for well-known location aliases. */
+function isPathLikeField(field: string): boolean {
+  return /^(path|dir|directory|folder|localpath|cwd|workingdirectory)$/i.test(field);
+}
+
+/**
+ * Universal location aliases ("home directory" → $HOME, "~" → $HOME,
+ * "temp directory" → $TMPDIR). Closed list of OS-level conventions —
+ * never project names, never guesses. Returns undefined when the goal
+ * names no well-known location.
+ */
+export function matchLocationAlias(goal: string): string | undefined {
+  if (/\bhome\s+(directory|folder|dir)\b/i.test(goal) ||
+      /\bmy\s+home\b/i.test(goal) ||
+      /(^|[\s'"])~([/\s'"]|$)/.test(goal)) {
+    return homedir();
+  }
+  if (/\b(temp|tmp)\s+(directory|folder|dir)\b/i.test(goal)) {
+    return tmpdir();
+  }
+  return undefined;
+}
 
 export class TaskBinder {
   constructor(
@@ -101,6 +125,17 @@ export class TaskBinder {
         if (value !== undefined) {
           input[field] = value;
           matchedFields.push(field);
+        } else if (isPathLikeField(field)) {
+          // Well-known location aliases ("home directory" → $HOME) for
+          // path-like fields the goal clearly addresses but never states
+          // as `field: value`. Closed universal list — not per-situation
+          // guessing. Observed live: "portfolio in the home directory"
+          // listed the working dir because path stayed unbound.
+          const alias = matchLocationAlias(goal);
+          if (alias !== undefined) {
+            input[field] = alias;
+            matchedFields.push(field);
+          }
         }
       }
     }
@@ -147,8 +182,7 @@ export class TaskBinder {
     };
   }
 
-  private matchesDescription(
-    goal: string,
+  private matchesDescription(    goal: string,
     description: string,
   ): boolean {
     const terms = description

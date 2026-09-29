@@ -233,7 +233,7 @@ export class MarkRuntime {
       // actionable goal to a chat model that can only talk. Specialists keep
       // priority on their own turf — the kernel is the fallback, not a hijack.
       if (decision.path === 'agent' && decision.agent) {
-        const response = await this.agents.handleCommand(event, this.capabilities);
+        const response = await this.agents.handleCommand(event, this.capabilities, decision.agent);
         if (response) {
           result = { response, route: 'agent', eventId: event.id };
           trace.push(`agent → ${decision.agent} handled the command`);
