@@ -3,7 +3,7 @@
  * No DB, no LLM, no filesystem.
  */
 import { describe, it, expect } from 'vitest';
-import { InteractionStream, redactSecrets } from './interaction.js';
+import { InteractionStream, redactSecrets, runInInteractionSession } from './interaction.js';
 
 describe('redactSecrets', () => {
   it('redacts Groq keys', () => {
@@ -33,6 +33,36 @@ describe('redactSecrets', () => {
 });
 
 describe('InteractionStream', () => {
+  it('keeps events and context isolated by session', () => {
+    const s = new InteractionStream();
+    s.append('message', 'alice', 'alice command', undefined, 'alice');
+    s.append('message', 'bob', 'bob command', undefined, 'bob');
+    s.setContext('lastRepo', 'alice/repo', 'alice');
+    s.setContext('lastRepo', 'bob/repo', 'bob');
+
+    expect(s.list('alice').map(e => e.text)).toEqual(['alice command']);
+    expect(s.list('bob').map(e => e.text)).toEqual(['bob command']);
+    expect(s.getContext('lastRepo', 'alice')).toBe('alice/repo');
+    expect(s.getContext('lastRepo', 'bob')).toBe('bob/repo');
+  });
+
+  it('preserves session isolation across concurrent async commands', async () => {
+    const s = new InteractionStream();
+    await Promise.all([
+      runInInteractionSession('alice', async () => {
+        await new Promise(resolve => setTimeout(resolve, 5));
+        s.append('message', 'alice', 'async alice');
+      }),
+      runInInteractionSession('bob', async () => {
+        await new Promise(resolve => setTimeout(resolve, 1));
+        s.append('message', 'bob', 'async bob');
+      }),
+    ]);
+
+    expect(s.list('alice').map(e => e.text)).toEqual(['async alice']);
+    expect(s.list('bob').map(e => e.text)).toEqual(['async bob']);
+  });
+
   it('appends and lists in order', () => {
     const s = new InteractionStream();
     s.append('message', 'mwei', 'check git status');

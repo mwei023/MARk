@@ -199,6 +199,9 @@ export class MARKKernelBridge {
   ): Promise<{ record: ConfirmationRecord; result: ActionResult } | undefined> {
     const record = this.kernel.resolveConfirmation(confirmationId, true);
     if (!record) return undefined;
+    // Persist the decision before resuming the action. A crash during the
+    // resumed execution must not leave the durable record looking pending.
+    await confirmationManager.flush();
     const action: ActionRequest = {
       id: record.actionId,
       toolId: record.toolId,

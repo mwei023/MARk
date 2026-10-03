@@ -5,8 +5,9 @@
  * offline guarantee — filing without a database returns null incident ids
  * instead of throwing, so research findings are never lost silently.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { assessUsefulness, fileProblemStatements } from './self-improve.js';
+import { incidentStore } from '../core/incident.js';
 
 describe('assessUsefulness', () => {
   it('rejects empty input with a reason', () => {
@@ -40,9 +41,14 @@ describe('assessUsefulness', () => {
 
 describe('fileProblemStatements (no DB)', () => {
   it('never throws offline — returns null incident ids', async () => {
+    // Dotenv may provide DATABASE_URL in the test process. Simulate the
+    // actual offline boundary directly instead of depending on ambient env.
+    const findOrCreate = vi.spyOn(incidentStore, 'findOrCreateIncident')
+      .mockRejectedValueOnce(new Error('DATABASE_URL not set'));
     const receipts = await fileProblemStatements('vector databases', 'summary', [
       { title: 'Gap', area: 'web-research', gap: 'Cannot render JS.', evidenceUrls: [], suggestedFix: 'Add headless read.', confidence: 0.7 },
     ]);
+    findOrCreate.mockRestore();
     expect(receipts).toHaveLength(1);
     // DATABASE_URL is unset in unit tests → store unreachable → null, no throw.
     expect(receipts[0].incidentId).toBeNull();

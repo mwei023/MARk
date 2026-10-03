@@ -18,7 +18,6 @@
  */
 
 import express from 'express';
-import * as dotenv from 'dotenv';
 import { incidentStore } from '../core/incident';
 import { agentRuntime } from '../core/agent-runtime';
 import { GitHubWebhookHandler } from '../webhooks/github';
@@ -35,16 +34,13 @@ import { repoBaseline } from '../core/repo-baseline';
 import { repositoryRegistry } from '../repositories/registry';
 import { opsObjective } from '../ops/objective';
 import { buildOpsSnapshot } from './ops-snapshot';
+import { registerObservabilityRoutes } from './observability';
+import { resolveApiSecurity } from './security';
+import { confirmationManager } from '../kernel/confirmations';
 
-// Load env: repo-root .env first (LLM keys), then app/.env fills gaps.
+// Env files are loaded centrally in config.ts (before it snapshots
+// process.env) — no per-entry dotenv calls needed here.
 import * as path from 'path';
-for (const candidate of [
-  path.join(__dirname, '../../../.env'),
-  path.join(process.cwd(), '../.env'),
-  path.join(process.cwd(), '.env'),
-]) {
-  dotenv.config({ path: candidate });
-}
 
 const app = express();
 app.use(express.json({
@@ -89,6 +85,13 @@ const dockerHandler = new DockerWebhookHandler(eventBus);
 app.post('/webhooks/docker', dockerHandler.handler());
 const edgeHandler = new EdgeWebhookHandler(eventBus);
 app.post('/webhooks/edge', edgeHandler.handler());
+
+// Static observability clients (Control Room + Playground share one stream).
+// Served from app/mark-os-site so the UI ships with the API it observes.
+app.use('/ui', express.static(path.join(__dirname, '../../mark-os-site')));
+
+// Real-time observability: live event stream + interaction/kernel snapshots.
+registerObservabilityRoutes(app);
 
 // ─────────────────────────────────────────────────────────────
 // API Endpoints
@@ -174,6 +177,7 @@ app.get('/api/incidents/:id', async (req: any, res: any) => {
  */
 app.post('/api/approve', async (req: any, res: any) => {
   try {
+    await proposalStore.loadFromDatabase();
     // `always: true` also records "allow this tool always"; `scope: "root"`
     // records "allow this tool in this project root" — one-click standing
     // grants instead of approve-then-trust as two steps.
@@ -287,6 +291,8 @@ app.post('/api/approve', async (req: any, res: any) => {
       result.message = result.message ?? `Incident ${incidentId} ${approved ? 'approved' : 'denied'}`;
     }
 
+    await proposalStore.flush();
+    await confirmationManager.flush();
     res.json(result);
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -297,7 +303,8 @@ app.post('/api/approve', async (req: any, res: any) => {
  * GET /api/proposals — List pending proposals (optionally filtered by incidentId).
  * Query: ?incidentId=INC-xxx
  */
-app.get('/api/proposals', (req: any, res: any) => {
+app.get('/api/proposals', async (req: any, res: any) => {
+  await proposalStore.loadFromDatabase();
   const { incidentId } = req.query as { incidentId?: string };
   const proposals = incidentId
     ? proposalStore.listByIncident(incidentId)
@@ -311,6 +318,10 @@ app.get('/api/proposals', (req: any, res: any) => {
 app.post('/api/command', async (req: any, res: any) => {
   try {
     const { command, userId = 'unknown', source = 'api' } = req.body;
+    // Existing local UIs omit a session id and share the deliberate
+    // single-user default. Multi-session clients must provide one explicitly
+    // in the body or X-Mark-Session-Id header.
+    const sessionId = String(req.body?.sessionId ?? req.headers?.['x-mark-session-id'] ?? 'default').slice(0, 128);
 
     if (!command) {
       return res.status(400).json({
@@ -319,7 +330,7 @@ app.post('/api/command', async (req: any, res: any) => {
       });
     }
 
-    const result = await markRuntime.executeCommand(command, userId, source === 'voice' || source === 'cli' ? source : 'api');
+    const result = await markRuntime.executeCommand(command, userId, source === 'voice' || source === 'cli' ? source : 'api', { sessionId });
 
     res.json({
       success: true,
@@ -345,6 +356,7 @@ app.post('/api/command', async (req: any, res: any) => {
 app.post('/api/command/stream', async (req: any, res: any) => {
   try {
     const { command, userId = 'unknown', source = 'api' } = req.body;
+    const sessionId = String(req.body?.sessionId ?? req.headers?.['x-mark-session-id'] ?? 'default').slice(0, 128);
 
     if (!command) {
       return res.status(400).json({
@@ -368,7 +380,7 @@ app.post('/api/command/stream', async (req: any, res: any) => {
         command,
         userId,
         source === 'voice' || source === 'cli' ? source : 'api',
-        { onToken: (token) => send({ token }) },
+        { sessionId, onToken: (token) => send({ token }) },
       );
       send({ done: true, success: true, response: result.response, route: result.route, eventId: result.eventId });
     } catch (error: any) {
@@ -559,6 +571,22 @@ app.get('/api/status', async (req: any, res: any) => {
 // Start Server
 // ─────────────────────────────────────────────────────────────
 const PORT = process.env.API_PORT || 3001;
+// Security boundary (see api/security.ts): loopback bind by default,
+// fail fast on an open API in production.
+const apiSecurity = resolveApiSecurity({
+  nodeEnv: config.nodeEnv,
+  apiToken: config.apiToken,
+  bindHost: config.apiBindHost,
+  allowUnauthenticatedApi: config.allowUnauthenticatedApi,
+  githubWebhookSecret: config.githubWebhookSecret,
+});
+for (const warning of apiSecurity.warnings) {
+  console.warn(warning);
+}
+if (apiSecurity.fatal) {
+  console.error(apiSecurity.fatal);
+  process.exit(1);
+}
 if (!config.databaseUrl) {
   console.warn(
     '[MARK] WARNING: DATABASE_URL is not set — incidents, memory, baselines, and confirmations ' +
@@ -569,13 +597,15 @@ if (!config.databaseUrl) {
 if (config.markTestMode) {
   console.warn('[MARK] WARNING: MARK_TEST_MODE is on — jail bypassed, confirmations auto-approved. Testing only.');
 }
-app.listen(PORT, '0.0.0.0', () => {
+app.listen(PORT, apiSecurity.bindHost, () => {
+  void proposalStore.loadFromDatabase();
+  void markRuntime.initializeKernel();
   console.log(`
     ╔═══════════════════════════════════════╗
     ║    🤖 MARK v0.2 Autonomous Operations ║
     ║           API Server Started          ║
     ╠═══════════════════════════════════════╣
-    ║  Port: ${PORT}                          ║
+    ║  Bind: ${apiSecurity.bindHost}:${PORT}${apiSecurity.authMode === 'open' ? ' (OPEN API — localhost only)' : ' (token auth)'}  ║
     ║  Event Bus: Active                    ║
     ║  Agents: Ready                         ║
     ╚═══════════════════════════════════════╝

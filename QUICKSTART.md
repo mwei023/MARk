@@ -22,7 +22,7 @@ npm install
 
 ```bash
 # .env needs DATABASE_URL (see .env.example). Then:
-npm run db:migrate   # numbered migrations 001-010, tracked in _migrations
+npm run db:migrate   # numbered migrations 001-011, tracked in _migrations
 ```
 
 ## Step 3 — Boot (~5 s)
@@ -89,7 +89,7 @@ tail -1 app/audit.log | jq '{level, incidentId, title, severity}'
 
 ## Verification checklist
 
-- [ ] `db:migrate` applies cleanly (001-010)
+- [ ] `db:migrate` applies cleanly (001-011)
 - [ ] Webhook returns `{"status":"received"}`
 - [ ] One incident appears with git-agent findings + ≥1 action
 - [ ] `audit.log` gains an `ESCALATION` JSON line

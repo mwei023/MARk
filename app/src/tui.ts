@@ -1,16 +1,6 @@
 // src/tui.ts - Dependency-free MARK TUI (ANSI + raw-mode keys, no deps).
 // Views: 1 run · 2 plan · 3 approvals · 4 incidents. npm run tui
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-
-for (const candidate of [
-  path.join(__dirname, '../../.env'),
-  path.join(process.cwd(), '../.env'),
-  path.join(process.cwd(), '.env'),
-]) {
-  dotenv.config({ path: candidate });
-}
-
+// Env files are loaded centrally in config.ts (before it snapshots process.env).
 import { markRuntime } from './core/mark-runtime';
 import { likeMeLoop } from './core/like-me-loop';
 import { interactionStream } from './core/interaction';

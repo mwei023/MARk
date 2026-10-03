@@ -104,12 +104,29 @@ export function findProjectDirs(command: string, projectishOnly = true): Project
 }
 
 /**
- * Ranked project matches: a literal spaced-name mention ("my portfolio"
- * for MyPortfolio) outranks a bare normalized substring ("portfolio" also
- * matching peter-mwei-portfolio). Returns best first for disambiguation.
+ * Ranked project matches by mention strength:
+ *   2 = spaced exact ("my portfolio" for MyPortfolio),
+ *   1 = normalized directory name inside the command,
+ *   0 = a long command word inside the directory name ("portfolio" for
+ *       MyPortfolio — weak, but enough to keep context flowing when the
+ *       user says "the portfolio" without its full name).
+ * Scans the directory list directly (NOT via findProjectDirs) so the
+ * weak tier can fire. Ties break toward project-ish directories.
  */
-export function rankedProjectDirs(command: string): ProjectDir[] {
-  const scored = findProjectDirs(command, false).map(d => ({ d, score: spacedMention(command, d.name) ? 2 : 1 }));
+export function rankedProjectDirs(command: string, minScore = 0): ProjectDir[] {
+  const norm = normalizeProjectName(command);
+  const cmdWords = command.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 5);
+  if (norm.length < 3 && !hasProjectWord(command)) return [];
+  const scored: Array<{ d: ProjectDir; score: number }> = [];
+  for (const d of listProjectDirs()) {
+    const dirNorm = normalizeProjectName(d.name);
+    if (dirNorm.length < 3) continue;
+    let score = -1;
+    if (spacedMention(command, d.name)) score = 2;
+    else if (norm.includes(dirNorm)) score = 1;
+    else if (cmdWords.some(w => dirNorm.includes(w))) score = 0;
+    if (score >= Math.max(0, minScore)) scored.push({ d, score });
+  }
   scored.sort((a, b) => b.score - a.score || Number(b.d.projectish) - Number(a.d.projectish));
   return scored.map(s => s.d);
 }

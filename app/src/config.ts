@@ -8,6 +8,27 @@
  * Import: import { config } from '../config.js';
  */
 import os from 'os';
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+
+/**
+ * Load .env files BEFORE snapshotting process.env below.
+ *
+ * Previously each entry point (server-v2, repl, cli, tui) called
+ * dotenv.config() in its module body — but static imports hoist, so this
+ * config module always evaluated first and snapshotted empty env (the
+ * false "DATABASE_URL is not set" warning on a healthy boot). Loading here
+ * fixes every entry point at once. dotenv never overrides already-set
+ * vars, so shell exports always win; missing files are silently skipped.
+ * Cwd-relative (no __dirname) so this also works under vitest.
+ */
+for (const candidate of [
+  path.join(process.cwd(), '../.env'), // repo root when cwd is app/
+  path.join(process.cwd(), '.env'),
+  path.join(process.cwd(), 'app/.env'), // app dir when cwd is repo root
+]) {
+  dotenv.config({ path: candidate });
+}
 
 function homeDir(): string {
   try {
@@ -31,6 +52,18 @@ export interface AppConfig {
   apiPort: number;
   /** Bearer token required for API requests. Leave unset to disable auth. */
   apiToken: string | undefined;
+  /**
+   * Host the API binds. Default: 127.0.0.1 (localhost-only).
+   * Set API_BIND_HOST=0.0.0.0 explicitly to expose it — only on trusted networks.
+   */
+  apiBindHost: string;
+  /**
+   * Explicit opt-out of the production auth requirement. Never the default.
+   * Only honoured with NODE_ENV=production + no API_TOKEN.
+   */
+  allowUnauthenticatedApi: boolean;
+  /** Process environment name (development | production | test). */
+  nodeEnv: string;
   /** Shared secret for verifying GitHub webhook payloads. */
   githubWebhookSecret: string | undefined;
 
@@ -133,6 +166,9 @@ export const config: AppConfig = {
   // API
   apiPort: readInt(process.env.API_PORT, 3000),
   apiToken: process.env.API_TOKEN,
+  apiBindHost: process.env.API_BIND_HOST ?? process.env.HOST ?? '127.0.0.1',
+  allowUnauthenticatedApi: readBool(process.env.MARK_ALLOW_UNAUTHENTICATED_API, false),
+  nodeEnv: process.env.NODE_ENV ?? 'development',
   githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET,
 
   // LLM

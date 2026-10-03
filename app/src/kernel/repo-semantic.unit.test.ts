@@ -1,8 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   repoSemanticTools,
   repoSemanticImplementations,
 } from '../kernel/providers/repo-semantic.js';
+
+// Keep this unit suite offline and deterministic. Vector search is covered by
+// the integration path; this file exercises the keyword fallback contract.
+vi.mock('../code/indexer.js', () => ({
+  searchCode: vi.fn().mockResolvedValue([]),
+}));
 
 const REPO = '/home/mwei/jarvis-core/app';
 

@@ -14,6 +14,7 @@ export type EventHandler = (event: Event) => Promise<void> | void;
  */
 export class EventBus extends EventEmitter {
   private handlers: Map<EventType, Set<EventHandler>> = new Map();
+  private allHandlers: Set<EventHandler> = new Set();
   private eventHistory: Event[] = [];
   private maxHistorySize = 10000;
 
@@ -47,8 +48,8 @@ export class EventBus extends EventEmitter {
    * Subscribe to all events (wildcard)
    */
   subscribeAll(handler: EventHandler): () => void {
-    this.on('*', handler as any);
-    return () => this.removeListener('*', handler as any);
+    this.allHandlers.add(handler);
+    return () => this.allHandlers.delete(handler);
   }
 
   /**
@@ -70,7 +71,20 @@ export class EventBus extends EventEmitter {
       this.eventHistory.shift();
     }
 
-    super.emit('*', event);
+    // Wildcard subscribers include MARK's operational dispatcher. They are
+    // part of event delivery, not merely observers, so publish must await
+    // them before a webhook or command caller is told the event completed.
+    const wildcardPromises: Promise<void>[] = [];
+    for (const handler of this.allHandlers) {
+      try {
+        wildcardPromises.push(Promise.resolve(handler(event)));
+      } catch (error) {
+        console.error(`[EventBus] Error in wildcard handler for ${event.type}:`, error);
+      }
+    }
+    await Promise.all(wildcardPromises.map(p => p.catch(error => {
+      console.error(`[EventBus] Error in wildcard handler for ${event.type}:`, error);
+    })));
 
     // Notify type-specific subscribers
     const handlers = this.handlers.get(event.type);
@@ -78,10 +92,7 @@ export class EventBus extends EventEmitter {
       const promises: Promise<void>[] = [];
       for (const handler of handlers) {
         try {
-          const result = handler(event);
-          if (result instanceof Promise) {
-            promises.push(result);
-          }
+          promises.push(Promise.resolve(handler(event)));
         } catch (error) {
           console.error(`[EventBus] Error in handler for ${event.type}:`, error);
         }

@@ -284,6 +284,10 @@ export class DevOpsAgent extends Agent {
    * Route a proposal to dry_run, auto-execute, or leave pending for human approval.
    */
   private async executeOrQueueProposal(proposal: ActionProposal, incidentId: string): Promise<void> {
+    // Do not publish a pending/auto-executed decision before the proposal
+    // itself is durable. This closes the crash window between create() and
+    // the incident state transition.
+    await proposalStore.flush();
     if (isDryRun()) {
       const wouldHave = `${proposal.action} (tool: ${proposal.tool}, input: ${JSON.stringify(proposal.input)})`;
       proposalStore.markDryRun(proposal.id, wouldHave);

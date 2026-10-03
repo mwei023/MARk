@@ -28,7 +28,7 @@ import { CodeAgent } from '../agents/code-agent';
 import { ScreenAgent } from '../agents/screen-agent';
 import { WebAgent } from '../agents/web-agent';
 import { ResearchAgent } from '../agents/research-agent';
-import { interactionStream } from './interaction';
+import { currentInteractionSession, interactionStream, runInInteractionSession } from './interaction';
 import {
   MARKKernelBridge,
   markKernelBridge,
@@ -66,6 +66,12 @@ export interface CommandResult {
   eventId: string;
   /** Step-by-step account of what MARK did with the command. */
   trace?: string[];
+}
+
+export interface ExecuteCommandOptions {
+  onToken?: (token: string) => void;
+  /** Conversation/session boundary; never inferred from process-global state. */
+  sessionId?: string;
 }
 
 /** Canonical reasoning: plain LLM chat with deterministic memory retrieval. */
@@ -137,7 +143,13 @@ export class MarkRuntime {
   }
 
   /** The single application command path for every MARK interface. */
-  async executeCommand(command: string, userId = config.defaultUser, source: 'api' | 'voice' | 'cli' = 'api', opts: { onToken?: (token: string) => void } = {}): Promise<CommandResult> {
+  async executeCommand(command: string, userId = config.defaultUser, source: 'api' | 'voice' | 'cli' = 'api', opts: ExecuteCommandOptions = {}): Promise<CommandResult> {
+    const sessionId = opts.sessionId?.trim() || `user:${userId}`;
+    return runInInteractionSession(sessionId, () =>
+      this.executeCommandInSession(command, userId, source, opts));
+  }
+
+  private async executeCommandInSession(command: string, userId = config.defaultUser, source: 'api' | 'voice' | 'cli' = 'api', opts: ExecuteCommandOptions = {}): Promise<CommandResult> {
     const event: Event = {
       id: `CMD-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       timestamp: new Date(),
@@ -145,7 +157,7 @@ export class MarkRuntime {
       type: 'user.command.received',
       severity: 'info',
       correlationId: userId,
-      data: { userId, command, source },
+      data: { userId, command, source, sessionId: currentInteractionSession() },
     } as Event;
 
     // The event is emitted before handling, so observers see every command.

@@ -23,6 +23,30 @@ psql mark_db < Scripts/schema-v2.sql
 npm run dev            # POST /webhooks/github, GET /api/incidents, POST /api/command, POST /api/approve
 ```
 
+The UI ships with the API: `http://localhost:3001/ui/control-room.html` (Control Room),
+`http://localhost:3001/ui/playground.html` (Playground).
+
+API command clients may send `sessionId` in the JSON body or an
+`X-Mark-Session-Id` header. Interaction traces and lightweight context are
+isolated by session; omit it only for single-user local use.
+
+## Security boundary (localhost-first)
+
+The API can trigger real agent actions (approvals, kernel tool execution), so the
+default posture is closed:
+
+- **Bind:** `127.0.0.1` unless `API_BIND_HOST` is set explicitly. Binding `0.0.0.0`
+  logs a loud warning — only do it on a trusted network (firewall/VPN).
+- **Auth:** set `API_TOKEN` to require `Bearer`/ `x-api-token` on `/api/*`. With
+  `NODE_ENV=production` and no token, the server **refuses to start**; the only
+  override is the explicit `MARK_ALLOW_UNAUTHENTICATED_API=true` escape hatch.
+- **Webhooks:** set `GITHUB_WEBHOOK_SECRET` to require HMAC signatures; without it,
+  unsigned events are accepted (local default) with a warning.
+
+This box is safe on loopback with secrets set. It is not hardened for the open
+internet (no TLS/rate-limiting in the app) — terminate TLS and filter traffic in
+front of it if you expose it. Source of truth: `app/src/api/security.ts`.
+
 ## Verify
 
 ```bash

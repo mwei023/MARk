@@ -140,6 +140,14 @@ export class GitAgent extends Agent {
 
   async handleCommand(event: Event, capabilities: CapabilityRegistry): Promise<string> {
     const command = String((event.data as Record<string, any>).command || '');
+    if (/\bcommit\b/i.test(command) && /\bpush\b/i.test(command)) {
+      // Explicit "commit ... and push ..." order: stage the working tree,
+      // commit it, and push the current branch to origin. The status branch
+      // below also matches the word "commit" but is read-only — without
+      // this branch a commit order can only ever get a heads-up (observed
+      // live: "commit and push" answered with git log + status, 0 commits).
+      return this.commitAndPush(command);
+    }
     if (/\b(status|branch|commit)\b/i.test(command) || hasProjectWord(command) || findProjectDirs(command).length > 0) {
       // A status-style question OR a project reference names (or implies)
       // a repo: answer it with a heads-up instead of delegating to a
@@ -178,7 +186,9 @@ export class GitAgent extends Agent {
     // operating system; "my portfolio" with no git remote. Ranked so an
     // exact spaced-name mention beats a bare substring ("my portfolio"
     // picks MyPortfolio over peter-mwei-portfolio).
-    const dirs = rankedProjectDirs(command);
+    // Score >= 1 only: bare-word hints (score 0) are for context
+    // scanning, not for answering about a repo unasked.
+    const dirs = rankedProjectDirs(command, 1);
     const exact = dirs.filter(d => spacedMention(command, d.name));
     const fuzzy = dirs.filter(d => !spacedMention(command, d.name));
     // Exact mentions: registry hit wins, else direct local heads-up (an
@@ -284,6 +294,91 @@ export class GitAgent extends Agent {
       return stdout.trim();
     } catch {
       return null;
+    }
+  }
+
+  /** Throwing git runner: callers report stderr honestly instead of guessing. */
+  private async execGit(repoPath: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+    try {
+      const { stdout, stderr } = await execFilePromise('git', ['-C', repoPath, ...args], { timeout: 120000 });
+      return { stdout: String(stdout ?? '').trim(), stderr: String(stderr ?? '').trim() };
+    } catch (err) {
+      const e = err as { stdout?: unknown; stderr?: unknown; message?: string };
+      throw new Error(
+        String(e.stderr ?? e.stdout ?? e.message ?? 'git command failed').trim().slice(0, 400) ||
+          'git command failed',
+      );
+    }
+  }
+
+  /** Commit message from `-m "msg"` / `message "msg"`; null = caller uses the default. */
+  static extractCommitMessage(command: string): string | null {
+    const m = command.match(/(?:-m|message)\s+["']([^"']{1,200})["']/i);
+    const msg = m?.[1]?.trim();
+    return msg ? msg : null;
+  }
+
+  /**
+   * "Commit ... and push ..." order: stage the whole working tree, commit,
+   * push the current branch to origin. Explicit orders only — the caller
+   * (handleCommand) already verified both verbs are present, and the repo
+   * must be named explicitly (absolute path or owner/name); lastRepo memory
+   * is deliberately NOT consulted, so a stale context can never commit the
+   * wrong checkout. DRY_RUN reports the plan without mutating.
+   */
+  private async commitAndPush(command: string): Promise<string> {
+    const candidates = this.extractRepoRefs(command);
+    let repo = null;
+    for (const ref of candidates) {
+      repo = repositoryRegistry.resolve(ref);
+      if (repo) break;
+    }
+    let localPath = repo?.localPath;
+    const fullName = repo?.fullName;
+    if (!localPath) {
+      const abs = command.match(/(\/(?:tmp|home)\/[^\s"'`]+)/)?.[1]?.replace(/[.,;:]+$/, '');
+      if (abs && existsSync(abs)) localPath = abs;
+    }
+    if (!localPath) {
+      return 'Which repository? Name it (owner/name or absolute path) and I will commit and push — e.g. "commit and push mwei023/MARk".';
+    }
+    const label = fullName ?? localPath;
+    if (!(await this.shellOut('git', ['-C', localPath, 'rev-parse', '--git-dir']))) {
+      return `Not a git checkout: ${localPath}. Nothing committed, nothing pushed.`;
+    }
+    const status = await this.shellOut('git', ['-C', localPath, 'status', '--porcelain']);
+    if (status === null) return `Could not read git status for ${label}. Nothing committed, nothing pushed.`;
+    if (status === '') return `Tree clean on ${label} — nothing to commit, nothing pushed.`;
+    const files = status.split('\n').filter(Boolean).length;
+    if (config.markDryRun) {
+      return [
+        `DRY RUN on ${label} — would have: staged ${files} changed file(s) (git add -A), committed, and pushed the current branch to origin.`,
+        'Nothing committed, nothing pushed.',
+      ].join('\n');
+    }
+    try {
+      await this.execGit(localPath, ['add', '-A']);
+    } catch (err) {
+      return `Staging failed on ${label}: ${err instanceof Error ? err.message : String(err)}. Nothing committed, nothing pushed.`;
+    }
+    const message = GitAgent.extractCommitMessage(command) ?? 'mark: commit working tree';
+    try {
+      await this.execGit(localPath, ['commit', '-m', message]);
+    } catch (err) {
+      return `Commit failed on ${label}: ${err instanceof Error ? err.message : String(err)}. Nothing pushed.`;
+    }
+    const hash = (await this.shellOut('git', ['-C', localPath, 'rev-parse', '--short', 'HEAD'])) ?? 'unknown';
+    const branch = await this.shellOut('git', ['-C', localPath, 'branch', '--show-current']);
+    if (!branch) {
+      return `Committed ${hash} on ${label} ("${message}"), but HEAD is detached — not pushing a detached HEAD.`;
+    }
+    try {
+      const pushed = await this.execGit(localPath, ['push', '-u', 'origin', branch]);
+      const detail = [pushed.stdout, pushed.stderr].filter(Boolean).join(' ').slice(0, 200);
+      console.log(`[GitAgent] commit+push on ${label}: committed ${hash}, pushed ${branch}`);
+      return `Committed ${hash} on ${label} ("${message}", ${files} file(s)) and pushed ${branch} to origin.${detail ? ` ${detail}` : ''}`;
+    } catch (err) {
+      return `Committed ${hash} on ${label} ("${message}"), but push failed: ${err instanceof Error ? err.message : String(err)}. Fix the remote and push ${branch} yourself.`;
     }
   }
 

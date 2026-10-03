@@ -32,6 +32,7 @@ export interface ConfirmationRecord {
 export class ConfirmationManager {
   private readonly records = new Map<KernelId, ConfirmationRecord>();
   private loadedFromDb = false;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly trust: TrustStore = trustStore) {}
 
@@ -48,7 +49,7 @@ export class ConfirmationManager {
     };
     if (scopePath) record.scopePath = scopePath;
     this.records.set(record.id, record);
-    void this.persistRecord(record);
+    this.enqueue(() => this.persistRecord(record));
     return record;
   }
 
@@ -58,8 +59,13 @@ export class ConfirmationManager {
     record.status = approved ? 'approved' : 'denied';
     record.decidedAt = new Date().toISOString();
     if (!approved) this.trust.recordApprovalResolved(record.toolId, false);
-    void this.persistDecision(record);
+    this.enqueue(() => this.persistDecision(record));
     return record;
+  }
+
+  /** Wait until queued confirmation writes have settled. */
+  async flush(): Promise<void> {
+    await this.writeQueue;
   }
 
   get(confirmationId: KernelId): ConfirmationRecord | undefined {
@@ -104,6 +110,7 @@ export class ConfirmationManager {
 
   /** Best-effort load of pending confirmations (never throws). */
   async loadFromDatabase(limit = 100): Promise<number> {
+    await this.flush();
     if (this.loadedFromDb) return this.listPending().length;
     try {
       /* getPool via static import */
@@ -157,6 +164,10 @@ export class ConfirmationManager {
     } catch {
       // Best-effort only.
     }
+  }
+
+  private enqueue(task: () => Promise<void>): void {
+    this.writeQueue = this.writeQueue.then(task, task);
   }
 }
 

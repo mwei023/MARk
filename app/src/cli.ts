@@ -1,16 +1,6 @@
 // src/cli.ts - Non-interactive MARK CLI for scripting and real actions.
 // Usage: npm run cli -- run "restart jarvis-db" | plan "goal" | approve <id> ...
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-
-for (const candidate of [
-  path.join(__dirname, '../../.env'),
-  path.join(process.cwd(), '../.env'),
-  path.join(process.cwd(), '.env'),
-]) {
-  dotenv.config({ path: candidate });
-}
-
+// Env files are loaded centrally in config.ts (before it snapshots process.env).
 import { markRuntime } from './core/mark-runtime';
 import { likeMeLoop, LikeMeMode } from './core/like-me-loop';
 import { incidentStore } from './core/incident';

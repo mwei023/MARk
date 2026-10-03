@@ -1,17 +1,5 @@
 // src/repl.ts - Interactive MARK REPL (Phase 1: CommonJS + like-me commands)
-import * as dotenv from 'dotenv';
-import * as path from 'path';
-
-// Load env: repo-root .env first (LLM keys), then app/.env fills gaps.
-// dotenv never overrides already-set vars, so shell exports always win.
-for (const candidate of [
-  path.join(__dirname, '../../.env'),
-  path.join(process.cwd(), '../.env'),
-  path.join(process.cwd(), '.env'),
-]) {
-  dotenv.config({ path: candidate });
-}
-
+// Env files are loaded centrally in config.ts (before it snapshots process.env).
 import { markRuntime } from './core/mark-runtime';
 import { likeMeLoop } from './core/like-me-loop';
 import { interactionStream } from './core/interaction';

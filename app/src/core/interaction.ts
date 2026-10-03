@@ -11,6 +11,8 @@
  * thinking text enters the stream — no toggle bypasses it.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 export type InteractionEventKind = 'message' | 'approval' | 'trace' | 'receipt' | 'thinking';
 
 export interface ThinkingPayload {
@@ -31,6 +33,7 @@ export interface ApprovalPayload {
 
 export interface InteractionEvent {
   id: string;
+  sessionId: string;
   at: string;
   kind: InteractionEventKind;
   /** Who produced it: user id, agent name, or subsystem. */
@@ -77,35 +80,64 @@ export interface InteractionStreamOptions {
   thinkingOn?: boolean;
 }
 
+interface SessionState {
+  events: InteractionEvent[];
+  thinkingOn: boolean;
+  context: Record<string, unknown>;
+}
+
+const DEFAULT_SESSION_ID = 'default';
+const interactionSession = new AsyncLocalStorage<string>();
+
+export function currentInteractionSession(): string {
+  return interactionSession.getStore() ?? DEFAULT_SESSION_ID;
+}
+
+export function runInInteractionSession<T>(sessionId: string, fn: () => T): T {
+  const normalized = sessionId.trim() || DEFAULT_SESSION_ID;
+  return interactionSession.run(normalized, fn);
+}
+
 export class InteractionStream {
-  private events: InteractionEvent[] = [];
-  private thinkingOn: boolean;
-  /** Lightweight session memory: last repo, last incident, etc. Transports and agents share it. */
-  private context: Record<string, unknown> = {};
+  private sessions = new Map<string, SessionState>();
 
-  constructor(private readonly opts: InteractionStreamOptions = {}) {
-    this.thinkingOn = opts.thinkingOn ?? false;
+  constructor(private readonly opts: InteractionStreamOptions = {}) {}
+
+  private state(sessionId?: string): SessionState {
+    const id = sessionId?.trim() || currentInteractionSession();
+    let state = this.sessions.get(id);
+    if (!state) {
+      state = {
+        events: [],
+        thinkingOn: this.opts.thinkingOn ?? false,
+        context: {},
+      };
+      this.sessions.set(id, state);
+    }
+    return state;
   }
 
-  setThinking(on: boolean): void {
-    this.thinkingOn = on;
+  setThinking(on: boolean, sessionId?: string): void {
+    this.state(sessionId).thinkingOn = on;
   }
 
-  isThinkingOn(): boolean {
-    return this.thinkingOn;
+  isThinkingOn(sessionId?: string): boolean {
+    return this.state(sessionId).thinkingOn;
   }
 
   /** Remember a session fact (e.g. last repo). Never throws, never persists secrets. */
-  setContext(key: string, value: unknown): void {
+  setContext(key: string, value: unknown, sessionId?: string): void {
     if (/key|token|secret|password/i.test(key)) return;
-    this.context[key] = value;
+    this.state(sessionId).context[key] = value;
   }
 
-  getContext<T = unknown>(key: string): T | undefined {
-    return this.context[key] as T | undefined;
+  getContext<T = unknown>(key: string, sessionId?: string): T | undefined {
+    return this.state(sessionId).context[key] as T | undefined;
   }
 
-  append(kind: InteractionEventKind, from: string, text: string, extra?: { thinking?: ThinkingPayload; approval?: ApprovalPayload }): InteractionEvent {
+  append(kind: InteractionEventKind, from: string, text: string, extra?: { thinking?: ThinkingPayload; approval?: ApprovalPayload }, sessionId?: string): InteractionEvent {
+    const id = sessionId?.trim() || currentInteractionSession();
+    const state = this.state(id);
     let thinking = extra?.thinking;
     if (thinking) {
       const compact = redactSecrets(thinking.compact);
@@ -115,6 +147,7 @@ export class InteractionStream {
     const safe = redactSecrets(text);
     const event: InteractionEvent = {
       id: `ix-${Date.now()}-${(seq += 1)}`,
+      sessionId: id,
       at: new Date().toISOString(),
       kind,
       from,
@@ -122,19 +155,19 @@ export class InteractionStream {
       ...(thinking ? { thinking } : {}),
       ...(extra?.approval ? { approval: extra.approval } : {}),
     };
-    this.events.push(event);
+    state.events.push(event);
     const max = this.opts.maxEvents ?? 500;
-    if (this.events.length > max) this.events = this.events.slice(-max);
+    if (state.events.length > max) state.events = state.events.slice(-max);
     return event;
   }
 
   /** All events, oldest first. Transports filter by kind as needed. */
-  list(): InteractionEvent[] {
-    return [...this.events];
+  list(sessionId?: string): InteractionEvent[] {
+    return [...this.state(sessionId).events];
   }
 
-  pendingApprovals(): InteractionEvent[] {
-    return this.events.filter(e => e.kind === 'approval');
+  pendingApprovals(sessionId?: string): InteractionEvent[] {
+    return this.state(sessionId).events.filter(e => e.kind === 'approval');
   }
 
   /**
@@ -142,10 +175,11 @@ export class InteractionStream {
    * on (compact), with detail on explicit expand. Approvals render their
    * one-click options inline.
    */
-  renderText(opts: { expandThinking?: boolean } = {}): string[] {
+  renderText(opts: { expandThinking?: boolean } = {}, sessionId?: string): string[] {
     const lines: string[] = [];
-    for (const e of this.events) {
-      if (e.kind === 'thinking' && !this.thinkingOn) continue;
+    const state = this.state(sessionId);
+    for (const e of state.events) {
+      if (e.kind === 'thinking' && !state.thinkingOn) continue;
       if (e.kind === 'message' || e.kind === 'receipt') {
         lines.push(`[${e.from}] ${e.text}`);
       } else if (e.kind === 'trace') {
@@ -161,8 +195,8 @@ export class InteractionStream {
     return lines;
   }
 
-  clear(): void {
-    this.events = [];
+  clear(sessionId?: string): void {
+    this.state(sessionId).events = [];
   }
 }
 

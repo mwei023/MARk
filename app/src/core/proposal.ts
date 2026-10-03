@@ -14,6 +14,7 @@
 import { appendFile } from 'fs/promises';
 import { join } from 'path';
 import { config } from '../config.js';
+import { getPool } from '../db/postgres';
 
 export type ProposalRisk = 'low' | 'medium' | 'high';
 export type ProposalStatus = 'pending' | 'approved' | 'denied' | 'executed' | 'dry_run';
@@ -41,17 +42,39 @@ export interface ActionProposal {
 
 const AUDIT_LOG_PATH = join(__dirname, '../../audit.log');
 
+export interface ProposalDatabase {
+  query(text: string, params?: unknown[]): Promise<{ rows: Array<Record<string, any>> }>;
+}
+
 /**
- * In-memory proposal store — proposals also written as actions to the
- * incident record in Postgres for full auditability.
+ * Process-local proposal cache backed by a durable Postgres table. Proposals
+ * are also written as actions to the incident record for full auditability.
  *
- * We keep proposals in memory (not a separate DB table) because:
- * 1. Their lifetime is bounded to an incident's active window.
- * 2. The incident's action log is the durable record.
- * A future phase can promote this to a DB table if needed.
+ * The cache keeps the existing synchronous agent API, while the serialized
+ * write queue makes create → approve/deny ordering durable. Startup/API
+ * callers explicitly hydrate pending records before serving approvals.
  */
 export class ProposalStore {
   private readonly proposals = new Map<string, ActionProposal>();
+  private loadedFromDb = false;
+  private writeQueue: Promise<void> = Promise.resolve();
+
+  constructor(private readonly databaseClient?: ProposalDatabase) {}
+
+  private database(): ProposalDatabase | null {
+    if (this.databaseClient) return this.databaseClient;
+    if (!config.databaseUrl) return null;
+    return getPool();
+  }
+
+  private enqueue(task: () => Promise<void>): void {
+    this.writeQueue = this.writeQueue.then(task, task);
+  }
+
+  /** Wait until all queued durable writes have settled. */
+  async flush(): Promise<void> {
+    await this.writeQueue;
+  }
 
   /** Generate a short stable id. */
   private makeId(): string {
@@ -70,7 +93,50 @@ export class ProposalStore {
       createdAt: new Date().toISOString(),
     };
     this.proposals.set(proposal.id, proposal);
+    this.enqueue(() => this.persistProposal(proposal));
     return proposal;
+  }
+
+  /** Restore proposals before API reads or approval decisions. */
+  async loadFromDatabase(limit = 500): Promise<number> {
+    await this.flush();
+    if (this.loadedFromDb) return this.listPending().length;
+    const database = this.database();
+    if (!database) return this.listPending().length;
+    try {
+      const result = await database.query(
+        `SELECT id, incident_id, action, tool, input, rationale, risk_level,
+                status, created_at, decided_at, decided_by, execution_result
+           FROM action_proposals
+          WHERE status = 'pending'
+          ORDER BY created_at DESC
+          LIMIT $1`,
+        [limit],
+      );
+      for (const row of result.rows) {
+        if (this.proposals.has(row.id)) continue;
+        this.proposals.set(row.id, {
+          id: row.id,
+          incidentId: row.incident_id,
+          action: row.action,
+          tool: row.tool,
+          input: row.input ?? {},
+          rationale: row.rationale,
+          riskLevel: row.risk_level,
+          status: row.status,
+          createdAt: new Date(row.created_at).toISOString(),
+          decidedAt: row.decided_at ? new Date(row.decided_at).toISOString() : undefined,
+          decidedBy: row.decided_by ?? undefined,
+          executionResult: row.execution_result ?? undefined,
+        });
+      }
+      this.loadedFromDb = true;
+    } catch (error) {
+      // Migrations may not have run in local/offline mode. Keep the cache
+      // usable, but do not mark it loaded so a later boot can retry.
+      console.debug('[ProposalStore] database restore skipped:', error instanceof Error ? error.message : String(error));
+    }
+    return this.listPending().length;
   }
 
   get(proposalId: string): ActionProposal | undefined {
@@ -94,6 +160,7 @@ export class ProposalStore {
     proposal.status = 'approved';
     proposal.decidedAt = new Date().toISOString();
     proposal.decidedBy = decidedBy;
+    this.enqueue(() => this.persistDecision(proposal));
     return proposal;
   }
 
@@ -104,6 +171,7 @@ export class ProposalStore {
     proposal.status = 'denied';
     proposal.decidedAt = new Date().toISOString();
     proposal.decidedBy = decidedBy;
+    this.enqueue(() => this.persistDecision(proposal));
     return proposal;
   }
 
@@ -115,6 +183,7 @@ export class ProposalStore {
     proposal.decidedAt = new Date().toISOString();
     proposal.decidedBy = 'dry_run';
     proposal.executionResult = `WOULD HAVE: ${wouldHave}`;
+    this.enqueue(() => this.persistDecision(proposal));
     return proposal;
   }
 
@@ -124,7 +193,41 @@ export class ProposalStore {
     if (!proposal) return undefined;
     proposal.status = 'executed';
     proposal.executionResult = result;
+    this.enqueue(() => this.persistDecision(proposal));
     return proposal;
+  }
+
+  private async persistProposal(proposal: ActionProposal): Promise<void> {
+    const database = this.database();
+    if (!database) return;
+    try {
+      await database.query(
+        `INSERT INTO action_proposals
+          (id, incident_id, action, tool, input, rationale, risk_level, status, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (id) DO NOTHING`,
+        [proposal.id, proposal.incidentId, proposal.action, proposal.tool,
+          JSON.stringify(proposal.input), proposal.rationale, proposal.riskLevel,
+          proposal.status, proposal.createdAt],
+      );
+    } catch (error) {
+      console.debug('[ProposalStore] proposal persistence skipped:', error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async persistDecision(proposal: ActionProposal): Promise<void> {
+    const database = this.database();
+    if (!database) return;
+    try {
+      await database.query(
+        `UPDATE action_proposals
+            SET status = $2, decided_at = $3, decided_by = $4, execution_result = $5
+          WHERE id = $1`,
+        [proposal.id, proposal.status, proposal.decidedAt ?? null, proposal.decidedBy ?? null, proposal.executionResult ?? null],
+      );
+    } catch (error) {
+      console.debug('[ProposalStore] proposal decision persistence skipped:', error instanceof Error ? error.message : String(error));
+    }
   }
 
   /** Write a proposal decision to the audit log (best-effort). */

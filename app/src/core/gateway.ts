@@ -228,6 +228,28 @@ export class Gateway {
 
     const cmd = stripQuoted(command);
 
+    // Long-form engineering briefs must never be answered by keyword
+    // heuristics. Observed live: a multi-thousand-char Go production-queue
+    // spec containing "in-memory implementation" matched routeLocally's
+    // /\b(memory|...)\b/ and was answered with a `free` snapshot; without
+    // that word, "status" (HTTP status codes) would have routed it to
+    // git-agent. Shallow snapshots and single-verb agents only own SHORT
+    // commands — a brief with code signals goes to reasoning (LLM/kernel).
+    if (
+      cmd.length > 400 &&
+      (hasProjectWord(cmd) ||
+        /\/(tmp|home)\//.test(cmd) ||
+        /\.go\b/i.test(cmd) ||
+        /\b(repositor|implement|refactor|persistent|idempoten|concurren|goroutine|http api|production-safe|graceful shutdown|retr(y|ies)|lease|database|transactional|observability|job queue|worker)\b/i.test(cmd))
+    ) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Long-form engineering brief with code signals. Keyword heuristics abstain; needs reasoning/kernel.',
+      };
+    }
+
     // Agent intent patterns use whole-word matching only. Substring
     // `includes()` misroutes ("legitimate" -> git, "latest" -> test,
     // "somehow" -> how). Word boundaries keep specialist routing precise;
