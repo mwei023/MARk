@@ -37,7 +37,7 @@ import { config } from '../config.js';
 
 export interface ToolExecutionInput {
   action: ActionRequest;
-  tool: ToolDescriptor;
+  tool?: ToolDescriptor;
   context: ExecutionContext;
 }
 

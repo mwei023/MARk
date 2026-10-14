@@ -109,13 +109,15 @@ import { isHollowReuse } from '../core/mark-runtime.js';
 import type { ToolDescriptor } from '../kernel/types.js';
 
 function makeTool(id: string, inputKeys: string[] = [], risk: ToolDescriptor['risk'] = 'read'): ToolDescriptor {
-  const properties: Record<string, unknown> = {};
+  const properties: Record<string, import('../kernel/types.js').ToolParameterSchema> = {};
   for (const key of inputKeys) properties[key] = { type: 'string' };
   return {
-    id, name: id, description: '', version: '1', risk, available: true, domain: 'test',
+    id: id as ToolDescriptor['id'], name: id, description: '', risk, available: true, domain: 'test',
+    provider: 'test',
     inputSchema: inputKeys.length ? { type: 'object', properties, required: inputKeys } : { type: 'object', properties: {} },
     outputSchema: { type: 'object', properties: {} },
-    tags: [],
+    requiredPermissions: [], supportedResourceKinds: [], reversible: true,
+    metadata: {},
   };
 }
 

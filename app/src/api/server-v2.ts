@@ -88,7 +88,7 @@ app.post('/webhooks/edge', edgeHandler.handler());
 
 // Static observability clients (Control Room + Playground share one stream).
 // Served from app/mark-os-site so the UI ships with the API it observes.
-app.use('/ui', express.static(path.join(__dirname, '../../mark-os-site')));
+app.use('/ui', (express as any).static(path.join(__dirname, '../../mark-os-site')));
 
 // Real-time observability: live event stream + interaction/kernel snapshots.
 registerObservabilityRoutes(app);

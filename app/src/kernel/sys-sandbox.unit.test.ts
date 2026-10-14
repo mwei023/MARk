@@ -21,7 +21,7 @@ describe('sandboxed shell', () => {
   it('refuses writes, escalation, pipes, and unknown binaries', async () => {
     for (const cmd of ['sudo ls', 'rm -rf /tmp/x', 'ls | grep x', 'curl http://x', 'python3 -c 1', 'nope --x', 'git push', 'npm run deploy', 'echo $(whoami)']) {
       const out = await run(cmd);
-      expect(out.ok).toBe(false, cmd);
+      expect(out.ok, cmd).toBe(false);
     }
   });
 

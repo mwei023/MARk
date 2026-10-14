@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { buildOpsSnapshot } from './ops-snapshot.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = join(process.cwd(), 'src/api');
 
 describe('GET /api/status/ops', () => {
   it('is registered exactly once (two handlers crashed per request)', () => {

@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = join(process.cwd(), 'src');
 const read = (name: string): string => readFileSync(join(here, name), 'utf8');
 
 describe('centralised env loading (config.ts)', () => {

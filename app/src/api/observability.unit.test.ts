@@ -1,10 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { eventVisibleToSession, toBusEventFrame } from './observability.js';
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = join(process.cwd(), 'src/api');
 
 describe('observability APIs (real bus projections)', () => {
   it('keeps user command frames inside their interaction session', () => {
@@ -54,7 +53,7 @@ describe('observability APIs (real bus projections)', () => {
 
   it('serves the UI bundle (control room + playground share one client)', () => {
     const source = readFileSync(join(here, 'server-v2.ts'), 'utf8');
-    expect(source).toContain("express.static");
+    expect(source).toContain(".static(");
     expect(source).toContain("mark-os-site");
   });
 });
