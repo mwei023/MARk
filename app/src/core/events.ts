@@ -25,7 +25,8 @@ export type EventSource =
   | 'api'
   | 'voice'
   | 'system'
-  | 'market';
+  | 'market'
+  | 'edge';
 
 export type EventType =
   // GitHub / Git
@@ -76,7 +77,29 @@ export type EventType =
   | 'incident.updated'
   | 'incident.resolved'
   | 'agent.action.taken'
-  | 'agent.action.failed';
+  | 'agent.action.failed'
+
+  // Code repair (coding agent)
+  | 'code.repair.requested'
+  | 'code.repair.completed'
+
+  // Screen tasks (computer-use agent)
+  | 'screen.task.requested'
+  | 'screen.task.completed'
+
+  // Web research (web agent)
+  | 'web.search.requested'
+  | 'web.search.completed'
+
+  // Deep research (research agent — exhaustive, self-improving)
+  | 'research.requested'
+  | 'research.completed'
+
+  // Edge hardware (TinyML nodes via MQTT bridge — Phase 3 merge)
+  | 'edge.obstacle'
+  | 'edge.low_batt'
+  | 'edge.wake'
+  | 'edge.node.online';
 
 /**
  * Specific event implementations

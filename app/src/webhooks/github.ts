@@ -4,6 +4,7 @@
  */
 
 import { Request, Response } from 'express';
+import { createHmac, timingSafeEqual } from 'crypto';
 import { EventBus } from '../core/event-bus';
 import { Event, GitHubWorkflowFailedEvent } from '../core/events';
 
@@ -19,9 +20,15 @@ export class GitHubWebhookHandler {
       const eventType = req.headers['x-github-event'] as string;
       const signature = req.headers['x-hub-signature-256'] as string;
 
-      // In production: verify signature
-      // const isValid = this.verifyGitHubSignature(req.body, signature);
-      // if (!isValid) return res.status(401).send('Unauthorized');
+      const secret = process.env.GITHUB_WEBHOOK_SECRET;
+      if (secret) {
+        if (!this.verifyGitHubSignature(req, secret)) {
+          return res.status(401).json({ error: 'Invalid webhook signature' });
+        }
+      } else {
+        console.warn('[GitHub Webhook] GITHUB_WEBHOOK_SECRET not set — accepting unsigned events (local default).');
+      }
+      void signature;
 
       const payload = req.body;
 
@@ -218,9 +225,16 @@ export class GitHubWebhookHandler {
     return [];
   }
 
-  private verifyGitHubSignature(body: any, signature: string): boolean {
-    // TODO: Implement HMAC verification with webhook secret
-    // For now: accept all
-    return true;
+  private verifyGitHubSignature(req: Request, secret: string): boolean {
+    try {
+      const signature = String((req.headers as any)?.['x-hub-signature-256'] || '');
+      const raw = (req as any).rawBody as Buffer | undefined;
+      if (!signature.startsWith('sha256=') || !raw) return false;
+      const expected = Buffer.from(`sha256=${createHmac('sha256', secret).update(raw).digest('hex')}`);
+      const actual = Buffer.from(signature);
+      return expected.length === actual.length && timingSafeEqual(expected, actual);
+    } catch {
+      return false;
+    }
   }
 }

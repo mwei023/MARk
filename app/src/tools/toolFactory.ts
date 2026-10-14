@@ -14,5 +14,12 @@ export const createTool = <T extends z.ZodTypeAny>(config: {
 
 /**
  * Type for a registered tool.
+ * Uses `any` args on the registry surface so Zod v4 inferred types
+ * (unknown-based) stay assignable without per-tool casts.
  */
-export type Tool<T extends z.ZodTypeAny = z.ZodTypeAny> = ReturnType<typeof createTool<T>>;
+export type Tool = {
+  name: string;
+  description: string;
+  argsSchema: z.ZodTypeAny;
+  func: (args: any) => Promise<string>;
+};

@@ -2,6 +2,8 @@
 import { z } from "zod";
 import { exec } from "child_process";
 import { promisify } from "util";
+import os from "os";
+import { config } from "../config.js";
 
 const execPromise = promisify(exec);
 
@@ -12,6 +14,7 @@ const ALLOWED_COMMANDS = [
 ];
 
 export const createSystemCheckTool = () => ({
+  name: "system_check",
   description: "Run safe system commands: ls, df, free, ps, etc.",
   argsSchema: z.object({
     command: z.string().describe("Shell command to run, e.g., 'ls -la ~' or 'df -h'"),
@@ -38,7 +41,7 @@ export const createSystemCheckTool = () => ({
       const { stdout, stderr } = await execPromise(rawCmd, {
         timeout: 15000,
         env: { ...process.env, PATH: process.env.PATH || '/usr/bin:/bin' },
-        cwd: process.env.HOME || '/home/mwei',
+        cwd: process.env.HOME || os.homedir() || config.allowedDataDir,
         shell: '/bin/bash',
       });
       

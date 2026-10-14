@@ -13,6 +13,8 @@ app/.env
 # ── Data & Databases ──────────────────────────
 data/
 app/data/
+# Independently versioned sample site (own repo + remote) — never nest as gitlink.
+app/mark-os-site/
 *.db
 *.sqlite
 *.rdb
@@ -58,3 +60,10 @@ audit.log
 data/postgres/
 data/redis/
 
+# Local secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example

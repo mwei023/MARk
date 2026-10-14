@@ -17,10 +17,11 @@ services:
       - "5433:5432"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
-      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./app/Scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./app/Scripts/schema-v2.sql:/docker-entrypoint-initdb.d/02-schema-v2.sql:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U jarvis"]
+      test: ["CMD-SHELL", "pg_isready -U mwei -d jarvis_memory"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -42,12 +43,15 @@ services:
       dockerfile: Dockerfile
     container_name: jarvis-api
     ports:
-      - "3000:3000"
+      - "3001:3001"
     environment:
       - NODE_ENV=development
-      - OLLAMA_HOST=http://host.docker.internal:11434  # Special for Docker Desktop
-      - DATABASE_URL=postgres://jarvis:${DB_PASSWORD}@postgres:5432/jarvis_memory
+      - API_PORT=3001
+      - OLLAMA_HOST=http://host.docker.internal:11434  # Linux needs extra_hosts below
+      - DATABASE_URL=postgres://mwei:${DB_PASSWORD}@postgres:5432/jarvis_memory
       - REDIS_URL=redis://redis:6379
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy

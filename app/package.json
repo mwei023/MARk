@@ -4,10 +4,19 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "ts-node app/src/api/server-v2.ts",
-    "dev:old": "ts-node app/src/api/server.ts",
-    "test": "jest"
+    "dev": "tsx src/api/server-v2.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.mark.json",
+    "typecheck:mark": "tsc --noEmit -p tsconfig.mark.json",
+    "test": "tsx src/core/mark-runtime.test.ts",
+    "test:mark": "tsx src/core/mark-runtime.test.ts",
+    "test:workflow": "tsx src/core/github-workflow.e2e.test.ts",
+    "test:kernel-command": "tsx src/core/kernel-command.test.ts",
+    "test:llm": "tsx src/llm/llm.test.ts",
+    "test:like-me": "tsx src/core/like-me-loop.test.ts",
+    "chat": "tsx src/repl.ts",
+    "test:unit": "vitest run",
+    "eval": "tsx src/eval/run.ts",
+    "db:migrate": "ts-node --transpile-only Scripts/migrate.ts"
   },
   "keywords": [],
   "author": "",
@@ -18,6 +27,8 @@
     "csv-parse": "^6.1.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "imapflow": "^2.1.0",
+    "nodemailer": "^10.0.11",
     "ollama": "^0.6.3",
     "pg": "^8.23.0",
     "speaker": "^0.5.5",
@@ -28,6 +39,8 @@
   },
   "devDependencies": {
     "@types/node": "^25.3.5",
-    "@types/pg": "^8.18.0"
+    "@types/pg": "^8.18.0",
+    "tsx": "^4.23.13",
+    "vitest": "^3.2.7"
   }
 }

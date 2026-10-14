@@ -5,7 +5,9 @@
 
 import { Event } from './events';
 import { IncidentAction } from './incident';
-import { PolicyContext, policyEngine } from './policies';
+import { PolicyContext } from './policies';
+import { unifiedEvaluate } from '../kernel/policy-bridge';
+import type { CapabilityRegistry } from '../runtime/capabilities/registry';
 
 export interface ToolDefinition {
   name: string;
@@ -34,7 +36,7 @@ export abstract class Agent {
   protected async executeTool(
     toolName: string,
     args: any,
-    context: Omit<PolicyContext, 'agentName' | 'action' | 'risk'>
+    context: Omit<PolicyContext, 'agentName' | 'action'> & { risk?: PolicyContext['risk'] }
   ): Promise<{ success: boolean; result: string; action: IncidentAction }> {
     const tool = this.tools.get(toolName);
     if (!tool) {
@@ -53,16 +55,17 @@ export abstract class Agent {
       };
     }
 
-    // Check policies
+    // Check policies: single authority story (agent policy + kernel
+    // authority, stricter wins — deny anywhere means deny everywhere).
+    const { risk = 'medium', ...rest } = context;
     const policyContext: PolicyContext = {
       agentName: this.name,
       action: toolName,
-      risk: 'medium', // Default; override in subclass
-      ...context,
+      risk,
+      ...rest,
     };
 
-    const decision = policyEngine.evaluate(policyContext);
-    const reason = policyEngine.getReason(policyContext);
+    const { decision, reason } = unifiedEvaluate(policyContext);
 
     if (decision === 'block') {
       return {
@@ -137,6 +140,9 @@ export abstract class Agent {
   abstract canHandle(event: Event): boolean;
   abstract handle(event: Event): Promise<void>;
 
+  /** Optional synchronous command surface for a specialist agent. */
+  handleCommand?(_event: Event, _capabilities: CapabilityRegistry): Promise<string>;
+
   getName(): string {
     return this.name;
   }
@@ -159,6 +165,10 @@ export class AgentRuntime {
     console.log(`[AgentRuntime] Registered agent: ${agent.getName()}`);
   }
 
+  getAgent(name: string): Agent | undefined {
+    return this.agents.find(a => a.getName() === name);
+  }
+
   getAgentCount(): number {
     return this.agents.length;
   }
@@ -179,6 +189,27 @@ export class AgentRuntime {
     } catch (error) {
       console.error(`[AgentRuntime] Error in agent ${handler.getName()}:`, error);
     }
+  }
+
+  /**
+   * Route a user command to a specialist and return its user-facing result.
+   * When the caller names the gateway-chosen agent, that agent is preferred
+   * (it both claims and handles the command); otherwise the first claiming
+   * agent wins as before. The preference keeps gateway routing authoritative
+   * instead of letting registration order silently override it — observed
+   * live: gateway said git-agent for "institution OS project" while the
+   * runtime handed it to SystemAgent on the "OS" token.
+   */
+  async handleCommand(event: Event, capabilities: CapabilityRegistry, preferredAgent?: string): Promise<string | null> {
+    if (preferredAgent) {
+      const named = this.agents.find(agent => agent.getName() === preferredAgent);
+      if (named && named.canHandle(event) && named.handleCommand) {
+        return named.handleCommand(event, capabilities);
+      }
+    }
+    const handler = this.agents.find(agent => agent.canHandle(event));
+    if (!handler || !handler.handleCommand) return null;
+    return handler.handleCommand(event, capabilities);
   }
 
   /**

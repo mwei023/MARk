@@ -47,6 +47,18 @@ export class PolicyEngine {
       reason: 'Log gathering is non-destructive',
     });
 
+    // Read-only investigation tools run automatically. GitAgent/DevOps/CICD
+    // triage must not stall waiting for approval to *look* at logs.
+    this.addRule({
+      condition: (ctx) =>
+        ctx.risk === 'low' &&
+        ['fetch_logs', 'fetch_diff', 'check_commit', 'suggest_fix', 'gather_diagnostics', 'triage'].includes(
+          ctx.action,
+        ),
+      decision: 'auto',
+      reason: 'Read-only investigation is non-destructive',
+    });
+
     this.addRule({
       condition: (ctx) => ctx.action === 'restart' && ctx.risk === 'low' && ctx.environment === 'development',
       decision: 'auto',

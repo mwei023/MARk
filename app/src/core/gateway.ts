@@ -4,6 +4,80 @@
  */
 
 import { Event, EventType } from './events';
+import { routeLocally } from '../runtime/router';
+import { SystemAgent } from '../agents/system-agent';
+import { hasProjectWord, findProjectDirs } from './project-index';
+
+/**
+ * Classifies intent, not payload: quoted `field: "value"` segments are
+ * stripped before keyword matching so embedded content (HTML, logs, file
+ * text) can never hijack routing. Observed live: a write goal carrying
+ * `free` output routed to the memory capability instead of the kernel.
+ *
+ * Also strips unquoted `field: value` pairs used in kernel tool syntax
+ * (e.g. `kb.note_write with title: test`) so payload words like "test"
+ * or "build" don't hijack the CICD/git classifier. Observed live:
+ * `kb.note_write with title: test` routed to cicd-agent on the word "test".
+ */
+function stripQuoted(command: string): string {
+  // Escape-aware: payloads arrive JSON-quoted (\" inside), and a naive
+  // "[^"]*" stops at the first escaped quote, leaking payload shards that
+  // hijack classification. Observed live: dashboard HTML mentioning disk
+  // routed a file write to df. (?:[^"\\]|\\.) consumes escapes correctly.
+  return command
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    // Strip unquoted kernel field: value pairs (word after colon up to next
+    // keyword boundary). Matches `title: test`, `content: hello world`,
+    // `path: /home/mwei`. The replace target is the value token only so
+    // the field name itself stays (it's part of tool addressing, not payload).
+    .replace(/\b(title|content|body|message|text|name|query|filter|path|dest|pattern|branch|commit|repo|skill|subject|to|from|cc)\s*:\s*\S+/gi, (_m, field) => `${field}: ""`);
+}
+
+export { stripQuoted };
+
+/**
+ * Explicit kernel-tool addressing: `field: value` syntax unique to kernel
+ * tools (repoPath:) or a verbatim tool id (repo.index, sys.exec, ...).
+ * Either means the user addresses a tool, not an agent. Observed live:
+ * deploy orders died in git-agent, sys.exec died on the word "status".
+ */
+export function isExplicitToolCall(command: string): boolean {
+  if (/\brepoPath\s*:/i.test(command)) return true;
+  // A bare tool-id mention ("repo.index builds...") is documentation, not
+  // addressing. It counts only beside an action verb ("execute sys.exec").
+  // Observed live: a draft goal describing tools bypassed to nowhere.
+  // Domain list covers all registered kernel provider namespaces — missing
+  // ones (kb, lsp, email, assistant, skill) caused tool calls to fall
+  // through to agent routing. Observed live: kb.note_write hit cicd-agent.
+  //
+  // Two forms of explicit addressing:
+  // 1. Standalone verb + tool id: "write kb.note_write ..."
+  // 2. Tool id whose suffix IS the action: "kb.note_write with ..."
+  //    (verb embedded in tool name — no standalone verb needed)
+  const TOOL_RE = /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident|kb|lsp|email|assistant|skill|investigate|screen|net|system)\.[\w$.-]+/i;
+  const VERB_RE = /\b(execute|run|call|open|write|commit|push|create|index|search|perceive|draft|compose)\b/i;
+  const ACTION_IN_TOOL_RE = /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident|kb|lsp|email|assistant|skill|investigate|screen|net|system)\.\w*(write|read|send|create|install|exec|search|list|deploy|push|commit|open|close|find|extract|check)\b/i;
+
+  if (TOOL_RE.test(command) && (VERB_RE.test(command) || ACTION_IN_TOOL_RE.test(command))) return true;
+  return false;
+}
+export function isContentRequest(command: string): boolean {  // None of the specialist agents draft content — they answer status
+  // questions — so these skip agent routing entirely (reasoning still tries
+  // the kernel first for explicit file ops).
+  return /\b(draft|compose|autobiography|README|homepage|landing page|blog( post)?|poem|essay)\b/i.test(command);
+}
+
+/**
+ * Project reference: explicit project words, or a command mentioning a
+ * known local project directory ("institution OS" vs the operating
+ * system). Used to veto the SystemAgent hijack and as the last agent
+ * branch. Cached scan — cheap on the hot path.
+ */
+export function isProjectReference(command: string): boolean {
+  if (hasProjectWord(command)) return true;
+  return findProjectDirs(command).length > 0;
+}
 
 export type RoutingPath = 'deterministic' | 'agent' | 'reasoning' | 'escalate';
 
@@ -38,6 +112,18 @@ export class Gateway {
           reasoning: 'Known patterns: lint, type errors, missing deps. Try heuristic fixes first.',
         };
 
+      // Successful workflows close the loop for fixes previously recorded by
+      // GitAgent. Route completion events to the same owner so provenance can
+      // be matched and ops memory can be marked verified.
+      case 'github.workflow.completed':
+        return {
+          path: 'agent',
+          agent: 'git-agent',
+          needsLLM: false,
+          priority: 'low',
+          reasoning: 'Successful workflow. Verify any matching prior fix or rollback outcome.',
+        };
+
       // GitHub Deployment Failed: DevOps agent investigates + considers rollback
       case 'github.deployment.failed':
         return {
@@ -58,6 +144,26 @@ export class Gateway {
           reasoning: 'Service unhealthy. Gather diagnostics, attempt restart.',
         };
 
+      // Edge obstacle: physical ops triage by DevOps agent
+      case 'edge.obstacle':
+        return {
+          path: 'agent',
+          agent: 'devops-agent',
+          needsLLM: false,
+          priority: 'high',
+          reasoning: 'Obstacle reported by edge node. Stop-first triage, then reroute.',
+        };
+
+      // Edge low battery: physical ops triage by DevOps agent
+      case 'edge.low_batt':
+        return {
+          path: 'agent',
+          agent: 'devops-agent',
+          needsLLM: false,
+          priority: event.severity === 'critical' ? 'critical' : 'high',
+          reasoning: 'Battery low on edge node. Return-to-charge triage.',
+        };
+
       // CI Test Failed: Deterministic patterns first
       case 'ci.test.failed':
         return {
@@ -66,6 +172,46 @@ export class Gateway {
           needsLLM: false,
           priority: 'normal',
           reasoning: 'Test failure. Check logs for known patterns.',
+        };
+
+      // Code repair: owned by the coding agent (LLM edits + verify-or-revert)
+      case 'code.repair.requested':
+        return {
+          path: 'agent',
+          agent: 'code-agent',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: 'Code repair request. Coding agent proposes minimal edits with verification.',
+        };
+
+      // Screen task: owned by the computer-use agent (see + act + verify)
+      case 'screen.task.requested':
+        return {
+          path: 'agent',
+          agent: 'screen-agent',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: 'Screen task. Computer-use agent observes, reasons, acts, and verifies.',
+        };
+
+      // Web research: owned by the web agent (search + read)
+      case 'web.search.requested':
+        return {
+          path: 'agent',
+          agent: 'web-agent',
+          needsLLM: false,
+          priority: 'normal',
+          reasoning: 'Web research request. Web agent searches and reads.',
+        };
+
+      // Deep research: owned by the research agent (exhaustive loop)
+      case 'research.requested':
+        return {
+          path: 'agent',
+          agent: 'research-agent',
+          needsLLM: false,
+          priority: 'normal',
+          reasoning: 'Deep research request. Research agent runs the exhaustive loop.',
         };
 
       // User Command: Route based on content
@@ -82,6 +228,16 @@ export class Gateway {
           reasoning: 'Approval response. Resume pending operation.',
         };
 
+      // Edge presence signals: bus-visible, no action needed
+      case 'edge.wake':
+      case 'edge.node.online':
+        return {
+          path: 'deterministic',
+          needsLLM: false,
+          priority: 'low',
+          reasoning: 'Edge presence signal. Logged on the bus, no triage.',
+        };
+
       // Everything else: escalate for manual review
       default:
         return {
@@ -94,7 +250,8 @@ export class Gateway {
   }
 
   private routeUserCommand(event: Event): RoutingDecision {
-    if (!event.data.command) {
+    const command = (event.data as Record<string, any>).command;
+    if (!command || typeof command !== 'string') {
       return {
         path: 'escalate',
         needsLLM: false,
@@ -103,10 +260,128 @@ export class Gateway {
       };
     }
 
-    const cmd = event.data.command.toLowerCase();
+    const cmd = stripQuoted(command);
+
+    // Long-form engineering briefs must never be answered by keyword
+    // heuristics. Observed live: a multi-thousand-char Go production-queue
+    // spec containing "in-memory implementation" matched routeLocally's
+    // /\b(memory|...)\b/ and was answered with a `free` snapshot; without
+    // that word, "status" (HTTP status codes) would have routed it to
+    // git-agent. Shallow snapshots and single-verb agents only own SHORT
+    // commands — a brief with code signals goes to reasoning (LLM/kernel).
+    if (
+      cmd.length > 400 &&
+      (hasProjectWord(cmd) ||
+        /\/(tmp|home)\//.test(cmd) ||
+        /\.go\b/i.test(cmd) ||
+        /\b(repositor|implement|refactor|persistent|idempoten|concurren|goroutine|http api|production-safe|graceful shutdown|retr(y|ies)|lease|database|transactional|observability|job queue|worker)\b/i.test(cmd))
+    ) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Long-form engineering brief with code signals. Keyword heuristics abstain; needs reasoning/kernel.',
+      };
+    }
+
+    // Agent intent patterns use whole-word matching only. Substring
+    // `includes()` misroutes ("legitimate" -> git, "latest" -> test,
+    // "somehow" -> how). Word boundaries keep specialist routing precise;
+    // anything ambiguous falls through to kernel / reasoning.
+    const GIT_RE = /\b(git|branch|branches|commit|commits|merge|rebase|pull request|status|heads?\s?-?\s?up)\b/i;
+    const DEVOPS_RE = /\b(deploy|deployment|deployments|rollback|restart|docker|container|containers|kubernetes|k8s|health)\b/i;
+    const CICD_RE = /\b(pipeline|pipelines|build|builds|test|tests|testing|lint)\b/i;
+    const WEB_RE = /\b(google|browse|browsing|look\s?up|search the web|research)\b/i;
+    // Link checking ("is the linkedin link working", "check on the link").
+    // Kept in sync with WebAgent's LINK_CHECK_RE deliberately — the
+    // classifier and the agent must agree, or routing promises an agent
+    // that declines (observed live: "check on the link" → web-agent
+    // "not available"). Before CI/CD so "test the links" checks links
+    // instead of running pipelines.
+    const LINK_CHECK_RE = /\b(check|checks|verify|verifying|test|testing|is|are)\b.{0,50}\b(links?|urls?)\b/i;
+    const LINK_STATUS_RE = /\b(links?|urls?)\b.{0,30}\b(work(ing|s)?|broken|valid|alive|dead|up|down)\b/i;
+    const DEEP_RESEARCH_RE = /\b(deep research|deep dive|thorough(ly)? research|exhaust(ive|ively)|investigate thoroughly|literature review|state of the art|sota|survey the field|map the field)\b/i;
+    const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;
+
+    if (
+      /\b(what llm|which llm|what model|which model|llm provider|ai provider|mark status|system status|how are you configured|configuration)\b/i.test(
+        command,
+      )
+    ) {
+      return {
+        path: 'deterministic',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'MARK can answer its own configuration locally.',
+      };
+    }
+
+    if (routeLocally(stripQuoted(command))) {
+      // Storage-hog questions need measured directory sizes, not a df
+      // snapshot. Route them past the fast local path so the kernel answers
+      // from data. One concept-level rule — not one per situation.
+      if (/\b(eat|eating|eats|hog|hogs|hogging|largest|biggest|filling|using up)\b/i.test(command)) {
+        return {
+          path: 'reasoning',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: 'Storage-hog question. Prefer kernel measurement over a df snapshot.',
+        };
+      }
+      return {
+        path: 'deterministic',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'A local host capability can answer this request.',
+      };
+    }
+
+    // Explicit kernel-tool calls bypass agent heuristics (see
+    // isExplicitToolCall): the user addresses a tool, not an agent.
+    // needsLLM stays true so reasoning remains the fallback when the kernel
+    // declines (creative guard) or cannot bind — otherwise the order strands
+    // as unroutable. Observed live: a draft describing tools bypassed, the
+    // kernel correctly refused, and nothing else could claim it.
+    if (isExplicitToolCall(cmd)) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Explicit kernel tool call. Kernel resolves and binds.',
+      };
+    }
+
+    // Content-creation goes straight to reasoning, past every agent.
+    if (isContentRequest(cmd)) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Content-creation request. Reasoning drafts; kernel handles explicit file ops.',
+      };
+    }
+
+    // Machine-inspection commands — checked before git/devops/cicd so
+    // "is postgres running" and "list running services" reach the
+    // read-only SystemAgent, not git-agent (status) or devops-agent.
+    // Deterministic local intents (disk/memory/cpu/time) and MARK's own
+    // "system status" config answer already returned above; this owns
+    // what they miss. Project references veto the hijack: "institution OS
+    // project" names a checkout, not the operating system (the OS token
+    // matched first, observed live). Single source of truth:
+    // SystemAgent.isSystemCommand; project veto: isProjectReference.
+    if (SystemAgent.isSystemCommand(cmd) && !isProjectReference(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'system-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'System inspection operation',
+      };
+    }
 
     // Git commands
-    if (cmd.includes('git') || cmd.includes('branch') || cmd.includes('commit')) {
+    if (GIT_RE.test(cmd)) {
       return {
         path: 'agent',
         agent: 'git-agent',
@@ -117,7 +392,7 @@ export class Gateway {
     }
 
     // Deployment/DevOps commands
-    if (cmd.includes('deploy') || cmd.includes('rollback') || cmd.includes('restart') || cmd.includes('docker')) {
+    if (DEVOPS_RE.test(cmd)) {
       return {
         path: 'agent',
         agent: 'devops-agent',
@@ -127,8 +402,34 @@ export class Gateway {
       };
     }
 
+    // Code repair commands — checked before CI/CD so "repair the lint
+    // errors" reaches the repairer, not the pipeline runner. Observed in
+    // eval: repair orders misrouted to cicd-agent on the word "lint".
+    if (/\b(repair|fix(ing|ed|es)?)\b/i.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'code-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Code repair operation',
+      };
+    }
+
+    // Link checking — before CI/CD so "test the links" verifies links
+    // instead of running pipelines. WebAgent extracts URLs from the
+    // command or resolves project context (lastRepo / named checkout).
+    if (LINK_CHECK_RE.test(cmd) || LINK_STATUS_RE.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'web-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Link check operation',
+      };
+    }
+
     // CI/CD commands
-    if (cmd.includes('pipeline') || cmd.includes('build') || cmd.includes('test')) {
+    if (CICD_RE.test(cmd)) {
       return {
         path: 'agent',
         agent: 'cicd-agent',
@@ -138,14 +439,47 @@ export class Gateway {
       };
     }
 
+    // Deep research commands — checked before the generic web pattern so
+    // "deep research X" reaches the research agent, not the web agent.
+    if (DEEP_RESEARCH_RE.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'research-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Deep research operation',
+      };
+    }
+
+    // Web research commands
+    if (WEB_RE.test(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'web-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Web research operation',
+      };
+    }
+
+    // Project references — last agent branch, after every specialist verb
+    // (so "deploy the project" stays devops). Catches what keywords miss:
+    // "institution OS project", "my portfolio", "check on wakulima".
+    // GitAgent answers with a repo heads-up (status, checks, incidents,
+    // remembered resolutions) or a disambiguation question — never machine
+    // facts about the operating system.
+    if (isProjectReference(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'git-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'Project reference: repo heads-up, not machine inspection',
+      };
+    }
+
     // Complex reasoning needed
-    if (
-      cmd.includes('debug') ||
-      cmd.includes('why') ||
-      cmd.includes('how') ||
-      cmd.includes('figure out') ||
-      cmd.includes('investigate')
-    ) {
+    if (REASONING_RE.test(cmd) || /\bfigure out\b/i.test(cmd)) {
       return {
         path: 'reasoning',
         needsLLM: true,
@@ -154,13 +488,12 @@ export class Gateway {
       };
     }
 
-    // Default: try agent, but may need LLM
+    // General conversation and knowledge requests belong to the reasoning path.
     return {
-      path: 'agent',
-      agent: 'git-agent', // Default to git for now
-      needsLLM: false,
+      path: 'reasoning',
+      needsLLM: true,
       priority: 'normal',
-      reasoning: 'Unknown command type. Attempting deterministic handling.',
+      reasoning: 'No deterministic capability or specialist agent matches the request.',
     };
   }
 }

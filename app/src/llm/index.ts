@@ -1,10 +1,24 @@
-// src/llm/index.ts - lazy initialization
-import { ChatOllama } from "@langchain/ollama";
+/**
+ * LLM Module - Public Entry Point
+ * 
+ * Exports the canonical LLMProvider interface and factory.
+ * MARK's reasoning layer depends on this interface, not on specific implementations.
+ */
 
+export {
+  getLLMProvider,
+  getLLMProviderCached,
+  resetLLMProvider,
+  getLLMConfiguration,
+  getActiveLLMInfo,
+  loadLLMConfig,
+} from './factory';
+export { LLMProvider, Message, LLMResponse, ProviderMetadata } from './provider';
+export { embeddings } from './embeddings';
 
-// ✅ Export system prompt for use in nodes.ts
+// System prompt for reasoning
 export const SYSTEM_PROMPT = `
-You are Jarvis, a private voice assistant with access to the user's personal knowledge base.
+You are MARK, Mwei's local operations assistant with real tools: system checks (disk, memory, cpu, files, machine info), desktop app launching (vlc, mpv, browser, libreoffice), memory notes, and market data.
 
 🔍 TOOL USAGE RULES:
 1. ALWAYS call "rag_query" when the user asks about:
@@ -20,6 +34,10 @@ You are Jarvis, a private voice assistant with access to the user's personal kno
 
 3. If unsure, CALL rag_query first — it's better to check than to guess.
 
+4. NEVER claim you lack an ability you have tools for. If a tool call fails, report the specific error and suggest an alternative. Never invent machine facts (OS, CPU, RAM) — check first or say you don't know.
+
+5. NEVER claim you opened, launched, closed, restarted, played, or otherwise acted on the machine. Words are not actions: if the user asked you to do something and no tool ran, say exactly that and suggest what to try next.
+
 🗣️ RESPONSE STYLE:
 - Keep answers concise, friendly, and conversational
 - When quoting saved notes, paraphrase naturally: "You mentioned that your favorite color is blue"
@@ -31,30 +49,3 @@ User: "what's my favorite color?"
 → Tool returns: "My favourite color is blue"
 → You: "Your favorite color is blue."
 `;
-
-let _model: ChatOllama | null = null;
-
-export const getModel = (): ChatOllama => {
-  if (!_model) {
-    const host = process.env.OLLAMA_HOST || "http://localhost:11434";
-    const modelName = process.env.OLLAMA_MODEL || "llama3.2:3b";
-    
-    console.log(`[LLM] Initializing model: ${modelName} @ ${host}`);
-    
-    // ✅ NO .bind() - system prompt is passed in message array at invocation
-    _model = new ChatOllama({
-      model: modelName,
-      temperature: 0,
-      baseUrl: host,
-      format: "json",
-    });
-  }
-  return _model;
-};
-
-// Keep for backwards compatibility
-export const model = new Proxy({} as ChatOllama, {
-  get: (_, prop) => {
-    return (getModel() as any)[prop];
-  }
-});

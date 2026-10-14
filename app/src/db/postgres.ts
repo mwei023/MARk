@@ -1,11 +1,12 @@
 // src/db/postgres.ts
 import { Pool } from 'pg';
+import { config } from '../config.js';
 
 let _pool: Pool | null = null;
 
 export const getPool = (): Pool => {
   if (!_pool) {
-    const connectionString = process.env.DATABASE_URL;
+    const connectionString = config.databaseUrl;
     if (!connectionString) throw new Error('DATABASE_URL not set');
     _pool = new Pool({ connectionString });
     console.log('✅ PostgreSQL pool initialized');
