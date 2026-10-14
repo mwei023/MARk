@@ -38,7 +38,19 @@ describe('groq streaming', () => {
   });
 
   it('refuses without a key', async () => {
-    const provider = new GroqProvider({ provider: 'groq', model: 'm', apiKey: '' });
-    await expect(provider.stream!([{ role: 'user', content: 'hi' }], undefined, () => {})).rejects.toThrow(/key/i);
+    // Ensure no network call is made — the provider must throw before fetch.
+    // The constructor falls back to process.env.GROQ_API_KEY when apiKey is '',
+    // so we also clear the env var and prevent any accidental network call by
+    // installing a fetch mock that throws, making the test fail loudly if the
+    // guard is absent.
+    const savedEnv = process.env.GROQ_API_KEY;
+    process.env.GROQ_API_KEY = '';
+    globalThis.fetch = (() => { throw new Error('fetch must not be called without a key'); }) as unknown as typeof fetch;
+    try {
+      const provider = new GroqProvider({ provider: 'groq', model: 'm', apiKey: '' });
+      await expect(provider.stream!([{ role: 'user', content: 'hi' }], undefined, () => {})).rejects.toThrow(/key/i);
+    } finally {
+      process.env.GROQ_API_KEY = savedEnv;
+    }
   });
 });

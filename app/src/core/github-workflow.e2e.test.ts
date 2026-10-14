@@ -7,6 +7,9 @@ import { GitHubWebhookHandler } from '../webhooks/github';
 import { incidentStore, Incident, IncidentAction } from './incident';
 import { policyEngine } from './policies';
 import { repositoryRegistry } from '../repositories/registry';
+import { shutdown as shutdownPostgres } from '../db/postgres';
+import { opsMemory } from './ops-memory';
+import { repoBaseline } from './repo-baseline';
 
 const run = async (): Promise<void> => {
   process.env.MARK_SMART = 'off';
@@ -26,7 +29,10 @@ const run = async (): Promise<void> => {
     owner: 'e2e',
     name: 'MARk',
     fullName: 'e2e/MARk',
-    localPath: '/home/mwei/jarvis-core',
+    // Keep this test hermetic: the webhook contract does not require a local
+    // checkout, and a missing checkout should produce a clean escalation
+    // without initializing the kernel planner's persistence adapters.
+    localPath: '/tmp/mark-e2e-no-checkout',
     defaultBranch: 'main',
     enabled: true,
     source: 'config',
@@ -41,6 +47,10 @@ const run = async (): Promise<void> => {
   const origStatus = incidentStore.updateStatus.bind(incidentStore);
   const origResolve = incidentStore.resolveIncident.bind(incidentStore);
   const origGet = incidentStore.getIncident.bind(incidentStore);
+  const origRecall = opsMemory.recall.bind(opsMemory);
+  const origSave = opsMemory.save.bind(opsMemory);
+  const origCheckAnomaly = repoBaseline.checkAnomaly.bind(repoBaseline);
+  const origRefreshBaseline = repoBaseline.refresh.bind(repoBaseline);
 
   (incidentStore as any).createIncident = async (input: any) => {
     const inc = { id: `INC-E2E-${incidents.size + 1}`, createdAt: new Date(), updatedAt: new Date(), actions: [], ...input };
@@ -70,6 +80,13 @@ const run = async (): Promise<void> => {
   };
   (incidentStore as any).resolveIncident = async () => {};
   (incidentStore as any).getIncident = async (id: string) => incidents.get(id) ?? null;
+  // This e2e test deliberately uses in-memory persistence. Keep the memory
+  // and baseline sidecars in-memory too, otherwise their best-effort DB calls
+  // create a live pg Pool and make the standalone test depend on Postgres.
+  (opsMemory as any).recall = async () => undefined;
+  (opsMemory as any).save = async () => undefined;
+  (repoBaseline as any).checkAnomaly = async () => null;
+  (repoBaseline as any).refresh = async () => undefined;
 
   try {
     const bus = new EventBus();
@@ -112,7 +129,7 @@ const run = async (): Promise<void> => {
     assert.equal(inc.context.repository, 'e2e/MARk');
     // fetch_logs + fetch_diff + suggest_fix (+ auto_fix_deferred when auto-fixable)
     assert.ok(inc.actions.length >= 3, `expected >=3 actions, got ${inc.actions.length}`);
-    assert.equal(inc.status, 'open');
+    assert.equal(inc.status, 'escalated');
     assert.equal(escalations.length, 1);
     assert.equal(escalations[0].data.incidentId, inc.id);
 
@@ -136,6 +153,14 @@ const run = async (): Promise<void> => {
     (incidentStore as any).updateStatus = origStatus;
     (incidentStore as any).resolveIncident = origResolve;
     (incidentStore as any).getIncident = origGet;
+    (opsMemory as any).recall = origRecall;
+    (opsMemory as any).save = origSave;
+    (repoBaseline as any).checkAnomaly = origCheckAnomaly;
+    (repoBaseline as any).refresh = origRefreshBaseline;
+    // The real GitAgent path probes memory/baselines, which lazily creates a
+    // pg Pool even though this test replaces incident persistence in memory.
+    // Close it so the standalone e2e command exits cleanly in CI.
+    await shutdownPostgres();
   }
 };
 

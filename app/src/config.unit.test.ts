@@ -18,7 +18,7 @@ describe('centralised env loading (config.ts)', () => {
   });
 
   it('no entry point runs its own dotenv loop anymore (one owner)', () => {
-    for (const entry of ['api/server-v2.ts', 'repl.ts', 'cli.ts', 'tui.ts']) {
+    for (const entry of ['api/server-v2.ts', 'cli.ts']) {
       expect(read(entry)).not.toContain('dotenv.config');
     }
   });

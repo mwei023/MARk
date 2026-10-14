@@ -28,6 +28,16 @@ describe('Gateway routing', () => {
     expect(decision.needsLLM).toBe(false);
   });
 
+  it('routes successful workflows to git-agent for fix verification', () => {
+    const decision = gw.classify({
+      id: 'e-success', timestamp: new Date(), source: 'github', type: 'github.workflow.completed',
+      severity: 'info', data: {},
+    } as any);
+    expect(decision.path).toBe('agent');
+    expect(decision.agent).toBe('git-agent');
+    expect(decision.needsLLM).toBe(false);
+  });
+
   it('routes github.deployment.failed to devops-agent with critical priority', () => {
     const decision = gw.classify({
       id: 'e2', timestamp: new Date(), source: 'github', type: 'github.deployment.failed',

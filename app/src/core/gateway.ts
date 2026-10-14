@@ -13,6 +13,11 @@ import { hasProjectWord, findProjectDirs } from './project-index';
  * stripped before keyword matching so embedded content (HTML, logs, file
  * text) can never hijack routing. Observed live: a write goal carrying
  * `free` output routed to the memory capability instead of the kernel.
+ *
+ * Also strips unquoted `field: value` pairs used in kernel tool syntax
+ * (e.g. `kb.note_write with title: test`) so payload words like "test"
+ * or "build" don't hijack the CICD/git classifier. Observed live:
+ * `kb.note_write with title: test` routed to cicd-agent on the word "test".
  */
 function stripQuoted(command: string): string {
   // Escape-aware: payloads arrive JSON-quoted (\" inside), and a naive
@@ -21,7 +26,12 @@ function stripQuoted(command: string): string {
   // routed a file write to df. (?:[^"\\]|\\.) consumes escapes correctly.
   return command
     .replace(/"(?:[^"\\]|\\.)*"/g, '""')
-    .replace(/'(?:[^'\\]|\\.)*'/g, "''");
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+    // Strip unquoted kernel field: value pairs (word after colon up to next
+    // keyword boundary). Matches `title: test`, `content: hello world`,
+    // `path: /home/mwei`. The replace target is the value token only so
+    // the field name itself stays (it's part of tool addressing, not payload).
+    .replace(/\b(title|content|body|message|text|name|query|filter|path|dest|pattern|branch|commit|repo|skill|subject|to|from|cc)\s*:\s*\S+/gi, (_m, field) => `${field}: ""`);
 }
 
 export { stripQuoted };
@@ -37,8 +47,20 @@ export function isExplicitToolCall(command: string): boolean {
   // A bare tool-id mention ("repo.index builds...") is documentation, not
   // addressing. It counts only beside an action verb ("execute sys.exec").
   // Observed live: a draft goal describing tools bypassed to nowhere.
-  return /\b(execute|run|call|open|write|commit|push|create|index|search|perceive|draft|compose)\b/i.test(command) &&
-    /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident)\.[\w$.-]+/i.test(command);
+  // Domain list covers all registered kernel provider namespaces — missing
+  // ones (kb, lsp, email, assistant, skill) caused tool calls to fall
+  // through to agent routing. Observed live: kb.note_write hit cicd-agent.
+  //
+  // Two forms of explicit addressing:
+  // 1. Standalone verb + tool id: "write kb.note_write ..."
+  // 2. Tool id whose suffix IS the action: "kb.note_write with ..."
+  //    (verb embedded in tool name — no standalone verb needed)
+  const TOOL_RE = /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident|kb|lsp|email|assistant|skill|investigate|screen|net|system)\.[\w$.-]+/i;
+  const VERB_RE = /\b(execute|run|call|open|write|commit|push|create|index|search|perceive|draft|compose)\b/i;
+  const ACTION_IN_TOOL_RE = /\b(repo|git|gh|sys|world|ops|browser|fs|desktop|media|incident|kb|lsp|email|assistant|skill|investigate|screen|net|system)\.\w*(write|read|send|create|install|exec|search|list|deploy|push|commit|open|close|find|extract|check)\b/i;
+
+  if (TOOL_RE.test(command) && (VERB_RE.test(command) || ACTION_IN_TOOL_RE.test(command))) return true;
+  return false;
 }
 export function isContentRequest(command: string): boolean {  // None of the specialist agents draft content — they answer status
   // questions — so these skip agent routing entirely (reasoning still tries
@@ -88,6 +110,18 @@ export class Gateway {
           needsLLM: false, // Try heuristics first
           priority: event.severity === 'critical' ? 'high' : 'normal',
           reasoning: 'Known patterns: lint, type errors, missing deps. Try heuristic fixes first.',
+        };
+
+      // Successful workflows close the loop for fixes previously recorded by
+      // GitAgent. Route completion events to the same owner so provenance can
+      // be matched and ops memory can be marked verified.
+      case 'github.workflow.completed':
+        return {
+          path: 'agent',
+          agent: 'git-agent',
+          needsLLM: false,
+          priority: 'low',
+          reasoning: 'Successful workflow. Verify any matching prior fix or rollback outcome.',
         };
 
       // GitHub Deployment Failed: DevOps agent investigates + considers rollback

@@ -9,6 +9,7 @@
     "typecheck:mark": "tsc --noEmit -p tsconfig.mark.json",
     "test": "tsx src/core/mark-runtime.test.ts",
     "test:mark": "tsx src/core/mark-runtime.test.ts",
+    "test:workflow": "tsx src/core/github-workflow.e2e.test.ts",
     "test:kernel-command": "tsx src/core/kernel-command.test.ts",
     "test:llm": "tsx src/llm/llm.test.ts",
     "test:like-me": "tsx src/core/like-me-loop.test.ts",

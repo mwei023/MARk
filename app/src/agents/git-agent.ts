@@ -148,6 +148,14 @@ export class GitAgent extends Agent {
       // live: "commit and push" answered with git log + status, 0 commits).
       return this.commitAndPush(command);
     }
+    if (/\bclean\s?up\b/i.test(command) || /\buntrack\b/i.test(command)) {
+      // Explicit cleanup order: untrack files that match ignore rules but
+      // were committed anyway (logs, local env). Untrack-only — working
+      // tree files are never deleted or reverted by this path (observed
+      // live: "clean up" answered with a heads-up, 0 files cleaned, and
+      // the next commit swept app/audit.log onto origin).
+      return this.cleanupTrackedJunk(command);
+    }
     if (/\b(status|branch|commit)\b/i.test(command) || hasProjectWord(command) || findProjectDirs(command).length > 0) {
       // A status-style question OR a project reference names (or implies)
       // a repo: answer it with a heads-up instead of delegating to a
@@ -319,6 +327,22 @@ export class GitAgent extends Agent {
   }
 
   /**
+   * Resolve an explicitly named repo: owner/name via the registry, or an
+   * absolute /tmp|/home path mentioned in the command. Never consults
+   * lastRepo memory — a stale context must not select the wrong checkout
+   * for a mutating order. Returns the local path or null (caller asks).
+   */
+  private resolveExplicitRepo(command: string): { localPath: string; label: string } | null {
+    for (const ref of this.extractRepoRefs(command)) {
+      const repo = repositoryRegistry.resolve(ref);
+      if (repo?.localPath) return { localPath: repo.localPath, label: repo.fullName };
+    }
+    const abs = command.match(/(\/(?:tmp|home)\/[^\s"'`]+)/)?.[1]?.replace(/[.,;:]+$/, '');
+    if (abs && existsSync(abs)) return { localPath: abs, label: abs };
+    return null;
+  }
+
+  /**
    * "Commit ... and push ..." order: stage the whole working tree, commit,
    * push the current branch to origin. Explicit orders only — the caller
    * (handleCommand) already verified both verbs are present, and the repo
@@ -327,22 +351,11 @@ export class GitAgent extends Agent {
    * wrong checkout. DRY_RUN reports the plan without mutating.
    */
   private async commitAndPush(command: string): Promise<string> {
-    const candidates = this.extractRepoRefs(command);
-    let repo = null;
-    for (const ref of candidates) {
-      repo = repositoryRegistry.resolve(ref);
-      if (repo) break;
-    }
-    let localPath = repo?.localPath;
-    const fullName = repo?.fullName;
-    if (!localPath) {
-      const abs = command.match(/(\/(?:tmp|home)\/[^\s"'`]+)/)?.[1]?.replace(/[.,;:]+$/, '');
-      if (abs && existsSync(abs)) localPath = abs;
-    }
-    if (!localPath) {
+    const resolved = this.resolveExplicitRepo(command);
+    if (!resolved) {
       return 'Which repository? Name it (owner/name or absolute path) and I will commit and push — e.g. "commit and push mwei023/MARk".';
     }
-    const label = fullName ?? localPath;
+    const { localPath, label } = resolved;
     if (!(await this.shellOut('git', ['-C', localPath, 'rev-parse', '--git-dir']))) {
       return `Not a git checkout: ${localPath}. Nothing committed, nothing pushed.`;
     }
@@ -382,6 +395,54 @@ export class GitAgent extends Agent {
     }
   }
 
+  /**
+   * "Clean up ..." order: untrack files that match ignore rules but were
+   * committed anyway (logs, local env, editor swap). `git ls-files -c -i
+   * --exclude-standard` finds exactly those — no filename guessing.
+   * Untrack-only (`git rm --cached`): working-tree files are never deleted
+   * or reverted here, so the worst case is a file that needs re-adding.
+   * Blast-radius cap: more than 25 files (vendored trees like node_modules
+   * are routinely tracked-while-ignored) requires the word "all" in the
+   * order — otherwise the agent reports the count and stops. Observed live:
+   * an uncapped run untracked 4447 files (tracked node_modules) in one go.
+   * DRY_RUN reports the plan without mutating.
+   */
+  private async cleanupTrackedJunk(command: string): Promise<string> {
+    const resolved = this.resolveExplicitRepo(command);
+    if (!resolved) {
+      return 'Which repository? Name it (owner/name or absolute path) and I will clean up tracked junk — e.g. "clean up mwei023/MARk".';
+    }
+    const { localPath, label } = resolved;
+    if (!(await this.shellOut('git', ['-C', localPath, 'rev-parse', '--git-dir']))) {
+      return `Not a git checkout: ${localPath}. Nothing cleaned.`;
+    }
+    let junk: string[];
+    try {
+      const { stdout } = await this.execGit(localPath, ['ls-files', '-c', '-i', '--exclude-standard']);
+      junk = stdout.split('\n').map(s => s.trim()).filter(Boolean);
+    } catch (err) {
+      return `Could not list ignored-but-tracked files on ${label}: ${err instanceof Error ? err.message : String(err)}. Nothing cleaned.`;
+    }
+    if (junk.length === 0) return `Nothing to clean on ${label} — no tracked files match ignore rules.`;
+    if (junk.length > 25 && !/\ball\b/i.test(command)) {
+      return [
+        `Found ${junk.length} tracked-but-ignored files on ${label} — too broad to untrack blindly`,
+        `(includes ${junk.slice(0, 5).join(', ')}${junk.length > 5 ? ', …' : ''}).`,
+        'Say "clean up all ..." to untrack them anyway, or name files explicitly. Nothing cleaned.',
+      ].join(' ');
+    }
+    if (config.markDryRun) {
+      return `DRY RUN on ${label} — would have untracked ${junk.length} file(s) (git rm --cached, working tree kept): ${junk.slice(0, 8).join(', ')}. Nothing cleaned.`;
+    }
+    try {
+      await this.execGit(localPath, ['rm', '--cached', '--', ...junk]);
+    } catch (err) {
+      return `Untracking failed on ${label}: ${err instanceof Error ? err.message : String(err)}. Working tree untouched.`;
+    }
+    console.log(`[GitAgent] cleanup on ${label}: untracked ${junk.length} file(s)`);
+    return `Cleaned ${label}: untracked ${junk.length} file(s) (${junk.slice(0, 8).join(', ')}). Working-tree files kept — commit this to make it stick.`;
+  }
+
   async handle(event: Event): Promise<void> {
     const data = event.data as Record<string, any>;
     const repositoryContext = this.resolveRepositoryContext(data);
@@ -400,7 +461,7 @@ export class GitAgent extends Agent {
       // write (proven live). One indexed query; correctness over 50ms.
       // (Was: `void opsMemory.markVerified ? ...` — void on the condition
       // made it always falsy, so verification never ran at all.)
-      await this.verifyPriorFix(repositoryContext.fullName, data.branch);
+      await this.verifyPriorFix(repositoryContext.fullName, data.branch, data.commit);
       return;
     }
 
@@ -1406,23 +1467,16 @@ export class GitAgent extends Agent {
   }
 
   /**
-   * When a workflow succeeds on a branch that looks like an auto-fix branch
-   * (prefix: auto-fix/), look up the corresponding incident and mark it verified.
+   * When a workflow succeeds on an auto-fix branch or a commit produced by a
+   * rollback, look up matching durable provenance and mark it verified.
    */
-  private async verifyPriorFix(repository: string, branch: string | undefined): Promise<void> {
-    if (!branch?.startsWith('auto-fix/')) return;
+  private async verifyPriorFix(repository: string, branch: string | undefined, commit: string | undefined): Promise<void> {
+    if (!branch?.startsWith('auto-fix/') && !commit) return;
     try {
-      const pool = (await import('../db/postgres.js')).getPool();
-      // Find a resolved incident for this repo whose auto-fix branch matches
-      const result = await pool.query<{ incident_id: string }>(
-        `SELECT incident_id FROM ops_incident_memory
-         WHERE repository = $1 AND success = true AND verified = false
-         ORDER BY created_at DESC LIMIT 1`,
-        [repository],
-      );
-      if (result.rows.length > 0) {
-        await opsMemory.markVerified(result.rows[0].incident_id);
-        console.log(`[GitAgent] Marked fix verified for incident ${result.rows[0].incident_id} (${repository} ${branch})`);
+      const incidentId = await opsMemory.findUnverifiedForWorkflow(repository, branch, commit);
+      if (incidentId) {
+        await opsMemory.markVerified(incidentId);
+        console.log(`[GitAgent] Marked fix verified for incident ${incidentId} (${repository} ${branch ?? commit})`);
       }
     } catch (err) {
       console.debug('[GitAgent] verifyPriorFix failed:', err instanceof Error ? err.message : String(err));

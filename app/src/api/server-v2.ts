@@ -567,6 +567,8 @@ app.get('/api/status', async (req: any, res: any) => {
   }
 });
 
+export { app };
+
 // ─────────────────────────────────────────────────────────────
 // Start Server
 // ─────────────────────────────────────────────────────────────
@@ -583,7 +585,7 @@ const apiSecurity = resolveApiSecurity({
 for (const warning of apiSecurity.warnings) {
   console.warn(warning);
 }
-if (apiSecurity.fatal) {
+if (apiSecurity.fatal && process.env.MARK_NO_SERVER !== 'true') {
   console.error(apiSecurity.fatal);
   process.exit(1);
 }
@@ -597,10 +599,11 @@ if (!config.databaseUrl) {
 if (config.markTestMode) {
   console.warn('[MARK] WARNING: MARK_TEST_MODE is on — jail bypassed, confirmations auto-approved. Testing only.');
 }
-app.listen(PORT, apiSecurity.bindHost, () => {
-  void proposalStore.loadFromDatabase();
-  void markRuntime.initializeKernel();
-  console.log(`
+if (process.env.MARK_NO_SERVER !== 'true') {
+  app.listen(PORT, apiSecurity.bindHost, () => {
+    void proposalStore.loadFromDatabase();
+    void markRuntime.initializeKernel();
+    console.log(`
     ╔═══════════════════════════════════════╗
     ║    🤖 MARK v0.2 Autonomous Operations ║
     ║           API Server Started          ║
@@ -609,5 +612,6 @@ app.listen(PORT, apiSecurity.bindHost, () => {
     ║  Event Bus: Active                    ║
     ║  Agents: Ready                         ║
     ╚═══════════════════════════════════════╝
-  `);
-});
+    `);
+  });
+}

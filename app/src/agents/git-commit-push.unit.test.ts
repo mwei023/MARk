@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
-import { mkdtempSync, writeFileSync } from 'fs';
+import { mkdtempSync, writeFileSync, readFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Gateway } from '../core/gateway.js';
@@ -71,5 +71,55 @@ describe('commit+push order', () => {
     const agent = new GitAgent();
     const res = await agent.handleCommand(mk('commit and push'), {} as any);
     expect(res).toMatch(/Which repository\?/);
+  });
+
+  it('cleanup untracks ignored-but-tracked files and keeps the working tree', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mark-git-cleanup-'));
+    git(['init', '-qb', 'main', dir]);
+    git(['-C', dir, 'config', 'user.email', 'mark-test@example.com']);
+    git(['-C', dir, 'config', 'user.name', 'mark-test']);
+    writeFileSync(join(dir, 'debug.log'), 'noise\n');
+    git(['-C', dir, 'add', '-A']);
+    git(['-C', dir, 'commit', '-qm', 'seed with log']);
+    writeFileSync(join(dir, '.gitignore'), '*.log\n');
+    git(['-C', dir, 'add', '-A']);
+    git(['-C', dir, 'commit', '-qm', 'ignore logs']);
+    const agent = new GitAgent();
+    const res = await agent.handleCommand(mk(`clean up ${dir}`), {} as any);
+    expect(res).toMatch(/untracked 1 file\(s\)/);
+    expect(res).toMatch(/debug\.log/);
+    // Untracked, not deleted: still on disk, staged removal pending commit.
+    expect(git(['-C', dir, 'ls-files'])).not.toMatch(/debug\.log/);
+    expect(readFileSync(join(dir, 'debug.log'), 'utf8')).toBe('noise\n');
+    expect(git(['-C', dir, 'status', '--porcelain'])).toMatch(/D\s+debug\.log/);
+  });
+
+  it('cleanup reports when there is nothing to clean', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mark-git-clean-'));
+    git(['init', '-qb', 'main', dir]);
+    const agent = new GitAgent();
+    const res = await agent.handleCommand(mk(`clean up ${dir}`), {} as any);
+    expect(res).toMatch(/Nothing to clean/);
+  });
+
+  it('cleanup refuses broad untracking without an explicit "all"', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mark-git-cap-'));
+    git(['init', '-qb', 'main', dir]);
+    git(['-C', dir, 'config', 'user.email', 'mark-test@example.com']);
+    git(['-C', dir, 'config', 'user.name', 'mark-test']);
+    for (let i = 0; i < 30; i++) writeFileSync(join(dir, `bulk${i}.log`), 'noise\n');
+    git(['-C', dir, 'add', '-A']);
+    git(['-C', dir, 'commit', '-qm', 'seed bulk logs']);
+    writeFileSync(join(dir, '.gitignore'), '*.log\n');
+    git(['-C', dir, 'add', '-A']);
+    git(['-C', dir, 'commit', '-qm', 'ignore logs']);
+    const agent = new GitAgent();
+    const refused = await agent.handleCommand(mk(`clean up ${dir}`), {} as any);
+    expect(refused).toMatch(/too broad/);
+    expect(refused).toMatch(/Nothing cleaned/);
+    expect(git(['-C', dir, 'ls-files'])).toMatch(/bulk0\.log/);
+    const allowed = await agent.handleCommand(mk(`clean up all ${dir}`), {} as any);
+    expect(allowed).toMatch(/untracked 30 file\(s\)/);
+    expect(git(['-C', dir, 'ls-files'])).not.toMatch(/bulk0\.log/);
   });
 });

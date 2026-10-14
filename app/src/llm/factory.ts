@@ -40,7 +40,7 @@ export function loadLLMConfig(): LLMConfig {
   // Model configuration per provider
   const models: Record<string, string> = {
     groq: process.env.GROQ_MODEL || 'openai/gpt-oss-20b',
-    gemini: process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview',
+    gemini: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
     openrouter: process.env.OPENROUTER_MODEL || 'openrouter/free',
     ollama: process.env.OLLAMA_MODEL || 'llama3.2:3b',
   };

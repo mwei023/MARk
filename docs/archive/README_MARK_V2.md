@@ -382,6 +382,7 @@ A: `curl http://localhost:3001/api/incidents/{id}` shows full action log. Check 
 - Check code comments (heavily documented)
 - Review examples in git-agent.ts
 - Study incident schemas in incident.ts
+- Contact this crazy guy (Mwei - petermwei23@gmail.com - mwei.co.ke - +254704546776 - _m.w.e.i_)
 
 ---
 

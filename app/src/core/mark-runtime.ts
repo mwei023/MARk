@@ -8,6 +8,7 @@
  */
 import { MarkStatusCapability } from '../runtime/capabilities/mark-status';
 import { FieldProbeCapability } from '../runtime/capabilities/field-node';
+import { HostDiscoveryCapability } from '../runtime/capabilities/host-discovery';
 import {
   FieldCamshotCapability,
   FieldClickCapability,
@@ -41,9 +42,11 @@ import { respondWithLLM, respondWithLLMStream } from '../llm/reasoner';
 import { classifyWithLLM } from './classifier';
 import { decideRoute } from '../llm/jev';
 import { TaskBinder } from '../kernel/task-binder';
+import { createLogger } from './logger';
 import type { ToolDescriptor } from '../kernel/types';
 
 const taskBinder = new TaskBinder();
+const log = createLogger('mark-runtime');
 
 export interface Reasoner {
   respond(input: string, userId: string): Promise<string>;
@@ -110,6 +113,10 @@ export class MarkRuntime {
 
     if (!this.capabilities.list().some(capability => capability.id === 'field.probe')) {
       this.capabilities.register(new FieldProbeCapability());
+      // Register host discovery capability so Mark can introspect its environment
+      if (!this.capabilities.list().some(cap => cap.id === 'host.discovery')) {
+        this.capabilities.register(new HostDiscoveryCapability());
+      }
     }
 
     for (const capability of [
@@ -357,11 +364,19 @@ export class MarkRuntime {
         const stepSummary = report.steps.map(step => `${step.stepId.slice(0, 18)}…:${step.status}`).join(', ');
         // State what actually ran: "procedure succeeded" alone misleads for
         // action goals (finding tracks is not playing music).
+        // Prefer the tool's human-readable observation summary over raw JSON
+        // so the response reads naturally (e.g. "Measured 20 entries; largest
+        // is /opt" rather than a raw JSON blob). summary lives on
+        // step.observations, not step.output. Observed: kernel-command test
+        // expected /Measured|largest/ but got raw JSON on reused path.
         const whatRan = report.steps
           .map(step => {
-            const detail = step.output && typeof step.output === 'object'
-              ? JSON.stringify(step.output).slice(0, 200)
-              : String(step.output ?? step.status);
+            const obsSummary = (step.observations ?? []).map(o => (o as { summary?: string }).summary).filter(Boolean).pop();
+            const out = step.output as Record<string, unknown> | undefined;
+            const detail = obsSummary
+              ?? (out && typeof out === 'object'
+                ? (typeof out.summary === 'string' ? out.summary : JSON.stringify(out).slice(0, 200))
+                : String(step.output ?? step.status));
             return `• ${step.toolId}: ${step.status}${step.status === 'succeeded' ? ` — ${detail}` : ` — ${step.error ?? 'failed'}`}`;
           })
           .join('\n');
@@ -379,7 +394,7 @@ export class MarkRuntime {
       }
     } catch (err) {
       // Memory recall/execution error — proceed with fresh planning.
-      console.debug(`[mark-runtime] memory reuse error: ${err instanceof Error ? err.message : String(err)}`);
+      log.debug('Memory reuse failed, proceeding with fresh plan', { error: err instanceof Error ? err.message : String(err) });
     }
 
     let outcome: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>;
@@ -408,7 +423,7 @@ export class MarkRuntime {
       outcome = await this.kernelBridge.executeGoal(command, contextInput, wantsPlan ? { usePlanner: true, maxPlanSteps: 4 } : undefined);
     } catch (err) {
       // Goal execution threw — kernel path unavailable, caller falls through.
-      console.debug(`[mark-runtime] executeGoal error: ${err instanceof Error ? err.message : String(err)}`);
+      log.debug('Goal execution failed', { command, error: err instanceof Error ? err.message : String(err) });
       return undefined;
     }
 

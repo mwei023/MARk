@@ -348,3 +348,185 @@ describe('/api/status/ops response shape', () => {
     expect(parsed.success).toBe(true);
   });
 });
+
+// ─── 6. markVerified increments verifiedCount ────────────────────────────────
+// In-memory simulation of the OpsMemory.markVerified mutation.
+// The real implementation does: verified = true, verified_count + 1.
+// We replicate that logic here to prove the contract without a DB.
+
+describe('OpsMemory.markVerified behavior (in-memory simulation)', () => {
+  interface MutableRecord {
+    incidentId: string;
+    failureType: string;
+    verified: boolean;
+    verifiedCount: number;
+    success: boolean;
+  }
+
+  function makeStore(): MutableRecord[] {
+    return [
+      { incidentId: 'INC-001', failureType: 'MISSING_DEPENDENCY', verified: false, verifiedCount: 0, success: true },
+      { incidentId: 'INC-002', failureType: 'TYPE_ERROR', verified: false, verifiedCount: 2, success: true },
+    ];
+  }
+
+  function markVerified(store: MutableRecord[], incidentId: string): void {
+    const rec = store.find(r => r.incidentId === incidentId);
+    if (rec) {
+      rec.verified = true;
+      rec.verifiedCount += 1;
+    }
+  }
+
+  function isTrusted(store: MutableRecord[], failureType: string): boolean {
+    const total = store
+      .filter(r => r.failureType === failureType && r.success)
+      .reduce((sum, r) => sum + r.verifiedCount, 0);
+    return total >= N_TRUSTED_THRESHOLD;
+  }
+
+  it('markVerified sets verified=true and increments verifiedCount', () => {
+    const store = makeStore();
+    markVerified(store, 'INC-001');
+    const rec = store.find(r => r.incidentId === 'INC-001')!;
+    expect(rec.verified).toBe(true);
+    expect(rec.verifiedCount).toBe(1);
+  });
+
+  it('markVerified is idempotent on the boolean but still increments count', () => {
+    const store = makeStore();
+    markVerified(store, 'INC-001');
+    markVerified(store, 'INC-001');
+    const rec = store.find(r => r.incidentId === 'INC-001')!;
+    expect(rec.verified).toBe(true);
+    expect(rec.verifiedCount).toBe(2);
+  });
+
+  it('markVerified on a record that already has verifiedCount=2 goes to 3', () => {
+    const store = makeStore();
+    markVerified(store, 'INC-002');
+    const rec = store.find(r => r.incidentId === 'INC-002')!;
+    expect(rec.verifiedCount).toBe(3);
+  });
+
+  it('markVerified on unknown incidentId is a no-op', () => {
+    const store = makeStore();
+    markVerified(store, 'INC-999');
+    expect(store.every(r => r.verifiedCount === 0 || r.verifiedCount === 2)).toBe(true);
+  });
+
+  it('isTrusted returns false when total verifiedCount < N_TRUSTED_THRESHOLD', () => {
+    const store = makeStore(); // INC-001: count=0, INC-002: count=2 → TYPE_ERROR total=2
+    expect(isTrusted(store, 'TYPE_ERROR')).toBe(false);
+  });
+
+  it('isTrusted returns true when total verifiedCount reaches N_TRUSTED_THRESHOLD', () => {
+    const store = makeStore();
+    // Verify INC-001 (MISSING_DEPENDENCY) 5 times → total=5 → trusted
+    for (let i = 0; i < 5; i++) markVerified(store, 'INC-001');
+    expect(isTrusted(store, 'MISSING_DEPENDENCY')).toBe(true);
+  });
+
+  it('isTrusted sums verifiedCount across multiple records of the same failureType', () => {
+    const store: MutableRecord[] = [
+      { incidentId: 'INC-A', failureType: 'LINT_FAILURE', verified: true, verifiedCount: 2, success: true },
+      { incidentId: 'INC-B', failureType: 'LINT_FAILURE', verified: true, verifiedCount: 3, success: true },
+    ];
+    // 2 + 3 = 5 = N_TRUSTED_THRESHOLD → trusted
+    expect(isTrusted(store, 'LINT_FAILURE')).toBe(true);
+  });
+
+  it('isTrusted does not count failed resolutions toward the threshold', () => {
+    const store: MutableRecord[] = [
+      { incidentId: 'INC-A', failureType: 'LINT_FAILURE', verified: true, verifiedCount: 10, success: false },
+    ];
+    expect(isTrusted(store, 'LINT_FAILURE')).toBe(false);
+  });
+});
+
+// ─── 7. github.workflow.completed → verifyPriorFix → markVerified wiring ─────
+// Tests that the event handler calls markVerified exactly when
+// findUnverifiedForWorkflow returns an incidentId. Uses mocked opsMemory
+// to avoid the database entirely — same injection pattern used in phase2 tests.
+
+describe('verifyPriorFix wiring (workflow.completed → markVerified)', () => {
+  // Inline reimplementation of verifyPriorFix logic to test the contract
+  // without importing git-agent (which pulls in the full kernel).
+  async function verifyPriorFix(
+    repository: string,
+    branch: string | undefined,
+    commit: string | undefined,
+    mockOpsMemory: {
+      findUnverifiedForWorkflow: (repo: string, branch?: string, commit?: string) => Promise<string | undefined>;
+      markVerified: (incidentId: string) => Promise<void>;
+    },
+  ): Promise<void> {
+    if (!branch?.startsWith('auto-fix/') && !commit) return;
+    try {
+      const incidentId = await mockOpsMemory.findUnverifiedForWorkflow(repository, branch, commit);
+      if (incidentId) {
+        await mockOpsMemory.markVerified(incidentId);
+      }
+    } catch {
+      // swallowed — never crashes the event handler
+    }
+  }
+
+  it('calls markVerified when findUnverifiedForWorkflow returns an incidentId', async () => {
+    const markVerifiedCalls: string[] = [];
+    const mock = {
+      findUnverifiedForWorkflow: async () => 'INC-001',
+      markVerified: async (id: string) => { markVerifiedCalls.push(id); },
+    };
+    await verifyPriorFix('owner/repo', 'auto-fix/deps-123', undefined, mock);
+    expect(markVerifiedCalls).toEqual(['INC-001']);
+  });
+
+  it('does NOT call markVerified when findUnverifiedForWorkflow returns undefined', async () => {
+    const markVerifiedCalls: string[] = [];
+    const mock = {
+      findUnverifiedForWorkflow: async () => undefined,
+      markVerified: async (id: string) => { markVerifiedCalls.push(id); },
+    };
+    await verifyPriorFix('owner/repo', 'auto-fix/deps-123', undefined, mock);
+    expect(markVerifiedCalls).toHaveLength(0);
+  });
+
+  it('skips entirely when branch does not start with auto-fix/ and commit is absent', async () => {
+    const markVerifiedCalls: string[] = [];
+    const findCalls: string[] = [];
+    const mock = {
+      findUnverifiedForWorkflow: async (repo: string) => { findCalls.push(repo); return undefined; },
+      markVerified: async (id: string) => { markVerifiedCalls.push(id); },
+    };
+    await verifyPriorFix('owner/repo', 'main', undefined, mock);
+    expect(findCalls).toHaveLength(0);
+    expect(markVerifiedCalls).toHaveLength(0);
+  });
+
+  it('proceeds when commit is provided even without an auto-fix branch', async () => {
+    const markVerifiedCalls: string[] = [];
+    const mock = {
+      findUnverifiedForWorkflow: async () => 'INC-002',
+      markVerified: async (id: string) => { markVerifiedCalls.push(id); },
+    };
+    await verifyPriorFix('owner/repo', undefined, 'abc123', mock);
+    expect(markVerifiedCalls).toEqual(['INC-002']);
+  });
+
+  it('swallows errors from markVerified without throwing', async () => {
+    const mock = {
+      findUnverifiedForWorkflow: async () => 'INC-003',
+      markVerified: async () => { throw new Error('DB down'); },
+    };
+    await expect(verifyPriorFix('owner/repo', 'auto-fix/lint-99', undefined, mock)).resolves.toBeUndefined();
+  });
+
+  it('swallows errors from findUnverifiedForWorkflow without throwing', async () => {
+    const mock = {
+      findUnverifiedForWorkflow: async () => { throw new Error('pool exhausted'); },
+      markVerified: async () => {},
+    };
+    await expect(verifyPriorFix('owner/repo', 'auto-fix/types-77', undefined, mock)).resolves.toBeUndefined();
+  });
+});

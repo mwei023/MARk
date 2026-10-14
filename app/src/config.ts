@@ -10,6 +10,8 @@
 import os from 'os';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
+import { z } from 'zod';
+import { createLogger } from './core/logger';
 
 /**
  * Load .env files BEFORE snapshotting process.env below.
@@ -223,3 +225,36 @@ export const config: AppConfig = {
   display: process.env.DISPLAY,
   path: process.env.PATH,
 };
+
+/**
+ * Validate critical configuration at startup.
+ * Logs warnings and errors but doesn't crash — that's handled at each entry point.
+ */
+function validateConfig(): void {
+  const log = createLogger('config');
+  
+  // DATABASE_URL is critical
+  if (!config.databaseUrl) {
+    log.error('DATABASE_URL is not set — PostgreSQL incident store and workflow memory will be unavailable');
+  }
+
+  // In production, auth is required
+  if (config.nodeEnv === 'production' && !config.apiToken && !config.allowUnauthenticatedApi) {
+    log.warn('Production mode without API_TOKEN — API will reject requests');
+  }
+
+  // LLM fallback configuration
+  if (config.llmProvider === 'ollama') {
+    log.debug('Using Ollama as LLM provider', { host: config.ollamaHost, model: config.ollamaModel });
+  }
+
+  // Validate repo roots exist
+  const missingRoots = config.repoRoots.filter(root => !require('fs').existsSync(root));
+  if (missingRoots.length > 0) {
+    log.warn('Repo roots do not exist', { missing: missingRoots });
+  }
+}
+
+// Validate at import time (non-blocking — just logs)
+validateConfig();
+

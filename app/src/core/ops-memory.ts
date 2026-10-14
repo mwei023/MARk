@@ -16,6 +16,9 @@
  */
 
 import { getPool } from '../db/postgres';
+import { createLogger } from './logger';
+
+const log = createLogger('ops-memory');
 
 export interface OpsMemoryRecord {
   id: string;
@@ -92,12 +95,9 @@ export class OpsMemory {
         ],
       );
 
-      return {
-        id, ...input, verified: false, verifiedCount: 0,
-        createdAt: now, updatedAt: now,
-      };
+      return { id, ...input, verified: false, verifiedCount: 0, createdAt: now, updatedAt: now };
     } catch (err) {
-      console.debug('[ops-memory] save failed:', err instanceof Error ? err.message : String(err));
+      log.error('Failed to save ops memory record', err as Error, { incidentId: input.incidentId });
       return undefined;
     }
   }
@@ -118,7 +118,44 @@ export class OpsMemory {
         [incidentId],
       );
     } catch (err) {
-      console.debug('[ops-memory] markVerified failed:', err instanceof Error ? err.message : String(err));
+      log.error('Failed to mark ops memory verified', err as Error, { incidentId });
+    }
+  }
+
+  /**
+   * Find the most recent successful, unverified resolution whose provenance
+   * appears in a successful workflow's branch or commit. Resolution text is
+   * deliberately the durable provenance field: auto-fixes record their branch
+   * and rollbacks record their target commit.
+   */
+  async findUnverifiedForWorkflow(
+    repository: string,
+    branch?: string,
+    commit?: string,
+  ): Promise<string | undefined> {
+    const markers = [branch, commit]
+      .filter((value): value is string => Boolean(value?.trim()))
+      .map(value => `%${value}%`);
+    if (!repository || markers.length === 0) return undefined;
+
+    try {
+      const pool = getPool();
+      const markerSql = markers.map((_, index) => `resolution ILIKE $${index + 2}`).join(' OR ');
+      const result = await pool.query<{ incident_id: string }>(
+        `SELECT incident_id
+           FROM ops_incident_memory
+          WHERE repository = $1
+            AND success = true
+            AND verified = false
+            AND (${markerSql})
+          ORDER BY created_at DESC
+          LIMIT 1`,
+        [repository, ...markers],
+      );
+      return result.rows[0]?.incident_id;
+    } catch (err) {
+      log.error('Workflow verification lookup failed', err as Error, { repository, branch, commit });
+      return undefined;
     }
   }
 
