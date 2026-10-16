@@ -103,7 +103,7 @@ describe('Failure classifier', () => {
   it('does not return weak-signal type above MIN_CONFIDENCE — falls to UNKNOWN', () => {
     // Only one weak signal — should not reach MIN_CONFIDENCE (0.25)
     const result = classifyFailure('typescript was mentioned once');
-    // confidence for TYPE_ERROR = 2/16 = 0.125 < 0.25 → UNKNOWN
+    // confidence for TYPE_ERROR = 2/(2+7) = 0.22 < 0.25 → UNKNOWN
     expect(result.type).toBe('UNKNOWN');
   });
 

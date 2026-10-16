@@ -2,11 +2,17 @@
  * Failure Classifier — deterministic log pattern matcher with confidence scores.
  *
  * Each failure type is defined by a set of weighted signals (regex patterns).
- * Confidence = sum(matched signal weights) / sum(all signal weights for that type),
- * clamped to [0, 1]. The type with the highest confidence above MIN_CONFIDENCE wins.
+ * Confidence = matchedWeight / (matchedWeight + CONFIDENCE_SCALE): a saturating
+ * curve over the weight of the evidence that actually fired. One decisive
+ * signal classifies weakly (~0.3), corroborating signals push it up (~0.5+).
+ *
+ * Why not matched/total: that formula punishes coverage — every new signal
+ * added to a type dilutes all single-line logs of that type, so real one-line
+ * failures (e.g. "FAIL src/...", "exit 137") could never reach the threshold
+ * no matter how decisive they are. Evidence weight is the right denominator.
  *
  * Design principle: classification must be honest about uncertainty.
- * A weak match (1 signal) returns low confidence and should escalate, not act.
+ * A weak match (1 weak signal) returns low confidence and should escalate, not act.
  */
 
 export type FailureType =
@@ -30,6 +36,15 @@ export interface ClassificationResult {
 
 /** Minimum confidence to act on a classification (below this → UNKNOWN). */
 const MIN_CONFIDENCE = 0.25;
+
+/**
+ * Scale for the saturating confidence curve. Calibrated so:
+ * - one weak signal (weight 2) → 0.22 → UNKNOWN (escalate, don't act)
+ * - one decisive signal (weight 3) → 0.30 → classified, low confidence
+ * - corroborated evidence (weight 5+) → 0.42+ → actionable
+ * - strong multi-signal (weight 8+) → 0.53+ → auto-fix eligible (>= 0.5)
+ */
+const CONFIDENCE_SCALE = 7;
 
 interface Signal {
   pattern: RegExp;
@@ -59,8 +74,11 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
     signals: [
       { pattern: /typescript/i, weight: 2, label: 'typescript_mentioned' },
       { pattern: /type error/i, weight: 3, label: 'type_error' },
+      { pattern: /\bTypeError\b/, weight: 3, label: 'typeerror_bare' },
+      { pattern: /cannot read propert/i, weight: 2, label: 'cannot_read_property' },
       { pattern: /ts\(\d+\)/i, weight: 3, label: 'ts_error_code' },
       { pattern: /error TS\d+/i, weight: 3, label: 'ts_diagnostic' },
+      { pattern: /Expected \d+ arguments?, but got \d+/i, weight: 3, label: 'arity_mismatch' },
       { pattern: /property .* does not exist/i, weight: 2, label: 'property_missing' },
       { pattern: /is not assignable to type/i, weight: 2, label: 'type_mismatch' },
       { pattern: /tsc.*--noEmit/i, weight: 1, label: 'tsc_run' },
@@ -71,6 +89,7 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
     signals: [
       { pattern: /eslint/i, weight: 3, label: 'eslint_mentioned' },
       { pattern: /lint error/i, weight: 3, label: 'lint_error' },
+      { pattern: /lint fail/i, weight: 3, label: 'lint_failed' },
       { pattern: /prettier/i, weight: 2, label: 'prettier_mentioned' },
       { pattern: /\d+ error(s)?,\s*\d+ warning/i, weight: 2, label: 'lint_summary' },
       { pattern: /unexpected token/i, weight: 1, label: 'unexpected_token' },
@@ -83,9 +102,13 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
       // Bare counts ("2 failed", "Tests 2 failed | 19 passed") — leading
       // non-zero digit so "0 failed" (a passing suite) never matches.
       { pattern: /\b[1-9]\d*\s+failed\b/i, weight: 2, label: 'test_count_bare' },
+      // Vitest summary tail ("1 failed | 399 passed").
+      { pattern: /failed\s*\|\s*\d+\s*passed/i, weight: 3, label: 'test_summary_tail' },
       { pattern: /assertion.*failed/i, weight: 3, label: 'assertion_failed' },
       // Bare AssertionError with no "failed" nearby (vitest/jest output).
       { pattern: /assertionerror/i, weight: 2, label: 'assertion_error' },
+      // "expected X to equal/be Y" matcher output.
+      { pattern: /expected .* to (equal|be|contain|match)/i, weight: 2, label: 'matcher_expected' },
       { pattern: /expect\(.*\)\.to/i, weight: 2, label: 'jest_expect' },
       { pattern: /FAIL\s+src\//i, weight: 2, label: 'jest_fail_line' },
       // FAIL outside src/ ("FAIL specs/runner.test.ts").
@@ -98,9 +121,11 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
     type: 'BUILD_FAILURE',
     signals: [
       { pattern: /build failed/i, weight: 3, label: 'build_failed' },
+      { pattern: /compile error/i, weight: 2, label: 'compile_error' },
       { pattern: /webpack.*error/i, weight: 2, label: 'webpack_error' },
       { pattern: /compilation failed/i, weight: 3, label: 'compilation_failed' },
       { pattern: /esbuild.*error/i, weight: 2, label: 'esbuild_error' },
+      { pattern: /exited with [1-9]\d* errors?/i, weight: 3, label: 'exited_with_errors' },
       { pattern: /error.*during build/i, weight: 2, label: 'error_during_build' },
       { pattern: /exit code [1-9]/i, weight: 1, label: 'nonzero_exit' },
     ],
@@ -110,6 +135,8 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
     signals: [
       { pattern: /out of memory/i, weight: 3, label: 'oom' },
       { pattern: /javascript heap out of memory/i, weight: 3, label: 'js_heap_oom' },
+      { pattern: /heap limit/i, weight: 2, label: 'heap_limit' },
+      { pattern: /exit 137/i, weight: 4, label: 'exit_137' },
       { pattern: /killed/i, weight: 1, label: 'process_killed' },
       { pattern: /ENOMEM/i, weight: 2, label: 'enomem' },
     ],
@@ -119,6 +146,7 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
     signals: [
       { pattern: /ECONNREFUSED/i, weight: 3, label: 'econnrefused' },
       { pattern: /ENOTFOUND/i, weight: 3, label: 'enotfound' },
+      { pattern: /fetch failed/i, weight: 3, label: 'fetch_failed' },
       { pattern: /network.*timeout/i, weight: 2, label: 'network_timeout' },
       { pattern: /unable to connect/i, weight: 2, label: 'unable_to_connect' },
       { pattern: /connection refused/i, weight: 2, label: 'connection_refused' },
@@ -165,7 +193,6 @@ export function classifyFailure(logs: string): ClassificationResult {
   let best: ClassificationResult = { type: 'UNKNOWN', confidence: 0, signals: [], raw };
 
   for (const def of FAILURE_DEFINITIONS) {
-    const totalWeight = def.signals.reduce((s, sig) => s + sig.weight, 0);
     const firedSignals: string[] = [];
     let matchedWeight = 0;
 
@@ -178,7 +205,7 @@ export function classifyFailure(logs: string): ClassificationResult {
 
     if (matchedWeight === 0) continue;
 
-    const confidence = Math.min(matchedWeight / totalWeight, 1);
+    const confidence = Math.min(matchedWeight / (matchedWeight + CONFIDENCE_SCALE), 1);
     if (confidence > best.confidence) {
       best = { type: def.type, confidence, signals: firedSignals, raw };
     }
