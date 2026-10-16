@@ -36,6 +36,24 @@ export interface ApiSecurityResolution {
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
+/**
+ * Known placeholder secrets (shipped in .env.example). These must NEVER
+ * count as "a token is set": the placeholder is public, so treating it as
+ * a real token gives security theater (guessable password) AND breaks the
+ * bundled UI (every /api/* call 401s with no token field to fill).
+ */
+const PLACEHOLDER_TOKENS = new Set([
+  '***', 'changeme', 'placeholder', 'example', 'test', 'token', 'secret',
+]);
+
+export function isPlaceholderSecret(value: string | undefined): boolean {
+  const v = (value ?? '').trim();
+  if (!v) return true;
+  if (v.includes('***')) return true;
+  if (/^your_/i.test(v)) return true;
+  return PLACEHOLDER_TOKENS.has(v.toLowerCase());
+}
+
 export function resolveApiSecurity(input: ApiSecurityInput = {}): ApiSecurityResolution {
   const warnings: string[] = [];
   const nodeEnv = (input.nodeEnv ?? '').toLowerCase();
@@ -49,7 +67,14 @@ export function resolveApiSecurity(input: ApiSecurityInput = {}): ApiSecurityRes
     );
   }
 
-  const hasToken = !!(input.apiToken ?? '').trim();
+  const rawToken = (input.apiToken ?? '').trim();
+  const hasToken = !!rawToken && !isPlaceholderSecret(rawToken);
+  if (rawToken && !hasToken) {
+    warnings.push(
+      '[security] API_TOKEN looks like an .env.example placeholder — treating the API as OPEN. ' +
+      'Generate a real token (e.g. `openssl rand -hex 32`) to enable token auth.',
+    );
+  }
   if (hasToken) {
     if (!input.githubWebhookSecret) {
       warnings.push(

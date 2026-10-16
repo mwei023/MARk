@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveApiSecurity } from './security.js';
+import { resolveApiSecurity, isPlaceholderSecret } from './security.js';
 
 describe('API security boundary', () => {
   it('defaults to loopback bind', () => {
@@ -48,5 +48,18 @@ describe('API security boundary', () => {
   it('missing webhook secret always warns', () => {
     const r = resolveApiSecurity({ apiToken: 'x' });
     expect(r.warnings.some(w => w.includes('GITHUB_WEBHOOK_SECRET'))).toBe(true);
+  });
+
+  it('.env.example placeholders never count as a token (open API + loud warning)', () => {
+    for (const placeholder of ['***', 'your_long_random_token_here', 'your_jwt_secret_here', 'changeme', '  ', '']) {
+      expect(isPlaceholderSecret(placeholder)).toBe(true);
+      const r = resolveApiSecurity({ apiToken: placeholder || undefined });
+      expect(r.authMode).toBe('open');
+    }
+    // Real single-char tokens (used by other tests) still count.
+    expect(isPlaceholderSecret('x')).toBe(false);
+    expect(isPlaceholderSecret('s3cret')).toBe(false);
+    const warned = resolveApiSecurity({ apiToken: 'your_long_random_token_here' });
+    expect(warned.warnings.some(w => w.includes('placeholder'))).toBe(true);
   });
 });

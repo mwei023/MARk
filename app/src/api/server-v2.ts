@@ -61,17 +61,24 @@ app.use((req: any, res: any, next: any) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// Optional API auth: set API_TOKEN to require Bearer/x-api-token on /api/*.
+// Optional API auth: set API_TOKEN to require Bearer/x-api-token on /api/*
+// (SSE EventSource can't send headers, so ?token= is accepted too —
+// loopback-trusted; don't expose with query auth on untrusted networks).
+// .env.example placeholders never count as a token (see security.ts).
 // Webhooks keep their own HMAC secrets and are excluded here.
 // ─────────────────────────────────────────────────────────────
-const API_TOKEN = process.env.API_TOKEN;
-if (!API_TOKEN) {
+import { isPlaceholderSecret } from './security';
+const RAW_API_TOKEN = (process.env.API_TOKEN ?? '').trim();
+const API_TOKEN = isPlaceholderSecret(RAW_API_TOKEN) ? '' : RAW_API_TOKEN;
+if (RAW_API_TOKEN && !API_TOKEN) {
+  console.warn('[api] API_TOKEN looks like an .env.example placeholder — /api/* stays OPEN. Generate a real token to lock it down.');
+} else if (!API_TOKEN) {
   console.warn('[api] API_TOKEN not set — /api/* is open (local-first default). Set API_TOKEN to lock it down.');
 }
 app.use('/api', (req: any, res: any, next: any) => {
   if (!API_TOKEN) return next();
   const header = String(req.headers?.authorization || '');
-  const token = header.startsWith('Bearer ') ? header.slice(7) : String(req.headers?.['x-api-token'] || '');
+  const token = header.startsWith('Bearer ') ? header.slice(7) : String(req.headers?.['x-api-token'] || req.query?.token || '');
   if (token && token === API_TOKEN) return next();
   return res.status(401).json({ success: false, error: 'Unauthorized' });
 });
