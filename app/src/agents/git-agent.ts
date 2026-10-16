@@ -25,6 +25,7 @@ import {
 } from '../core/failure-classifier';
 import { config } from '../config.js';
 import { opsMemory } from '../core/ops-memory';
+import { logFailureClassification } from '../core/training-log';
 import { repoBaseline } from '../core/repo-baseline';
 import { interactionStream } from '../core/interaction';
 import { hasProjectWord, findProjectDirs, rankedProjectDirs, spacedMention } from '../core/project-index';
@@ -553,6 +554,16 @@ export class GitAgent extends Agent {
           : `Log fetch unavailable (${logFetch.unavailableReason}). Cannot classify failure automatically.`;
 
       await incidentStore.addFinding(incident.id, classificationFinding);
+      // Auto-log: incident classifications become distillation rows.
+      // High-confidence verdicts are pseudo-labels; low-confidence rows keep
+      // label null and join to opsMemory.verified on incidentId later.
+      // Best-effort, never throws. Disable with MARK_TRAINING_LOG=false.
+      logFailureClassification({
+        text: classificationSource === 'ci_logs' ? logFetch.content : eventText,
+        predicted: classification.type,
+        confidence: classification.confidence,
+        incidentId: incident.id,
+      });
       try { opsObjective.record('incident.investigated'); } catch { /* objective never fails a run */ }
 
       // ── Step 3: Fetch diff ───────────────────────────────────────────────────

@@ -43,6 +43,7 @@ import { classifyWithLLM } from './classifier';
 import { decideRoute } from '../llm/jev';
 import { TaskBinder } from '../kernel/task-binder';
 import { createLogger } from './logger';
+import { logRoutingDecision } from './training-log';
 import type { ToolDescriptor } from '../kernel/types';
 
 const taskBinder = new TaskBinder();
@@ -234,6 +235,13 @@ export class MarkRuntime {
         trace.push(`gateway → llm classifier error: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+    // Auto-log: the final routing decision IS the ground-truth label for
+    // future classifier distillation (router is the oracle). Best-effort,
+    // never throws. Disable with MARK_TRAINING_LOG=false.
+    logRoutingDecision({
+      text: command,
+      label: decision.agent ? `agent:${decision.agent}` : decision.path,
+    });
     let result: CommandResult;
 
     if (decision.path === 'deterministic') {

@@ -13,7 +13,7 @@
  * Rows with "agree": false are where Mark is wrong today — the most
  * valuable training data (fix rules first, distill second).
  */
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Gateway } from '../src/core/gateway';
@@ -22,6 +22,29 @@ import { classifyFailure } from '../src/core/failure-classifier';
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = join(here, '../../data/training');
 mkdirSync(outDir, { recursive: true });
+
+/** Append-only writer: seed rows merge with live-logged rows, never wipe them. */
+function appendNew(file: string, rows: string[]): number {
+  const path = join(outDir, file);
+  const seen = new Set<string>();
+  if (existsSync(path)) {
+    for (const line of readFileSync(path, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const r = JSON.parse(line);
+        seen.add(`${r.text}${r.label}`);
+      } catch { /* keep malformed lines, don't drop data */ }
+    }
+  }
+  const fresh = rows.filter((r) => {
+    try {
+      const p = JSON.parse(r);
+      return !seen.has(`${p.text}${p.label}`);
+    } catch { return true; }
+  });
+  if (fresh.length > 0) writeFileSync(path, (existsSync(path) ? readFileSync(path, 'utf8').replace(/\n?$/, '\n') : '') + fresh.join('\n') + '\n');
+  return fresh.length;
+}
 
 // ─── Routing (from eval suite ground truth) ─────────────────────────
 const routingCases: Array<[string, string, string?]> = [
@@ -55,7 +78,7 @@ const routingRows = routingCases.map(([text, wantPath, wantAgent]) => {
   const predicted = d.agent ? `agent:${d.agent}` : d.path;
   return JSON.stringify({ text, label: expected, predicted: predicted, agree: expected === predicted });
 });
-writeFileSync(join(outDir, 'routing.jsonl'), routingRows.join('\n') + '\n');
+const addedRouting = appendNew('routing.jsonl', routingRows);
 
 // ─── Failure classification (representative logs per type) ──────────
 const failureExamples: Array<[string, string]> = [
@@ -91,10 +114,10 @@ const failureRows = failureExamples.map(([text, label]) => {
     agree: r.type === label,
   });
 });
-writeFileSync(join(outDir, 'failure.jsonl'), failureRows.join('\n') + '\n');
+const addedFailure = appendNew('failure.jsonl', failureRows);
 
 const routingAgree = routingRows.filter((r) => JSON.parse(r).agree).length;
 const failureAgree = failureRows.filter((r) => JSON.parse(r).agree).length;
-console.log(`routing: ${routingAgree}/${routingRows.length} agree`);
-console.log(`failure: ${failureAgree}/${failureRows.length} agree`);
-console.log(`wrote ${outDir}/routing.jsonl + failure.jsonl`);
+console.log(`routing: ${routingAgree}/${routingRows.length} agree (+${addedRouting} new)`);
+console.log(`failure: ${failureAgree}/${failureRows.length} agree (+${addedFailure} new)`);
+console.log(`wrote ${outDir}/routing.jsonl + failure.jsonl (append-only, live rows kept)`);
