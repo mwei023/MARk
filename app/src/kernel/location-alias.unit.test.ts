@@ -23,6 +23,16 @@ describe('location aliases', () => {
     expect(matchLocationAlias('list files')).toBeUndefined();
   });
 
+  it('matches XDG user directories', () => {
+    expect(matchLocationAlias('what is in the download directory')).toBe(`${homedir()}/Downloads`);
+    expect(matchLocationAlias('what is in the downloads folder')).toBe(`${homedir()}/Downloads`);
+    expect(matchLocationAlias('show me the downloads')).toBe(`${homedir()}/Downloads`);
+    expect(matchLocationAlias('list the desktop')).toBe(`${homedir()}/Desktop`);
+    expect(matchLocationAlias('open the documents folder')).toBe(`${homedir()}/Documents`);
+    expect(matchLocationAlias('what is in my pictures')).toBe(`${homedir()}/Pictures`);
+    expect(matchLocationAlias('list my videos directory')).toBe(`${homedir()}/Videos`);
+  });
+
   it('binds home directory to path-like fields', () => {
     const binder = new TaskBinder();
     const bound = binder.bind('check on my portfolio in the home directory', dirListTool);

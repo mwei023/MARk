@@ -193,7 +193,26 @@ export function looksLikeMemoryQuestion(input: string): boolean {
 }
 
 function stripFences(content: string): string {
-  return (content || '').replace(/^```(?:json)?\n?|\n?```$/g, '').trim();
+  const stripped = (content || '').replace(/^```(?:json)?\n?|\n?```$/g, '').trim();
+  // Detect bare JSON objects/arrays with no prose — the LLM emitted a
+  // tool-call stub or empty object ({}, [], {"response":""}) instead of a
+  // sentence. Observed live: "who is william ruto" returned {} and the
+  // user got a blank response. Extract .response if present; otherwise
+  // treat as empty so the retry/fallback path fires.
+  if (/^\s*[{[]/.test(stripped) && /[}\]]\s*$/.test(stripped)) {
+    try {
+      const parsed = JSON.parse(stripped);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        const inner = typeof parsed.response === 'string' ? parsed.response.trim() : '';
+        return inner;
+      }
+      return '';
+    } catch {
+      // Not valid JSON — return as-is (e.g. a code block that starts with {)
+      return stripped;
+    }
+  }
+  return stripped;
 }
 
 async function loadHistoryDefault(userId: string): Promise<string> {

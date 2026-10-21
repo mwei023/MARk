@@ -7,6 +7,7 @@ import { Event, EventType } from './events';
 import { routeLocally } from '../runtime/router';
 import { SystemAgent } from '../agents/system-agent';
 import { hasProjectWord, findProjectDirs } from './project-index';
+import { classifyRoutingIntent } from './routing-classifier';
 
 /**
  * Classifies intent, not payload: quoted `field: "value"` segments are
@@ -66,6 +67,18 @@ export function isContentRequest(command: string): boolean {  // None of the spe
   // questions — so these skip agent routing entirely (reasoning still tries
   // the kernel first for explicit file ops).
   return /\b(draft|compose|autobiography|README|homepage|landing page|blog( post)?|poem|essay)\b/i.test(command);
+}
+
+function isDirectoryListingQuestion(command: string): boolean {
+  return /\b(?:what|show|list|display)\s+(?:is\s+)?(?:in\s+)?(?:the\s+)?(?:home|downloads?|documents?|library|desktop|tmp|var|work|src)(?:\s+(?:directory|folder|path))?\b/i.test(command)
+    || /\b(?:home|downloads?|documents?|library|desktop|tmp|var|work|src)\s+(?:directory|folder|path)\b/i.test(command);
+}
+
+function isServiceActionCommand(command: string): boolean {
+  return /\b(?:start|restart|stop|reload|redeploy|recover|scale|check|inspect|show|monitor|diagnose)\b.*\b(?:service|services|pod|pods|deployment|deployments|cluster|kubernetes|k8s|ingress|app|api|server)\b/i.test(command)
+    || /\b(?:service|services|pod|pods|deployment|deployments|cluster|kubernetes|k8s|ingress)\b.*\b(?:health|status|uptime|healthy|running)\b/i.test(command)
+    || /\b(?:service|pod|cluster|deployment|ingress)\s+(?:health|status|uptime)\b/i.test(command)
+    || /\b(?:start|restart|stop|redeploy|recover|scale)\b\s+(?:the\s+)?(?:api|web|app|service|server)\b/i.test(command);
 }
 
 /**
@@ -160,7 +173,7 @@ export class Gateway {
           path: 'agent',
           agent: 'devops-agent',
           needsLLM: false,
-          priority: event.severity === 'critical' ? 'critical' : 'high',
+          priority: 'critical',
           reasoning: 'Battery low on edge node. Return-to-charge triage.',
         };
 
@@ -295,13 +308,15 @@ export class Gateway {
     // Link checking ("is the linkedin link working", "check on the link").
     // Kept in sync with WebAgent's LINK_CHECK_RE deliberately — the
     // classifier and the agent must agree, or routing promises an agent
-    // that declines (observed live: "check on the link" → web-agent
-    // "not available"). Before CI/CD so "test the links" checks links
-    // instead of running pipelines.
+    // that declines.
     const LINK_CHECK_RE = /\b(check|checks|verify|verifying|test|testing|is|are)\b.{0,50}\b(links?|urls?)\b/i;
     const LINK_STATUS_RE = /\b(links?|urls?)\b.{0,30}\b(work(ing|s)?|broken|valid|alive|dead|up|down)\b/i;
     const DEEP_RESEARCH_RE = /\b(deep research|deep dive|thorough(ly)? research|exhaust(ive|ively)|investigate thoroughly|literature review|state of the art|sota|survey the field|map the field)\b/i;
     const REASONING_RE = /\b(debug|why|how|investigate|investigation|explain)\b/i;
+    const DIRECTORY_LOOKUP_RE = /\b(?:what(?:'s| is)|show|list|display|tell me what|check)\b.{0,50}\b(?:in|inside|within)\b.{0,40}\b(?:the\s+)?(?:home|downloads?|documents?|pictures?|library|folder|directory)\b/i;
+    const CONCEPTUAL_EXPLANATION_RE = /\b(?:teach me|please explain|explain(?:\s+(?:what|how|why|this))?|can you explain|show me a simple explanation of|what does .* mean|what is\s+(?:a|an|the|this|that|load balancing|git|docker|kubernetes|devops|linux|api|database|cache|queue|service|microservice)|how (?:does|do|works)|why (?:is|are|do|does)|can you help me(?:\s+(?:learn|understand|plan|with))?)\b/i;
+    const SERVICE_OPERATION_RE = /\b(?:service|services|deployment|deployments|container|docker|kubernetes|k8s|pod|cluster|ingress|health|uptime)\b/i;
+    const SERVICE_ACTION_RE = /\b(?:check|show|inspect|list|restart|start|stop|scale|redeploy|status|healthy|health|running|uptime)\b/i;
 
     if (
       /\b(what llm|which llm|what model|which model|llm provider|ai provider|mark status|system status|how are you configured|configuration)\b/i.test(
@@ -316,6 +331,20 @@ export class Gateway {
       };
     }
 
+    // Handle exploratory directory and conceptual explanation requests before
+    // any local or agent heuristics can misclassify them as operational tasks.
+    if (DIRECTORY_LOOKUP_RE.test(cmd) || CONCEPTUAL_EXPLANATION_RE.test(cmd)) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Information request or directory inspection. No action is implied.',
+      };
+    }
+
+    // Local metrics (disk/memory/cpu) are deterministic and should answer
+    // before SystemAgent, while pure system-status questions like
+    // "what is running?" continue to go to SystemAgent.
     if (routeLocally(stripQuoted(command))) {
       // Storage-hog questions need measured directory sizes, not a df
       // snapshot. Route them past the fast local path so the kernel answers
@@ -336,12 +365,60 @@ export class Gateway {
       };
     }
 
+    // Service-health operations (service, deployment, pod, cluster, ingress,
+    // readiness) belong to DevOps rather than plain machine inspection.
+    if (
+      (SERVICE_OPERATION_RE.test(cmd) || /\b(?:restart|start|stop|redeploy|scale|recover|deploy)\b/i.test(cmd)) &&
+      (SERVICE_ACTION_RE.test(cmd) || /\b(?:health|status|ready|readiness|healthy|up|down|running)\b/i.test(cmd)) &&
+      !/\b(?:what\s+is\s+running|is\s+\w+\s+running|list\s+running)\b/i.test(cmd) &&
+      !/\b(?:learn|explain|what is\s+(?:git|docker|kubernetes)|teach me)\b/i.test(cmd)
+    ) {
+      return {
+        path: 'agent',
+        agent: 'devops-agent',
+        needsLLM: false,
+        priority: 'high',
+        reasoning: 'Service health or status investigation.',
+      };
+    }
+
+    // Machine inspection should win before generic explanation heuristics,
+    // so 'what is running?' and 'is postgres running' reach SystemAgent.
+    if (SystemAgent.isSystemCommand(cmd) && !isProjectReference(cmd)) {
+      return {
+        path: 'agent',
+        agent: 'system-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'System inspection operation',
+      };
+    }
+
+    // CI/CD status and health queries are operational checks, not git status.
+    // NOTE: bare "check(s)" is NOT a CI artifact word here — "check on X and
+    // tell me if its ready" is a project heads-up, not a pipeline probe.
+    // CI artifact names (pipeline | build | workflow | ...) only; a bare
+    // "check" + "ready" pair routed arbitrary project sentences to CICD
+    // (regression pinned in project-routing.unit.test.ts).
+    if (
+      (/\b(?:pipeline|pipelines|ci|build|builds|workflow|workflows|job|jobs|release gate|release|deployments?)\b/i.test(cmd) &&
+        /\b(?:status|health|healthy|pass(?:ing)?|failing|fail(?:ing)?|red|green|ready)\b/i.test(cmd)) ||
+      /\b(?:show|check|verify|review)\b.{0,40}\b(?:pipeline|ci|build|workflow|checks?|release gate)\b.{0,30}\b(?:status|health)\b/i.test(cmd)
+    ) {
+      return {
+        path: 'agent',
+        agent: 'cicd-agent',
+        needsLLM: false,
+        priority: 'normal',
+        reasoning: 'CI/CD status or health check.',
+      };
+    }
+
     // Explicit kernel-tool calls bypass agent heuristics (see
     // isExplicitToolCall): the user addresses a tool, not an agent.
     // needsLLM stays true so reasoning remains the fallback when the kernel
     // declines (creative guard) or cannot bind — otherwise the order strands
-    // as unroutable. Observed live: a draft describing tools bypassed, the
-    // kernel correctly refused, and nothing else could claim it.
+    // as unroutable.
     if (isExplicitToolCall(cmd)) {
       return {
         path: 'reasoning',
@@ -361,22 +438,30 @@ export class Gateway {
       };
     }
 
-    // Machine-inspection commands — checked before git/devops/cicd so
-    // "is postgres running" and "list running services" reach the
-    // read-only SystemAgent, not git-agent (status) or devops-agent.
-    // Deterministic local intents (disk/memory/cpu/time) and MARK's own
-    // "system status" config answer already returned above; this owns
-    // what they miss. Project references veto the hijack: "institution OS
-    // project" names a checkout, not the operating system (the OS token
-    // matched first, observed live). Single source of truth:
-    // SystemAgent.isSystemCommand; project veto: isProjectReference.
-    if (SystemAgent.isSystemCommand(cmd) && !isProjectReference(cmd)) {
+    // Educational / explanatory requests are chat intents, not operational
+    // tasks. They must stay in the reasoning path even when a domain keyword
+    // such as git/docker/build/kubernetes appears in the explanation.
+    const EXPLANATION_RE = /\b(?:help me\s+(?:learn|understand|know)|teach me|explain(?:\s+(?:what|how|why|this))?|how (?:does|do)|why (?:is|are|do|does)|can you help me(?:\s+(?:learn|understand|plan|with))?|can you explain|show me a simple explanation of|who is)\b/i;
+    if (
+      EXPLANATION_RE.test(cmd) &&
+      !/\b(?:what\s+is\s+running|is\s+\w+\s+running|what\s+is\s+in\s+the\s+.*(?:directory|folder)|what\s+is\s+in\s+.*(?:directory|folder)|check\s+.*(?:status|health)|what\s+is\s+up)\b/i.test(cmd)
+    ) {
       return {
-        path: 'agent',
-        agent: 'system-agent',
-        needsLLM: false,
+        path: 'reasoning',
+        needsLLM: true,
         priority: 'normal',
-        reasoning: 'System inspection operation',
+        reasoning: 'Educational or explanatory request. No action is implied.',
+      };
+    }
+
+    // Handle conceptual explanation requests that are not service status or
+    // directory enumeration queries.
+    if (CONCEPTUAL_EXPLANATION_RE.test(cmd) && !DIRECTORY_LOOKUP_RE.test(cmd)) {
+      return {
+        path: 'reasoning',
+        needsLLM: true,
+        priority: 'normal',
+        reasoning: 'Information request. No action is implied.',
       };
     }
 
@@ -486,6 +571,41 @@ export class Gateway {
         priority: 'normal',
         reasoning: 'Needs abstract analysis',
       };
+    }
+
+    // Learned-router assist: DEFAULT OFF. It stays disabled until the NB is
+    // retrained on >= 200 real (source:'live') rows via npm run
+    // training:retrain AND MARK_TRAINED_ROUTER=on is set explicitly. The
+    // classifier itself also refuses any model without live provenance
+    // (routing-classifier.loadRoutingModel), so stale synthetic weights
+    // cannot serve traffic through either gate.
+    if (process.env.MARK_TRAINED_ROUTER === 'on') {
+      const trained = classifyRoutingIntent(cmd);
+      if (trained && trained.confidence >= 0.7) {
+        if (trained.label === 'deterministic') {
+          return {
+            path: 'deterministic',
+            needsLLM: false,
+            priority: 'normal',
+            reasoning: `Training-backed classification: ${trained.evidence.join(', ') || 'match from learned routing data'}`,
+          };
+        }
+        if (trained.label.startsWith('agent:')) {
+          return {
+            path: 'agent',
+            agent: trained.label.slice('agent:'.length),
+            needsLLM: false,
+            priority: 'normal',
+            reasoning: `Training-backed classification: ${trained.evidence.join(', ') || 'match from learned routing data'}`,
+          };
+        }
+        return {
+          path: 'reasoning',
+          needsLLM: true,
+          priority: 'normal',
+          reasoning: `Training-backed classification: ${trained.evidence.join(', ') || 'match from learned routing data'}`,
+        };
+      }
     }
 
     // General conversation and knowledge requests belong to the reasoning path.

@@ -290,12 +290,18 @@ export class MarkRuntime {
             trace.push('kernel → no matching capability; reasoning → LLM answered (words only, no tools ran)');
           } catch (error: any) {
             const detail = error instanceof Error ? error.message : String(error);
+            // Friendly fallback: the user asked a question and the LLM either
+            // returned nothing useful or timed out. Never surface raw error
+            // strings — give a short honest reply they can act on.
+            const isEmpty = detail.toLowerCase().includes('empty response');
             result = {
-              response: `Reasoning is unavailable right now: ${detail}`,
+              response: isEmpty
+                ? "I didn't get a useful reply from my reasoning engine. The reasoning service is currently unavailable. Could you rephrase or try again?"
+                : 'The reasoning engine is unavailable right now. Please try again in a moment.',
               route: 'unavailable',
               eventId: event.id,
             };
-            trace.push('kernel → no matching capability; reasoning → unavailable');
+            trace.push(`kernel → no matching capability; reasoning → unavailable (${detail})`);
           }
         } else {
           result = { response: 'MARK cannot safely route that request yet.', route: 'unavailable', eventId: event.id };
@@ -424,6 +430,40 @@ export class MarkRuntime {
           return undefined;
         }
       }
+      // Conversational/social requests ("can you help me learn X", "what do
+      // you think of X", "help me learn to code") belong to chat unless the
+      // kernel has a strong, evidenced resolve. Observed live: "help me learn
+      // data structures" planned desktop.close.exploit-database; "what do you
+      // think of MARK" resolved media.now_playing at score 0.00; "help me
+      // learn how to code" tried to open VS Code. These are chat intents —
+      // the kernel must not act on coincidental word overlap.
+      if (isConversationalRequest(command) || isExplanationRequest(command)) {
+        try {
+          const pre = this.kernelBridge.resolveCapability(command);
+          const strong =
+            (pre.matchedTerms?.length ?? 0) >= 2 &&
+            (pre.score ?? 0) >= 0.8;
+          if (!strong) return undefined;
+        } catch {
+          return undefined;
+        }
+      }
+      // Discovery-question guard: "are there any playable videos", "is there
+      // anything in the library", "do you have X" are availability checks —
+      // they must resolve to read tools (find, list), never action tools
+      // (play, launch, restart). Observed live: "are there any playable
+      // videos" scored 2.32 against media.play_track because "playable"
+      // stems to "play" and "video" appeared in the description.
+      if (isDiscoveryQuestion(command)) {
+        try {
+          const pre = this.kernelBridge.resolveCapability(command);
+          if (pre.tool && pre.tool.risk !== 'read' && pre.tool.risk !== 'diagnostic') {
+            return undefined;
+          }
+        } catch {
+          return undefined;
+        }
+      }
       // Real planner first for multi-word goals: composed DAG (investigate →
       // verify) beats linear single-tool execution when contracts validate.
       // Single-step fallback is automatic inside GoalExecutor.
@@ -505,9 +545,10 @@ export class MarkRuntime {
       // replays the failure forever. Observed live: a failed repo.symbols
       // probe memorized as a "known procedure".
       const outputOk = (result.output as Record<string, unknown> | undefined)?.ok !== false;
-      const savedId = outputOk ? this.maybeSaveSuccess(command, outcome.plan) : undefined;
+      const savedId = outputOk ? this.maybeSaveSuccess(command, outcome.plan, outcome.resolution) : undefined;
       if (!outputOk) trace.push('memory → not saved: output reports ok:false');
       if (savedId) trace.push(`memory → saved workflow ${savedId} (read-only success)`);
+      if (!savedId && outputOk) trace.push(`memory → not saved: resolution score ${outcome.resolution.score.toFixed(2)} / ${outcome.resolution.matchedTerms?.length ?? 0} terms (threshold 0.8 / 2)`);
       return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel', trace };
     }
 
@@ -531,16 +572,21 @@ export class MarkRuntime {
       };
     }
     return {
-      response: `Failed (${toolId}): ${result.error ?? 'unknown error'}`,
+      response: result.error ?? `Something went wrong running ${toolId}.`,
       route: 'kernel',
       trace: [...head, `kernel → error: ${result.error ?? 'unknown error'}`],
     };
   }
 
-    /**
+  /**
    * Saves a succeeded plan to workflow memory when it is safe to replay:
-   * every step is read-only and no near-duplicate goal is already saved.
-   * Returns the saved workflow id, or undefined when nothing was saved.
+   * every step is read-only, resolution was strong (score ≥ 0.8 AND 2+
+   * matched terms), and no near-duplicate goal is already saved.
+   *
+   * The resolution gate is the critical addition: without it, a coincidental
+   * weak match (skill.list scoring against "what is in the library") gets
+   * memorized and replays forever on semantically similar goals, poisoning
+   * future sessions. Observed live: "show library" replayed skill.list.
    *
    * Never saves read-only successes for action goals ("play ..."): a lookup
    * step succeeding is not the goal succeeding, and the saved row would
@@ -549,6 +595,7 @@ export class MarkRuntime {
   private maybeSaveSuccess(
     command: string,
     plan: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>['plan'],
+    resolution?: { score: number; matchedTerms?: string[] },
   ): string | undefined {
     try {
       if (!plan || plan.steps.length === 0) return undefined;
@@ -556,6 +603,13 @@ export class MarkRuntime {
       // memorizing: they are usually false-positive matches or too vague to
       // replay safely.
       if (extractGoalTerms(command).length < 2) return undefined;
+      // Weak resolution: the tool ran but only because a thin coincidental
+      // term overlap matched — not because it was the right tool for this
+      // goal. Saving would replay the wrong tool on every similar future
+      // command. Require score ≥ 0.8 AND at least 2 matched terms.
+      const score = resolution?.score ?? 0;
+      const matchedCount = resolution?.matchedTerms?.length ?? 0;
+      if (score < 0.8 || matchedCount < 2) return undefined;
       const risks = new Map(this.kernelBridge.listTools().map(tool => [tool.id, tool.risk] as const));
       const allReadOnly = plan.steps.every(step => {
         const risk = risks.get(step.toolId);
@@ -631,7 +685,39 @@ export const markRuntime = new MarkRuntime();
 
 /** Explicit explanation framings: chat owns these unless tools match deeply. */
 function isExplanationRequest(command: string): boolean {
-  return /\b(help me understand|explain|what (is|are)|define|tell me about|how (does|do)|why (is|are|do))\b/i.test(command);
+  return /\b(help me (understand|learn|know)|can you help (me )?(learn|understand|explain)|explain|what (is|are)|define|tell me (about|what|how|why)|how (does|do)|why (is|are|do))\b/i.test(command);
+}
+
+/**
+ * Discovery / availability questions: the user asks whether something exists
+ * or can be found — not to act on it. These must resolve to read tools only.
+ * Observed live: "are there any playable videos" resolved media.play_track
+ * (score 2.32) because "playable" stems to "play" and "video" appeared in
+ * the description. The intent is media.find_tracks (a read tool), not play.
+ *
+ * Also covers container inspect intents: "access jarvis-db and show me what
+ * is inside" resolved container.restart because "jarvis-db" verbatim hit the
+ * id-anchor +2.0 bonus. "access", "inspect", "connect to" are read intents.
+ */
+function isDiscoveryQuestion(command: string): boolean {
+  if (/^(are there|is there|do you have|can i find|do i have|are there any|is there any|any (playable|available|existing)|show me if|check if there)\b/i.test(command.trim())) return true;
+  // Container inspect: "access X", "connect to X", "inspect X", "show me what is inside X"
+  if (/\b(access|inspect|connect to|look inside|show (me )?what('?s| is) (in|inside))\b/i.test(command)) return true;
+  return false;
+}
+
+/**
+ * Conversational / social intent: questions or requests that are clearly
+ * directed at the assistant as a chat partner, not a tool executor.
+ * Examples: "can you help me learn X", "what do you think of X",
+ * "can you hack", "help me learn to code", "who is X".
+ *
+ * These must never trigger kernel plans on weak capability matches.
+ * The kernel may still act when it has a strong, evidenced resolve
+ * (score ≥ 0.8 AND 2+ matched terms), identical to the creative guard.
+ */
+function isConversationalRequest(command: string): boolean {
+  return /\b(can you (help|explain|tell|show|teach)|help me (learn|understand|know|code|write|do|get|figure)|what do you (think|know|say)|who (is|are|was|were)\b|do you (think|know|remember)|i want to (learn|understand|know)|teach me|how do i learn|can you hack|are you able to)\b/i.test(command);
 }
 
 /**

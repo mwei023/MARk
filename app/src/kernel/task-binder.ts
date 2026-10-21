@@ -53,9 +53,9 @@ function isPathLikeField(field: string): boolean {
 
 /**
  * Universal location aliases ("home directory" → $HOME, "~" → $HOME,
- * "temp directory" → $TMPDIR). Closed list of OS-level conventions —
- * never project names, never guesses. Returns undefined when the goal
- * names no well-known location.
+ * "temp directory" → $TMPDIR, "downloads folder" → $HOME/Downloads, etc.).
+ * Closed list of OS-level conventions — never project names, never guesses.
+ * Returns undefined when the goal names no well-known location.
  */
 export function matchLocationAlias(goal: string): string | undefined {
   if (/\bhome\s+(directory|folder|dir)\b/i.test(goal) ||
@@ -65,6 +65,27 @@ export function matchLocationAlias(goal: string): string | undefined {
   }
   if (/\b(temp|tmp)\s+(directory|folder|dir)\b/i.test(goal)) {
     return tmpdir();
+  }
+  // XDG user directories — common natural-language names for standard folders.
+  if (/\bdownloads?\s*(directory|folder|dir)?\b/i.test(goal)) {
+    return `${homedir()}/Downloads`;
+  }
+  if (/\bdesktop\s*(directory|folder|dir)?\b/i.test(goal)) {
+    return `${homedir()}/Desktop`;
+  }
+  if (/\bdocuments?\s*(directory|folder|dir)?\b/i.test(goal)) {
+    return `${homedir()}/Documents`;
+  }
+  if (/\bpictures?\s*(directory|folder|dir)?\b/i.test(goal) ||
+      /\bphotos?\s*(directory|folder|dir)?\b/i.test(goal)) {
+    return `${homedir()}/Pictures`;
+  }
+  if (/\bmusic\s*(directory|folder|dir|library)?\b/i.test(goal)) {
+    return `${homedir()}/Music`;
+  }
+  if (/\bvideos?\s*(directory|folder|dir)?\b/i.test(goal) ||
+      /\bmovies?\s*(directory|folder|dir)?\b/i.test(goal)) {
+    return `${homedir()}/Videos`;
   }
   return undefined;
 }
@@ -110,32 +131,40 @@ export class TaskBinder {
       const description = definition.description?.toLowerCase() ?? '';
       const siblings = Object.keys(properties).filter(name => name !== field);
 
-      if (
+      // Location alias: if the goal names a well-known directory AND this is
+      // a path-like field, bind it directly — regardless of whether the field
+      // description overlaps with the goal text. Observed live: "what is in
+      // the downloads folder" never matched fs.directory_list's path field
+      // because description tokens {directory, list, defaults, working} don't
+      // include "downloads", so the alias branch was never reached.
+      //
+      // Precedence: EXPLICIT field:value extraction first, alias second.
+      // Alyas-first inverted this: 'list files in the home directory with
+      // path: "/tmp"' bound /home/mwei because `continue` fired before the
+      // explicit extraction for `path` ever ran (pinned by
+      // location-alias.unit.test.ts "explicit field values still win").
+      const matchesField =
         normalizedGoal.includes(fieldName) ||
-        (description &&
-          this.matchesDescription(normalizedGoal, description))
-      ) {
+        (description && this.matchesDescription(normalizedGoal, description));
+      if (matchesField) {
         const value = this.extractFieldValue(
           goal,
           field,
           definition,
           siblings,
         );
-
         if (value !== undefined) {
           input[field] = value;
           matchedFields.push(field);
-        } else if (isPathLikeField(field)) {
-          // Well-known location aliases ("home directory" → $HOME) for
-          // path-like fields the goal clearly addresses but never states
-          // as `field: value`. Closed universal list — not per-situation
-          // guessing. Observed live: "portfolio in the home directory"
-          // listed the working dir because path stayed unbound.
-          const alias = matchLocationAlias(goal);
-          if (alias !== undefined) {
-            input[field] = alias;
-            matchedFields.push(field);
-          }
+          continue;
+        }
+      }
+      if (isPathLikeField(field)) {
+        const alias = matchLocationAlias(goal);
+        if (alias !== undefined) {
+          input[field] = alias;
+          matchedFields.push(field);
+          continue;
         }
       }
     }

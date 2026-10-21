@@ -16,8 +16,8 @@ export class OpenRouterProvider implements LLMProvider {
 
   constructor(config: LLMProviderConfig) {
     this.apiKey = config.apiKey || process.env.OPENROUTER_API_KEY || '';
-    // Default to a free tier model available on OpenRouter
-    this.modelName = config.model || 'openrouter/free';
+    // Default to openrouter/auto which picks the best available free model
+    this.modelName = config.model || 'openrouter/auto';
 
     if (!this.apiKey) {
       console.warn('[OpenRouter] No API key provided. Provider will not be available.');

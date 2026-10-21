@@ -111,7 +111,7 @@ function resolveLibraryArchive(rawArchive: string): string {
 export const mediaFindTracksTool: ToolDescriptor = {
   id: 'media.find_tracks',
   name: 'Find music tracks',
-  description: 'Finds music tracks to play from the local music library, including tracks inside zip archives.',
+  description: 'Finds music tracks to play from the local music library, including tracks inside zip archives. Use to browse, list, or show what is in the music library, or search for songs and albums.',
   version: '1.0.0',
   domain: 'media',
   risk: 'read',
@@ -146,7 +146,7 @@ export const mediaFindTracksTool: ToolDescriptor = {
     },
     required: ['count', 'tracks', 'capturedAt'],
   },
-  capabilities: ['music-discovery', 'media'],
+  capabilities: ['music-discovery', 'media', 'music-library', 'library-browse'],
   supportedResourceKinds: ['unknown'],
   requiredPermissions: [],
   reversible: true,
@@ -435,7 +435,11 @@ async function searchStreamCandidates(query: string): Promise<StreamCandidate[]>
 async function listLibraryTop(): Promise<string> {
   try {
     const entries = await fs.readdir(MUSIC_LIBRARY);
-    const shown = entries.filter(e => !e.startsWith('.')).slice(0, 8);
+    const shown = entries
+      .filter(e => !e.startsWith('.'))
+      .slice(0, 8)
+      // Strip common archive/audio extensions for readable names
+      .map(e => e.replace(/\.(zip|mp3|flac|ogg|m4a|wav|aac)$/i, '').trim());
     return shown.length > 0 ? shown.join(', ') : '(empty library)';
   } catch {
     return '(library unreadable)';
@@ -595,7 +599,7 @@ export const mediaPlayTrackImplementation: ToolImplementation = {
       } else {
         const candidates = await searchStreamCandidates(musicQuery);
         if (candidates.length === 0) {
-          throw new Error(`Could not find "${musicQuery}" in the library or on the web. Library holds: ${await listLibraryTop()}.`);
+          throw new Error(`"${musicQuery}" isn't in your library or available to stream. Your library has: ${await listLibraryTop()}. Try playing one of those, or drop the file in ~/Music.`);
         }
         if (wantsAlbum) {
           // No single stream IS an album. Playing a tribute and calling it
