@@ -49,6 +49,29 @@ app.use(express.json({
   },
 }));
 
+// ── Pill activity ring (attention surface) ──────────────────────────────────
+// Last N commands the runtime processed, in memory only — the desktop pill
+// polls this with /api/pill. Not a training log: no labels, no persistence.
+interface PillActivityEntry {
+  ts: string; sessionId: string; command: string;
+  route: string; status: 'ok' | 'error' | 'refused' | 'pending'; summary: string;
+}
+const pillActivity: PillActivityEntry[] = [];
+const PILL_RING_LIMIT = 40;
+function pushPillActivity(entry: Omit<PillActivityEntry, 'ts' | 'summary'> & { summary?: string }): void {
+  const body = (entry.command ?? '').slice(0, 200);
+  const response = (entry.summary ?? '').slice(0, 200);
+  pillActivity.push({
+    ts: new Date().toISOString(),
+    sessionId: entry.sessionId,
+    command: body,
+    route: entry.route,
+    status: entry.status,
+    summary: response,
+  });
+  if (pillActivity.length > PILL_RING_LIMIT) pillActivity.splice(0, pillActivity.length - PILL_RING_LIMIT);
+}
+
 // CORS for browser clients (the static chat UI is served from another
 // origin/port). Preflight is answered before auth so browsers proceed.
 app.use((req: any, res: any, next: any) => {
@@ -338,6 +361,11 @@ app.post('/api/command', async (req: any, res: any) => {
     }
 
     const result = await markRuntime.executeCommand(command, userId, source === 'voice' || source === 'cli' ? source : 'api', { sessionId });
+    const status: PillActivityEntry['status'] = /^\s*⏳/.test(String(result.response)) ? 'pending'
+      : /^\s*(Refused|Nothing to play)/i.test(String(result.response)) ? 'refused'
+      : /^\s*⚙️/.test(String(result.response)) ? 'ok'
+      : 'ok';
+    pushPillActivity({ sessionId, command, route: result.route, status, summary: result.response });
     if (process.env.MARK_ROUTING_DEBUG === 'on') {
       console.log('[route-debug]', JSON.stringify({ command, sessionId, finalRoute: result.route, trace: (result as any).trace ?? null }));
     }
@@ -348,6 +376,8 @@ app.post('/api/command', async (req: any, res: any) => {
       eventId: result.eventId,
     });
   } catch (error: any) {
+    const sessionIdErr = String(req?.body?.sessionId ?? req?.headers?.['x-mark-session-id'] ?? 'default').slice(0, 128);
+    pushPillActivity({ sessionId: sessionIdErr, command: String(req?.body?.command ?? ''), route: 'error', status: 'error', summary: error?.message ?? 'unknown error' });
     res.status(500).json({
       success: false,
       error: error.message,
@@ -391,8 +421,10 @@ app.post('/api/command/stream', async (req: any, res: any) => {
         source === 'voice' || source === 'cli' ? source : 'api',
         { sessionId, onToken: (token) => send({ token }) },
       );
+      pushPillActivity({ sessionId, command, route: result.route, status: /^\s*⏳/.test(String(result.response)) ? 'pending' : 'ok', summary: result.response });
       send({ done: true, success: true, response: result.response, route: result.route, eventId: result.eventId });
     } catch (error: any) {
+      pushPillActivity({ sessionId, command, route: 'error', status: 'error', summary: error.message });
       send({ done: true, success: false, error: error.message });
     }
     res.end();
@@ -451,6 +483,43 @@ app.post('/api/execute', async (req: any, res: any) => {
  */
 app.get('/api/confirmations', (_req: any, res: any) => {
   res.json({ success: true, pending: likeMeLoop.listPending() });
+});
+
+/**
+ * GET /api/pill - Attention surface for the desktop pill: pending
+ * confirmations (tool + like-me, merged) and the in-memory activity ring.
+ * In-memory only, no persistence, no labels — a glance, not a record.
+ */
+app.get('/api/pill', (_req: any, res: any) => {
+  try {
+    const FRESH_MS = 10 * 60 * 1000; // an ask older than this is backlog, not attention
+    const cutoff = Date.now() - FRESH_MS;
+    const seen = new Set<string>(confirmationManager.listPending().map(c => c.id)); // all ids, stale too
+    const pending: Array<Record<string, unknown>> = [];
+    for (const c of confirmationManager.listPending()) {
+      if (!(Date.parse(c.createdAt) >= cutoff)) continue; // stale → quiet backlog
+      seen.add(c.id);
+      pending.push({ kind: 'tool', id: c.id, toolId: c.toolId, reason: c.reason, input: c.input, createdAt: c.createdAt });
+    }
+    const kernelPending = likeMeLoop.listPending() as unknown as Array<Record<string, unknown>>;
+    kernelPending
+      .sort((a, b) => String(b.id ?? '').localeCompare(String(a.id ?? ''))) // newest first
+      .slice(0, 3)
+      .forEach(p => {
+        const id = String(p.id ?? '');
+        if (id && seen.has(id)) return;
+        seen.add(id);
+        pending.push({ kind: 'kernel', ...p });
+      });
+    res.json({
+      success: true,
+      now: new Date().toISOString(),
+      confirmations: pending,
+      activity: pillActivity.slice(-12).reverse(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 /**

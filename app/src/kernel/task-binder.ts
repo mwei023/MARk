@@ -178,7 +178,7 @@ export class TaskBinder {
     // directory as the search scope and normalize the rest. Never overrides
     // a query value bound from explicit evidence.
     const querySingle = Object.entries(properties).filter(
-      ([name, def]) => def.type === 'string' && /^(query|q|text|question|keywords|prompt)$/i.test(name),
+      ([name, def]) => def.type === 'string' && /^(query|q|text|question|keywords|prompt|title)$/i.test(name),
     );
     if (querySingle.length === 1 && input[querySingle[0][0]] === undefined) {
       const [name] = querySingle[0];

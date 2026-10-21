@@ -748,7 +748,7 @@ function isCreativeRequest(command: string): boolean {
  * plan can never satisfy one — shared by the hollow-reuse guard and the
  * workflow saver so both agree on what "doing" means.
  */
-export const ACTION_GOAL_RE = /\b(play|launch|start|restart|stop|send|delete|remove|create|write)\b/i;
+export const ACTION_GOAL_RE = /\b(play|launch|start|restart|stop|send|delete|remove|create|write|minimize|minimise|maximize|maximise|raise|open)\b/i;
 
 export function isHollowReuse(  plan: { steps: Array<{ toolId: string; input?: Record<string, unknown> }> },
   command: string,

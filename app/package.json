@@ -21,7 +21,8 @@
     "training:replay": "tsx Scripts/replay-synthetic-check.ts",
     "training:retrain": "tsx Scripts/retrain-routing-model.ts",
     "training:exercise": "tsx Scripts/self-exercise.ts",
-    "training:checks": "tsx Scripts/real-checks.ts"
+    "training:checks": "tsx Scripts/real-checks.ts",
+    "pill": "python3 Scripts/mark-pill.py"
   },
   "keywords": [],
   "author": "",

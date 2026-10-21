@@ -8,6 +8,10 @@ import {
 import {
   desktopDiscoveryProvider,
   desktopListAppsImplementation,
+  desktopWindowListImplementation,
+  desktopWindowShowImplementation,
+  desktopWindowMinimizeImplementation,
+  desktopWindowMaximizeImplementation,
   desktopOpenFamilyImplementation,
   desktopCloseFamilyImplementation,
   DESKTOP_OPEN_PREFIX,
@@ -194,6 +198,10 @@ export function registerNativeSystemProvider(
   }
 
   kernel.registerImplementation(desktopListAppsImplementation);
+  kernel.registerImplementation(desktopWindowListImplementation);
+  kernel.registerImplementation(desktopWindowShowImplementation);
+  kernel.registerImplementation(desktopWindowMinimizeImplementation);
+  kernel.registerImplementation(desktopWindowMaximizeImplementation);
 
   kernel.executor.registerFamilyImplementation(
     CONTAINER_RESTART_PREFIX,

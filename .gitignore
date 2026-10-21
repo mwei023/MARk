@@ -66,4 +66,4 @@ data/redis/
 **/.env
 **/.env.*
 !.env.example
-!**/.env.example
+!**/.env.example__pycache__/

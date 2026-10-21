@@ -3,7 +3,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-
 import {
   DiscoveryProvider,
   ResourceDescriptor,
@@ -256,6 +255,264 @@ export const desktopListAppsImplementation: ToolImplementation = {
   },
 };
 
+// ── window control (xdotool + EWMH; no wmctrl on this machine) ───────────────
+// The user asked for it: "a command running in a terminal — I choose to open
+// it, or tell MARK to maximize/minimize it." Window ops are reversible and
+// never kill the process behind a window.
+
+// tsx runs this file as CommonJS (package.json has no "type"), so __dirname
+// points at src/kernel/providers → ../../../Scripts = app/Scripts.
+const EWMH_SCRIPT = path.resolve(__dirname, '../../../Scripts/ewmh.py');
+
+interface XWindow { id: string; pid: number; title: string }
+
+/** The binder binds whole goals into title fields; normalize to name terms. */
+const WINDOW_NAME_STOP = new Set(['the', 'a', 'an', 'window', 'windows', 'open', 'show', 'minimize',
+  'minimise', 'maximize', 'maximise', 'restore', 'up', 'down', 'it', 'please', 'my',
+  'at', 'looking', 'left', 'right', 'side', 'on', 'to', 'of', 'and', 'in', 'for',
+  // generic desktop/goal vocab — a bound filter of only these means "no filter"
+  'list', 'apps', 'all', 'me', 'give', 'current', 'visible', 'running', 'then', 'pls']);
+
+function titleTerms(rawTitle: string): string[] {
+  return rawTitle.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1 && !WINDOW_NAME_STOP.has(t));
+}
+
+/** Score windows against name terms; any-window hit list, best first. */
+function scoreWindows(windows: XWindow[], terms: string[]): Array<{ w: XWindow; hits: number }> {
+  return windows
+    .map(w => {
+      const titleTokens = new Set(w.title.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+      const fullTitle = w.title.toLowerCase();
+      const hits = terms.filter(t => titleTokens.has(t) || fullTitle.includes(t)).length;
+      return { w, hits };
+    })
+    .filter(s => s.hits > 0)
+    .sort((a, b) => b.hits - a.hits);
+}
+
+/**
+ * All managed windows on the X display — read from the WM's _NET_CLIENT_LIST
+ * (what wmctrl shows), which includes iconified/hidden windows. Falls back to
+ * xdotool's visible-window search if xprop is unavailable for some reason.
+ */
+async function listXWindows(limit = 40): Promise<XWindow[]> {
+  let ids: string[] = [];
+  try {
+    const { stdout } = await execFileAsync('xprop', ['-root', '_NET_CLIENT_LIST'], { timeout: 10000, env: { ...process.env } });
+    const hexes = stdout.match(/0x[0-9a-f]+/gi) ?? [];
+    if (hexes.length > 0) {
+      ids = hexes.map(h => String(parseInt(h, 16))).slice(0, limit);
+    }
+  } catch { /* fall through to the visible-only path */ }
+  if (ids.length === 0) {
+    try {
+      const { stdout } = await execFileAsync('xdotool', ['search', '--onlyvisible', '--name', '.'], { timeout: 10000 });
+      ids = stdout.trim().split('\n').filter(Boolean).slice(0, limit);
+    } catch {
+      return []; // no X display from this context — honest empty, not an error
+    }
+  }
+  if (ids.length === 0) return [];
+  const windows: XWindow[] = [];
+  for (let i = 0; i < ids.length; i++) {
+    let pid = 0;
+    let title = '';
+    try {
+      const { stdout } = await execFileAsync('xdotool', ['getwindowpid', ids[i]], { timeout: 5000 });
+      pid = Number(stdout.trim()) || 0;
+    } catch { /* window vanished or no pid — reported as 0 */ }
+    try {
+      const { stdout } = await execFileAsync('xdotool', ['getwindowname', ids[i]], { timeout: 5000 });
+      title = stdout.trim();
+    } catch { /* vanished mid-enumeration — skip below */ }
+    if (title) windows.push({ id: ids[i], pid, title });
+  }
+  return windows;
+}
+
+function matchXWindow(input: { windowId?: string; pid?: string; title?: string }, windows: XWindow[]): XWindow {
+  const id = String(input.windowId ?? '').trim();
+  const pid = String(input.pid ?? '').trim();
+  const rawTitle = String(input.title ?? '').trim();
+  if (id) {
+    const hit = windows.find(w => w.id === id);
+    if (hit) return hit;
+    throw new Error(`No visible window with id ${id}. Run desktop.window_list.`);
+  }
+  if (pid) {
+    const hit = windows.find(w => String(w.pid) === pid);
+    if (hit) return hit;
+    throw new Error(`No visible window belongs to pid ${pid}. Run desktop.window_list.`);
+  }
+  if (rawTitle) {
+    // The binder binds the whole goal here ("minimize the catfish window");
+    // the titles we match are like "VLC media player" — strip operation
+    // words, then token-match.
+    const terms = titleTerms(rawTitle);
+    if (terms.length === 0) {
+      throw new Error(`No usable window name in "${rawTitle}". Name the app or window.`);
+    }
+    const scored = scoreWindows(windows, terms);
+    if (scored.length > 0) return scored[0].w;
+    throw new Error(`No visible window matches "${terms.join(' ')}". Run desktop.window_list.`);
+  }
+  throw new Error('Give one of: windowId, pid, or title.');
+}
+
+function windowObservation(kindLabel: string, w: XWindow, output: Record<string, unknown>) {
+  return {
+    output,
+    observations: [{
+      id: `observation-${Date.now()}`,
+      kind: 'application' as const,
+      source: 'desktop.native',
+      subject: `window:${w.id}`,
+      summary: `${kindLabel}: window "${w.title}" (id ${w.id}, pid ${w.pid}).`,
+      data: output,
+      confidence: 1,
+      observedAt: new Date().toISOString(),
+      relatedResourceIds: [],
+    }],
+  };
+}
+
+interface WindowSubject { windowId?: string; pid?: string; title?: string }
+
+export const desktopWindowListTool: ToolDescriptor = {
+  id: 'desktop.window_list',
+  name: 'List windows',
+  description: 'Lists all managed windows on the display (including hidden ones) with their ids, owning pids and titles. Read-only companion to the window state tools.',
+  version: '1.0.0',
+  domain: 'desktop',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Optional substring filter on window title.' },
+    },
+    required: [],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      count: { type: 'number' },
+      windows: { type: 'array' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['count', 'windows', 'capturedAt'],
+  },
+  capabilities: ['window-management', 'desktop'],
+  supportedResourceKinds: ['unknown'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'desktop.native',
+};
+
+export const desktopWindowListImplementation: ToolImplementation = {
+  toolId: desktopWindowListTool.id,
+
+  async execute({ action }) {
+    const filter = String(action.input.title ?? '').toLowerCase().trim();
+    const all = await listXWindows();
+    // filter may be a whole bound goal ("minimize the catfish window") —
+    // normalize to app-name terms the same way window state actions do.
+    const terms = filter ? titleTerms(filter) : [];
+    const matched = terms.length > 0 ? scoreWindows(all, terms).map(s => s.w) : all;
+    const windows = matched
+      .map(w => ({ id: w.id, pid: w.pid, title: w.title }));
+    const output = { count: windows.length, windows, truncated: all.length >= 25, capturedAt: new Date().toISOString() };
+    if (terms.length > 0 && windows.length === 0 && all.length > 0) {
+      throw new Error(`No visible window matches "${terms.join(' ')}". ${all.length} visible windows exist.`);
+    }
+    return {
+      output,
+      observations: [{
+        id: `observation-${Date.now()}`,
+        kind: 'application' as const,
+        source: 'desktop.native',
+        subject: 'x-windows',
+        summary: `Listed ${windows.length} visible window(s).`,
+        data: output,
+        confidence: 1,
+        observedAt: output.capturedAt,
+        relatedResourceIds: [],
+      }],
+    };
+  },
+};
+
+function makeWindowStateTool(id: string, name: string, verb: string): ToolDescriptor {
+  return {
+    id,
+    name,
+    description: `${verb[0].toUpperCase()}${verb.slice(1)} an existing window by window id, owning pid, or title substring. Never launches or kills anything. Use desktop.window_list to find ids.`,
+    version: '1.0.0',
+    domain: 'desktop',
+    risk: 'reversible',
+    available: true,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        windowId: { type: 'string', description: 'X window id (decimal), from desktop.window_list.' },
+        pid: { type: 'string', description: 'Owning process id.' },
+        title: { type: 'string', description: 'Title substring match (first match wins).' },
+      },
+      required: [],
+    },
+    outputSchema: {
+      type: 'object',
+      properties: {
+        window: { type: 'string' }, pid: { type: 'number' }, done: { type: 'boolean' }, capturedAt: { type: 'string' },
+      },
+      required: ['window', 'pid', 'done', 'capturedAt'],
+    },
+    capabilities: ['window-management', 'desktop'],
+    supportedResourceKinds: ['unknown'],
+    requiredPermissions: [],
+    reversible: true,
+    metadata: {},
+    provider: 'desktop.native',
+  };
+}
+
+async function windowStateAction(subject: WindowSubject, verb: 'show' | 'minimize' | 'maximize') {
+  const windows = await listXWindows(60);
+  const w = matchXWindow(subject, windows);
+  if (verb === 'show') {
+    await execFileAsync('xdotool', ['windowactivate', '--sync', w.id], { timeout: 10000 });
+    return windowObservation('Showed', w, { window: w.id, pid: w.pid, title: w.title, done: true, capturedAt: new Date().toISOString() });
+  }
+  if (verb === 'minimize') {
+    await execFileAsync('xdotool', ['windowminimize', w.id], { timeout: 10000 });
+    return windowObservation('Minimized', w, { window: w.id, pid: w.pid, title: w.title, done: true, capturedAt: new Date().toISOString() });
+  }
+  // Maximize: activate first (un-minimizes + raises — the user asking for a
+  // hidden window to be maximized expects to SEE it), then the real EWMH
+  // ClientMessage (no wmctrl here).
+  await execFileAsync('xdotool', ['windowactivate', '--sync', w.id], { timeout: 10000 });
+  await execFileAsync('python3', [EWMH_SCRIPT, 'maximize', w.id], { timeout: 10000 });
+  return windowObservation('Maximized', w, { window: w.id, pid: w.pid, title: w.title, done: true, capturedAt: new Date().toISOString() });
+}
+
+export const desktopWindowShowTool = makeWindowStateTool('desktop.window_show', 'Show window', 'raise, focus and un-minimize');
+export const desktopWindowMinimizeTool = makeWindowStateTool('desktop.window_minimize', 'Minimize window', 'minimize');
+export const desktopWindowMaximizeTool = makeWindowStateTool('desktop.window_maximize', 'Maximize window', 'maximize');
+
+export const desktopWindowShowImplementation: ToolImplementation = {
+  toolId: 'desktop.window_show',
+  async execute({ action }) { return windowStateAction(action.input as WindowSubject, 'show'); },
+};
+export const desktopWindowMinimizeImplementation: ToolImplementation = {
+  toolId: 'desktop.window_minimize',
+  async execute({ action }) { return windowStateAction(action.input as WindowSubject, 'minimize'); },
+};
+export const desktopWindowMaximizeImplementation: ToolImplementation = {
+  toolId: 'desktop.window_maximize',
+  async execute({ action }) { return windowStateAction(action.input as WindowSubject, 'maximize'); },
+};
+
 async function resolveEntry(appId: string): Promise<DesktopEntry> {
   const entries = await scanDesktopEntries();
   const entry = entries.find(candidate => candidate.appId === appId.toLowerCase());
@@ -394,6 +651,10 @@ export const desktopDiscoveryProvider: DiscoveryProvider = {
     const entries = await scanDesktopEntries();
     return [
       desktopListAppsTool,
+      desktopWindowListTool,
+      desktopWindowShowTool,
+      desktopWindowMinimizeTool,
+      desktopWindowMaximizeTool,
       ...entries.flatMap(entry => [desktopOpenTool(entry), desktopCloseTool(entry)]),
     ];
   },
