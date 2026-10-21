@@ -125,9 +125,12 @@ class Pill(Gtk.Window):
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
-        self.set_resizable(False)
-        self.set_accept_focus(False)
+        # NOTE: resizable(False) would fix min=max size hints and the WM then
+        # clamps every programmatic resize() — the wnd/expand panels would
+        # never grow (observed live). Keep resizable; the window is small,
+        # undecorated and the panels are the intended size changes.
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+        self.set_accept_focus(False)  # never steal keyboard focus; clicks still deliver
         self.stick()
         self.set_opacity(0.9)
 
@@ -199,11 +202,11 @@ class Pill(Gtk.Window):
         strip.pack_end(quit_btn, False, False, 0)
 
         self.detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        self.detail.set_no_show_all(True)
+        self.detail.set_visible(False)
         self.box.pack_start(self.detail, False, False, 0)
 
         self.windows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.windows_box.set_no_show_all(True)
+        self.windows_box.set_visible(False)
         self.box.pack_start(self.windows_box, False, False, 0)
 
         self.resize(340, 44)
@@ -211,13 +214,22 @@ class Pill(Gtk.Window):
         GLib.timeout_add(POLL_MS, self.poll_tick)
         GLib.timeout_add(1500, self.collapse_tick)
 
+        # QA hook: PILL_TEST=1 spawns a throwaway instance at (600,300) with
+        # the window panel pre-opened, so the wnd rendering path can be
+        # screenshot-verified without hand interaction.
+        if os.environ.get('PILL_TEST'):
+            self.move(600, 300)
+            GLib.timeout_add(1200, self._wc_test)  # pending ask → goto False
+
+    def _wc_test(self):
+        self.toggle_windows(None)
+        return False
+
     # ── drag handling ────────────────────────────────────────────────────────
     def on_drag_press(self, widget, event):
         if event.button == 1:
-            x, y = self.get_position()
             self.begin_move_drag(event.button,
                                  int(event.x_root), int(event.y_root),
-                                 int(event.x_root) - x, int(event.y_root) - y,
                                  event.time)
 
     def on_line_press(self, widget, event):
@@ -361,18 +373,25 @@ class Pill(Gtk.Window):
                 row.get_style_context().add_class('cardbody')
                 self.detail.pack_start(row, False, False, 0)
 
-        self.detail.show_all()
+        # only surface children when the panel itself is open; a blind
+        # show_all() here would force the detail panel open every poll
+        if self.detail.get_visible():
+            self.detail.show_all()
         self._resize_to_content()
 
     # ── windows section ──────────────────────────────────────────────────────
     def toggle_windows(self, _btn):
         self.windows_shown = not self.windows_shown
-        self.windows_dirty = True
         self.windows_box.set_visible(self.windows_shown)
+        if self.windows_shown:
+            # fill now — waiting for the next 3s poll made the panel feel dead
+            threading.Thread(target=self._bg_windows, daemon=True).start()
+            self.windows_dirty = False
         self._resize_to_content()
 
     def _refresh_windows(self):
         if self.windows_shown and self.windows_dirty:
+            self.windows_dirty = False
             threading.Thread(target=self._bg_windows, daemon=True).start()
 
     def _bg_windows(self):
@@ -401,7 +420,8 @@ class Pill(Gtk.Window):
                 b.connect('clicked', lambda _b, o=op, _w=wid: window_op(o, _w))
                 row.pack_end(b, False, False, 0)
             self.windows_box.pack_start(row, False, False, 0)
-        self.windows_box.show_all()
+        if self.windows_box.get_visible():
+            self.windows_box.show_all()
         self._resize_to_content()
         return False
 
