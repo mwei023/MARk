@@ -59,6 +59,10 @@ export function logRoutingDecision(args: {
 }): void {
   const text = (args.text ?? '').trim();
   if (!text) return;
+  // Data hygiene: raw confirmation ids ("confirm_mvxexe8w8zcskqnb") are
+  // approval plumbing, not user phrasing — rows logged from them would be
+  // meaningless training examples that poison the distillation set.
+  if (/^confirm_[a-z0-9_]{6,}$/i.test(text)) return;
   appendRow('routing.jsonl', {
     text: clip(text),
     label: args.label,
