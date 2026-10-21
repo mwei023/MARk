@@ -25,6 +25,7 @@ export type FailureType =
   | 'NETWORK_ERROR'
   | 'TIMEOUT'
   | 'PERMISSION_ERROR'
+  | 'DISK_FULL'
   | 'UNKNOWN';
 
 export interface ClassificationResult {
@@ -151,6 +152,8 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
       { pattern: /killed/i, weight: 1, label: 'process_killed' },
       { pattern: /ENOMEM/i, weight: 2, label: 'enomem' },
       { pattern: /allocation failed.*memory/i, weight: 3, label: 'allocation_failed_memory' },
+      { pattern: /low memory:\s*\d+MB of \d+MB memory available \(\d+%\)/i, weight: 4, label: 'low_memory_machine_check' },
+      { pattern: /memory pressure (high|critical)/i, weight: 3, label: 'memory_pressure' },
     ],
   },
   {
@@ -165,6 +168,7 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
       { pattern: /connection refused/i, weight: 2, label: 'connection_refused' },
       { pattern: /failed to fetch|ERR_NAME_NOT_RESOLVED/i, weight: 2, label: 'dns_or_fetch' },
       { pattern: /getaddrinfo ENOTFOUND|dns lookup failed/i, weight: 2, label: 'dns_failure' },
+      { pattern: /did not accept a\s*(tcp\s*)?connection|service unreachable/i, weight: 3, label: 'service_unreachable' },
     ],
   },
   {
@@ -188,6 +192,18 @@ const FAILURE_DEFINITIONS: FailureDefinition[] = [
       { pattern: /access denied/i, weight: 2, label: 'access_denied' },
       { pattern: /operation not permitted/i, weight: 2, label: 'operation_not_permitted' },
       { pattern: /permission denied.*(mkdir|open|write|create)/i, weight: 2, label: 'permission_denied_file_operation' },
+    ],
+  },
+  {
+    // Real-world disk exhaustion: ENOSPC everywhere, df thresholds, quota
+    // errors. Observed live: "CRITICAL Filesystem / at 99% used".
+    type: 'DISK_FULL',
+    signals: [
+      { pattern: /no space left on device|ENOSPC/i, weight: 5, label: 'enospc' },
+      { pattern: /filesystem\s+\S+\s+at\s+\d{2,3}%\s+used/i, weight: 3, label: 'filesystem_pct_used' },
+      { pattern: /disk.*(full|exhausted)|(97|98|99|100)%\s*used/i, weight: 3, label: 'disk_full_pct' },
+      { pattern: /disk quota exceeded/i, weight: 4, label: 'disk_quota' },
+      { pattern: /write failed.*disk|disk write error/i, weight: 2, label: 'disk_write_error' },
     ],
   },
 ];
