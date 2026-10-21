@@ -580,38 +580,59 @@ export const fsFileSearchImplementation: ToolImplementation = {
     // Fixed flags only; the pattern travels as an operand after `--`,
     // never through a shell. grep exits 1 on no matches: that is an
     // empty result, not a failure.
-    const args = ['-r', '-n', '-I', '-m', '3', '--exclude-dir=node_modules', '--exclude-dir=.git'];
-    if (include) args.push(`--include=${include}`);
-    args.push('--', pattern, resolved);
+    // Two-phase search: a full recursive grep over a home directory can
+    // emit gigabytes of matching LINES (observed: maxBuffer blowup on
+    // "find thor in this pc"). Phase 1 lists files-with-matches only
+    // (bounded output), phase 2 greps just the top files for line/preview.
+    const baseArgs = ['-r', '-l', '-I', '--exclude-dir=node_modules', '--exclude-dir=.git'];
+    if (include) baseArgs.push(`--include=${include}`);
+    const listArgs = [...baseArgs, '--', pattern, resolved];
 
-    let stdout = '';
+    let fileList = '';
     try {
-      ({ stdout } = await execFileAsync('grep', args, { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }));
+      ({ stdout: fileList } = await execFileAsync('grep', listArgs, {
+        timeout: 30000,
+        maxBuffer: 8 * 1024 * 1024,
+        killSignal: 'SIGKILL',
+      }));
     } catch (error: any) {
-      if (Number((error as any)?.code) === 1) {
-        stdout = '';
+      if (Number(error?.code) === 1) {
+        fileList = '';
+      } else if (typeof error?.stdout === 'string' && error.stdout.trim()) {
+        // Killed mid-scan (signal) — keep the partial file list, flag it.
+        fileList = error.stdout;
       } else {
         throw new Error(`Search failed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
 
-    const matches = stdout
-      .split('\n')
-      .map(line => line.trim())
-      .filter(Boolean)
-      .map(line => {
-        const first = line.indexOf(':');
-        const second = line.indexOf(':', first + 1);
-        if (first < 0 || second < 0) return null;
-        return {
-          file: line.slice(0, first),
-          line: Number(line.slice(first + 1, second)) || 0,
-          preview: line.slice(second + 1, second + 201),
-        };
-      })
-      .filter((entry): entry is { file: string; line: number; preview: string } => entry !== null)
-      .slice(0, limit + 1);
-    const truncated = matches.length > limit;
+    const files = fileList.split('\n').map(l => l.trim()).filter(Boolean);
+    const matches: Array<{ file: string; line: number; preview: string }> = [];
+    const scanLimit = Math.min(files.length, limit + 10);
+    for (const file of files.slice(0, scanLimit)) {
+      try {
+        const { stdout: detail } = await execFileAsync('grep', ['-n', '-I', '-m', '3', '--', pattern, file], {
+          timeout: 10000,
+          maxBuffer: 512 * 1024,
+        });
+        for (const line of detail.split('\n').filter(Boolean)) {
+          const first = line.indexOf(':');
+          if (first < 0) continue;
+          matches.push({
+            file,
+            line: Number(line.slice(0, first)) || 0,
+            preview: line.slice(first + 1, first + 201),
+          });
+          if (matches.length >= limit) break;
+        }
+      } catch (error: any) {
+        if (Number(error?.code) !== 1 && Number(error?.code) !== 0) {
+          continue; // unreadable single file — skip it, keep scanning
+        }
+      }
+      if (matches.length >= limit) break;
+    }
+    const truncated = files.length > scanLimit || matches.length > limit;
     const sliced = matches.slice(0, limit);
 
     const output = {

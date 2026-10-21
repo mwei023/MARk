@@ -169,30 +169,33 @@ export class TaskBinder {
       }
     }
 
-    // Free-text fallback: when nothing matched but the tool has exactly one
-    // string field shaped like a query box (search/play/ask tools), the
-    // whole goal is the value. "play donda album" binds query wholesale;
-    // the tool itself normalizes ("play", "album" are its domain words).
-    // Never fires when any field already matched — no silent overrides.
-    if (matchedFields.length === 0) {
-      const singles = Object.entries(properties).filter(
-        ([name, def]) => def.type === 'string' && /^(query|q|text|question|keywords|prompt)$/i.test(name),
-      );
-      if (singles.length === 1) {
-        const [name] = singles[0];
-        const value = goal.trim().slice(0, 300);
-        if (value) {
-          input[name] = value;
-          matchedFields.push(name);
-          return {
-            input,
-            missingRequired: required.filter(field => input[field] === undefined),
-            matchedFields,
-            complete: required.every(field => input[field] !== undefined),
-            reason: `Free-text fallback: whole goal bound to "${name}" (guess, not evidence).`,
-            freeText: true,
-          };
-        }
+    // Free-text fallback: when the tool has exactly one string field shaped
+    // like a query box (search/play/ask tools) and that field is still
+    // empty, the whole goal is the value. "play donda album" binds query
+    // wholesale; the tool itself normalizes ("play", "album" are its domain
+    // words). Fires even after a location field matched: "play thor 2011
+    // movie" binds path=~/Videos AND query — the tools treat the bound
+    // directory as the search scope and normalize the rest. Never overrides
+    // a query value bound from explicit evidence.
+    const querySingle = Object.entries(properties).filter(
+      ([name, def]) => def.type === 'string' && /^(query|q|text|question|keywords|prompt)$/i.test(name),
+    );
+    if (querySingle.length === 1 && input[querySingle[0][0]] === undefined) {
+      const [name] = querySingle[0];
+      const value = goal.trim().slice(0, 300);
+      if (value) {
+        input[name] = value;
+        matchedFields.push(name);
+        return {
+          input,
+          missingRequired: required.filter(field => input[field] === undefined),
+          matchedFields,
+          complete: required.every(field => input[field] !== undefined),
+          reason: matchedFields.length > 1
+            ? `Location bound plus free-text: whole goal bound to "${name}" (guess, tools normalize).`
+            : `Free-text fallback: whole goal bound to "${name}" (guess, not evidence).`,
+          freeText: true,
+        };
       }
     }
 

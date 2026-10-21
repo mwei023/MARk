@@ -5,6 +5,7 @@ import { createSystemCheckTool } from '../../tools/system_check';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'node:os';
+import path from 'node:path';
 
 const execFilePromise = promisify(execFile);
 
@@ -54,6 +55,38 @@ export class LocalHostCapability implements Capability {
     }
 
     if (intent.type === 'files') {
+      // Machine-wide filename search ("find thor in this pc" → *thor*).
+      // Multi-term queries ("thor 2011") require all terms in the basename.
+      if (intent.name) {
+        const terms = intent.name.split(/\s+/).filter(Boolean);
+        const target = intent.path?.trim() || homedir();
+        try {
+          const { stdout } = await promisify(execFile)('find', [
+            target, '-maxdepth', '5', '-not', '-path', '*/node_modules/*',
+            '-not', '-path', '*/.git/*', '-type', 'f',
+            '-iname', `*${terms[0]}*`,
+          ], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 })
+            .catch((err: { stdout?: string }) => {
+              // find exits 1 on unreadable directories — that is a partial
+              // result, not a failure. Only fail when nothing was scanned.
+              if (typeof err?.stdout === 'string' && err.stdout.trim()) return { stdout: err.stdout };
+              throw new Error('search failed (critical error)');
+            });
+          let found = stdout.trim() ? stdout.trim().split('\n') : [];
+          // Whole-token name matching: "thor" should hit Thor.2011.mp4, not
+          // every author/authority file with "thor" buried inside a word.
+          found = found.filter(file => {
+            const tokens = path.basename(file).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+            return terms.every(term => tokens.includes(term));
+          });
+          if (found.length === 0) return `No file named like "${intent.name}" found under ${target}.`;
+          const shown = found.slice(0, 25);
+          const more = found.length > shown.length ? `\n… and ${found.length - shown.length} more` : '';
+          return `Found ${found.length} file(s) matching "${intent.name}" under ${target}:\n${shown.join('\n')}${more}`;
+        } catch (error: any) {
+          return `Could not search ${target}: ${error.message || 'unknown error'}`;
+        }
+      }
       // Search-first phrasing ("list all mp4 files"): if the input names a
       // file extension, answer with a filename find instead of a raw listing.
       const extMatch = /\b(?:mp4|mkv|avi|mov|mp3|wav|flac|pdf|docx?|xlsx?|pptx?|csv|zip|tar|jpe?g|png|gif|svg|txt|md|json|ts|js|py|ipynb)\b/i

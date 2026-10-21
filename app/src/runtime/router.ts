@@ -5,7 +5,7 @@ import { homedir } from 'node:os';
 export type LocalIntent = 
   | { type: 'time' }
   | { type: 'date' }
-  | { type: 'files'; path?: string }
+  | { type: 'files'; path?: string; name?: string }
   | { type: 'system'; metric: 'disk' | 'memory' | 'cpu' }
   | null;
 
@@ -33,6 +33,16 @@ const INTENT_PATTERNS = [
     regex: /\banything\b[^.]{0,40}?\b(files?|dirs?|directories?|folders?|drives?)\b/i,
     type: 'files',
   },
+  // Machine-wide filename search: "find thor in this pc", "search for my
+  // cv on this computer". The user is looking for FILES NAMED ~term, which
+  // the local capability answers with a read-only find (observed live:
+  // fell to the kernel, resolved a desktop app-finder GUI, and asked for
+  // approval to open a window instead of finding anything). The machine
+  // phrase is REQUIRED — plain "find X" stays with the kernel/reasoning.
+  {
+    regex: /\b(?:find|locate|look for)\b\s+(?:the\s+|my\s+|a\s+)?([a-z0-9][a-z0-9 ._-]{0,29})\s+(?:in|on|across)\s+(?:this|my|the)\s+(?:pc|computer|machine|device|laptop)\b/i,
+    type: 'files',
+  },
   { regex: /\b(disk|storage|df|space)\b/i, type: 'system', metric: 'disk' as const },
   { regex: /\b(memory|ram|free|htop)\b/i, type: 'system', metric: 'memory' as const },
   { regex: /\b(cpu|load|processor)\b/i, type: 'system', metric: 'cpu' as const },
@@ -51,6 +61,18 @@ const HOME_DIRS: Record<string, string> = {
   music: 'Music',
 };
 const DIR_NAME_RE = /\b(downloads?|documents?|desktop|pictures?|videos?|music|home)\s+(folder|directory|dir)\b/i;
+
+// "find thor in this pc" → search term "thor" (machine-phrase required by
+// the matching regex, so this extractor only sees qualified goals).
+const MACHINE_FIND_RE = /\b(?:find|locate|look for)\b\s+(?:the\s+|my\s+|a\s+)?([a-z0-9][a-z0-9 ._-]{0,29})\s+(?:in|on|across)\s+(?:this|my|the)\s+(?:pc|computer|machine|device|laptop)\b/i;
+
+const extractFileName = (input: string): string | undefined => {
+  const m = MACHINE_FIND_RE.exec(input);
+  if (!m) return undefined;
+  const name = m[1].trim().toLowerCase();
+  // Drop empty/cargo-cult terms; keep it a real search term.
+  return /^[a-z0-9]/.test(name) && name.length >= 2 ? name : undefined;
+};
 
 const extractFilesPath = (input: string): string | undefined => {
   const m = DIR_NAME_RE.exec(input);
@@ -72,7 +94,9 @@ export const routeLocally = (input: string): LocalIntent => {
       if (type === 'files') {
         // Bind a home-relative target when the user names a real folder
         // ("downloads folder" → $HOME/Downloads). Unbound → caller default.
-        return { type: 'files', path: extractFilesPath(input) };
+        const path = extractFilesPath(input);
+        const name = extractFileName(input);
+        return { type: 'files', path, name };
       }
       return { type, ...(rest as any) };
     }

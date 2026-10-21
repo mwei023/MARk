@@ -15,8 +15,19 @@ import { parseDuckResults } from './browser';
 const execFileAsync = promisify(execFile);
 
 const AUDIO_EXTENSIONS = new Set(['.mp3', '.flac', '.ogg', '.oga', '.wav', '.m4a', '.opus', '.aac']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.wmv', '.flv', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv']);
 const MUSIC_LIBRARY = `${os.homedir()}/Music`;
 const TRACK_CACHE = `${os.homedir()}/.cache/mark-music`;
+// Video playback is jail-scoped the same way music is: real, existing video
+// files under the user's media roots (Videos/Downloads/Desktop/Movies).
+// Streaming video from the web is NOT offered — browser-level DRM and
+// licensing make "play any movie" a lie; local files only.
+const VIDEO_ROOTS = [
+  `${os.homedir()}/Videos`,
+  `${os.homedir()}/Downloads`,
+  `${os.homedir()}/Desktop`,
+  `${os.homedir()}/Movies`,
+];
 const EXTRACT_MAX_BYTES = 200 * 1024 * 1024;
 
 export interface FoundTrack {
@@ -161,6 +172,16 @@ export const mediaFindTracksImplementation: ToolImplementation = {
     const query = typeof action.input.query === 'string' ? action.input.query : '';
     const requested = typeof action.input.limit === 'number' ? Math.floor(action.input.limit) : 20;
     const limit = Math.min(Math.max(requested, 1), 50);
+
+    // Scope honesty: this tool answers from the MUSIC LIBRARY only. A goal
+    // scoped to the whole machine ("find thor in this pc") must not come
+    // back dressed as a machine-wide result — it never was one.
+    if (/\b(this\s+)?(pc|computer|machine|laptop|device|hard\s?drive|disk)\b/i.test(query)) {
+      throw new Error(
+        'Refused: find_tracks only searches the music library (~/Music), not the whole machine. ' +
+        'For machine-wide search say "search my pc for <term> files" (fs.file_search).',
+      );
+    }
 
     const tracks = await findTracks(MUSIC_LIBRARY, query, limit);
     const output = {
@@ -452,11 +473,244 @@ function resolvePlayableFile(rawPath: string): string {  if (!rawPath) throw new
   if (!jails.some(jail => resolved === jail || resolved.startsWith(jail + path.sep))) {
     throw new Error(`Refused: "${rawPath}" is outside the music library and track cache.`);
   }
+  if (VIDEO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
+    throw new Error(`Refused: "${resolved}" is a video file. Ask me to play it as a video (media.play_video) instead.`);
+  }
   if (!AUDIO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
     throw new Error(`Refused: "${resolved}" is not a supported audio file.`);
   }
   return resolved;
 }
+
+function resolveVideoFile(rawPath: string): string {
+  if (!rawPath) throw new Error('A video file path is required to play.');
+  const resolved = path.resolve(rawPath);
+  const jails = VIDEO_ROOTS.map(root => path.resolve(root));
+  if (!jails.some(jail => resolved === jail || resolved.startsWith(jail + path.sep))) {
+    throw new Error(`Refused: "${rawPath}" is outside the video roots (${VIDEO_ROOTS.map(r => r.replace(os.homedir(), '~')).join(', ')}).`);
+  }
+  if (!VIDEO_EXTENSIONS.has(path.extname(resolved).toLowerCase())) {
+    throw new Error(`Refused: "${resolved}" is not a supported video file (${[...VIDEO_EXTENSIONS].join(', ')}).`);
+  }
+  return resolved;
+}
+
+/** Walk video roots and score filenames against the query, mirroring findTracks. */
+async function walkVideoFiles(root: string, depth: number, out: string[]): Promise<void> {
+  if (depth < 0) return;
+  let dirents;
+  try {
+    dirents = await fs.readdir(root, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const dirent of dirents) {
+    if (dirent.name.startsWith('.')) continue; // hidden dirs are config, not movies
+    const full = path.join(root, dirent.name);
+    if (dirent.isFile() && VIDEO_EXTENSIONS.has(path.extname(dirent.name).toLowerCase())) {
+      out.push(full);
+    } else if (dirent.isDirectory()) {
+      await walkVideoFiles(full, depth - 1, out);
+    }
+  }
+}
+
+/** Rank videos across roots by term-overlap against the query (mirrors findTracks). */
+async function rankVideos(query: string, limit: number, roots: string[] = VIDEO_ROOTS): Promise<{ best?: string; count: number; candidates: string[] }> {
+  const found: string[] = [];
+  for (const root of roots) {
+    await walkVideoFiles(root, 4, found);
+  }
+  if (found.length === 0) return { count: 0, candidates: [] };
+  const STOP = new Set(['the', 'a', 'an', 'of', 'and', 'for', 'to', 'in', 'on', 'my',
+    'play', 'watch', 'movie', 'film', 'video', 'episode', 'show', 'pc', 'folder', 'file']);
+  const terms = query.toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 1 && !STOP.has(t));
+  if (terms.length === 0) return { best: found[0], count: found.length, candidates: found };
+  const scored = found.map(file => {
+    const name = path.basename(file).toLowerCase();
+    let hits = 0;
+    for (const term of terms) {
+      if (name.includes(term)) hits++;
+    }
+    return { file, score: hits / terms.length };
+  }).filter(s => s.score >= 0.5)
+    // Exact-term-full matches first, then shorter filenames (the movie file
+    // beats its trailer/copy).
+    .sort((a, b) => b.score - a.score || a.file.length - b.file.length);
+  const winners = scored.slice(0, limit).map(s => s.file);
+  return { best: winners[0], count: found.length, candidates: winners };
+}
+
+function resolveVideoScope(rawPath: string): string {
+  const resolved = path.resolve(rawPath);
+  const jails = VIDEO_ROOTS.map(root => path.resolve(root));
+  if (!jails.some(jail => resolved === jail || resolved.startsWith(jail + path.sep))) {
+    throw new Error(`Refused: "${rawPath}" is outside the video roots (${VIDEO_ROOTS.map(r => r.replace(os.homedir(), '~')).join(', ')}).`);
+  }
+  return resolved;
+}
+
+/** How many videos live in the OTHER media roots (for honest hints). */
+async function countVideosInOtherRoots(scope: string): Promise<number> {
+  let count = 0;
+  const resolvedScope = path.resolve(scope);
+  for (const root of VIDEO_ROOTS) {
+    const resolved = path.resolve(root);
+    if (resolved === resolvedScope || resolvedScope.startsWith(resolved + path.sep)) continue;
+    const files: string[] = [];
+    await walkVideoFiles(resolved, 4, files);
+    count += files.length;
+  }
+  return count;
+}
+
+async function pickVideoPlayer(): Promise<{ command: string; args: string[]; name: string }> {
+  for (const candidate of [
+    { command: 'mpv', args: ['--really-quiet'], name: 'mpv' },
+    { command: 'cvlc', args: ['--play-and-exit', '--quiet'], name: 'vlc' },
+  ]) {
+    try {
+      await execFileAsync(candidate.command, ['--version'], { timeout: 10000 });
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+  throw new Error('No video player found (looked for mpv, vlc).');
+}
+
+export const mediaPlayVideoTool: ToolDescriptor = {
+  id: 'media.play_video',
+  name: 'Play video',
+  description: 'Plays a local video file (movie, film, episode, clip) by name or path from the user\'s Videos, Downloads, Desktop, or Movies directories. Verifies the player is running. Web/streaming video is not offered: local files only.',
+  version: '1.0.0',
+  domain: 'media',
+  risk: 'reversible',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Video file path under the video roots.' },
+      query: { type: 'string', description: 'Video name to find and play, e.g. "thor 2011".' },
+    },
+    required: [],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      file: { type: 'string' },
+      player: { type: 'string' },
+      pid: { type: 'number' },
+      running: { type: 'boolean' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['file', 'player', 'pid', 'running', 'capturedAt'],
+  },
+  capabilities: ['video-playback', 'media'],
+  supportedResourceKinds: ['unknown'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'media.native',
+};
+
+export const mediaPlayVideoImplementation: ToolImplementation = {
+  toolId: mediaPlayVideoTool.id,
+
+  async execute({ action }) {
+    const rawPath = String(action.input.path ?? '');
+    const query = String(action.input.query ?? '').trim().slice(0, 200);
+    if (!rawPath && !query) {
+      throw new Error('Nothing to play: name a video (e.g. "play the thor movie") or give a path under your Videos/Downloads/Desktop directories.');
+    }
+    let file: string;
+    let scopeNote = '';
+    if (rawPath) {
+      const st = await fs.stat(rawPath).catch(() => null);
+      if (st?.isDirectory()) {
+        // A bound directory ("downloads folder", "videos") is a SCOPE, not
+        // the playable thing. Search inside it for the query; the binder
+        // binds query=whole goal, so normalize via rankVideos' stop words.
+        const scope = resolveVideoScope(rawPath);
+        let result = await rankVideos(query, 5, [scope]);
+        let fellBack = false;
+        if (!result.best && query.trim()) {
+          // Scope named but nothing matched there: fall back to the user's
+          // other media roots — "play thor 2011 movie" bound movie→~/Videos
+          // while the file lives in ~/Downloads. Refusing to look would
+          // trade one more round-trip for zero safety gain (same jail).
+          result = await rankVideos(query, 5, VIDEO_ROOTS.filter(r => path.resolve(r) !== path.resolve(scope)));
+          fellBack = true;
+        }
+        const { best, candidates } = result;
+        if (!best) {
+          const others = await countVideosInOtherRoots(scope);
+          throw new Error(
+            `No video matching "${query || '(no name given)'}" under ${scope.replace(os.homedir(), '~')}.` +
+            (candidates.length > 0
+              ? ` Videos found there: ${candidates.slice(0, 3).map(f => `"${path.basename(f)}"`).join(', ')} — name one.`
+              : others > 0
+                ? ` ${others} video(s) exist under your other media folders — say where ("play it from downloads") or give the exact path.`
+                : ' Drop the file into Videos/Downloads/Desktop, or give its exact path.'),
+          );
+        }
+        file = best;
+        scopeNote = fellBack
+          ? ` (not in the named folder — found under ${path.dirname(file).replace(os.homedir(), '~')})`
+          : '';
+      } else {
+        file = resolveVideoFile(rawPath);
+        await fs.stat(file);
+      }
+    } else {
+      const { best, count } = await rankVideos(query, 5);
+      if (!best) {
+        throw new Error(
+          `No video matching "${query}" found under Videos/Downloads/Desktop${count === 0 ? ' (those roots are empty)' : ` (${count} videos exist — none matched)`}. ` +
+          'Drop the file there, or give its exact path.',
+        );
+      }
+      file = best;
+    }
+    const player = await pickVideoPlayer();
+    const child = spawn(player.command, [...player.args, file], { detached: true, stdio: 'ignore' });
+    await new Promise<void>(resolve => {
+      child.on('error', () => resolve());
+      child.on('spawn', () => resolve());
+    });
+    if (child.pid === undefined) {
+      throw new Error(`Player ${player.name} failed to start for "${file}".`);
+    }
+    trackPlayer(child.pid, child, file);
+    child.unref();
+    await new Promise(resolve => setTimeout(resolve, STREAM_STARTUP_WAIT_MS));
+    let running = true;
+    try {
+      process.kill(child.pid, 0);
+    } catch {
+      running = false;
+      untrackPlayer(child.pid);
+    }
+    const output = {
+      file, player: player.name, pid: child.pid, running,
+      capturedAt: new Date().toISOString(),
+    };
+    return {
+      output,
+      observations: [{
+        id: `observation-${Date.now()}`,
+        kind: 'output',
+        source: 'media.native',
+        subject: file,
+        summary: `Playing video "${path.basename(file)}" on ${player.name} (pid ${child.pid}${running ? ', verified running' : ', failed to stay up'})${scopeNote}.`,
+        data: output,
+        confidence: 1,
+        observedAt: output.capturedAt,
+        relatedResourceIds: [],
+      }],
+    };
+  },
+};
 
 async function pickPlayer(): Promise<{ command: string; args: string[]; name: string }> {
   for (const candidate of [
@@ -820,12 +1074,13 @@ export const mediaStopImplementation: ToolImplementation = {
   },
 };
 
-export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool, mediaNowPlayingTool, mediaStopTool];
+export const mediaNativeTools: ToolDescriptor[] = [mediaFindTracksTool, mediaExtractTrackTool, mediaPlayTrackTool, mediaPlayVideoTool, mediaNowPlayingTool, mediaStopTool];
 
 export const mediaNativeImplementations: ToolImplementation[] = [
   mediaFindTracksImplementation,
   mediaExtractTrackImplementation,
   mediaPlayTrackImplementation,
+  mediaPlayVideoImplementation,
   mediaNowPlayingImplementation,
   mediaStopImplementation,
 ];
@@ -833,16 +1088,20 @@ export const mediaNativeImplementations: ToolImplementation[] = [
 export const mediaDiscoveryProvider: DiscoveryProvider = {
   id: 'media.native',
   name: 'Media library provider',
-  description: 'Discovers playable tracks in the local music library.',
+  description: 'Discovers playable tracks in the local music library and video files in the user\'s media directories.',
   priority: 85,
 
   async isAvailable(): Promise<boolean> {
-    try {
-      await fs.stat(MUSIC_LIBRARY);
-      return true;
-    } catch {
-      return false;
+    const roots = [MUSIC_LIBRARY, ...VIDEO_ROOTS];
+    for (const root of roots) {
+      try {
+        await fs.stat(root);
+        return true;
+      } catch {
+        continue;
+      }
     }
+    return false;
   },
 
   async discoverResources(): Promise<never[]> {

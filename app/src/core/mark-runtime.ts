@@ -753,7 +753,7 @@ export const ACTION_GOAL_RE = /\b(play|launch|start|restart|stop|send|delete|rem
 export function isHollowReuse(  plan: { steps: Array<{ toolId: string; input?: Record<string, unknown> }> },
   command: string,
   tools: ToolDescriptor[],
-  bind: (command: string, tool: ToolDescriptor) => { matchedFields: string[] },
+  bind: (command: string, tool: ToolDescriptor) => { matchedFields: string[]; freeText?: boolean },
   fresh?: { tool?: { id: string }; matchedTerms?: string[] },
 ): boolean {
   const first = plan.steps[0];
@@ -808,6 +808,14 @@ export function isHollowReuse(  plan: { steps: Array<{ toolId: string; input?: R
       if (goalLower.includes(value.toLowerCase())) continue; // goal restates the value
       return true; // stored essence the new goal never says: stale replay
     }
+  }
+  // Whole-goal query bindings ("query = the entire command") restate
+  // trivially — the goal always contains itself — so they are not evidence.
+  // When the stored plan rides on a free-text guess, fresh resolution must
+  // agree on the tool anyway (observed live: "find thor in this pc" replayed
+  // a music-library search while the resolver picked file search).
+  if (binding.freeText && fresh?.tool) {
+    return fresh.tool.id !== first.toolId || (fresh.matchedTerms?.length ?? 0) <= 1;
   }
   if (binding.matchedFields.length > 0) return false;
   if (!fresh?.tool) return false;

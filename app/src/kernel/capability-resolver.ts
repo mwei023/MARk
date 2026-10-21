@@ -32,6 +32,12 @@ const TOOL_HARM: Record<string, number> = {
   unknown: 6,
 };
 
+/** Domain-neutral verbs that can anchor any tool id and prove nothing. */
+const GENERIC_ACTION_VERBS = new Set(['find', 'search', 'list', 'show', 'open', 'play', 'look', 'get']);
+
+/** Domains that are themselves the generic layer — never penalized by the verb guard. */
+const GENERIC_DOMAINS = new Set(['filesystem', 'system']);
+
 /**
  * Resolves a natural-language goal against currently discovered
  * capabilities.
@@ -140,6 +146,26 @@ export class CapabilityResolver {
         // reliability bonus.
         if (goal.toLowerCase().includes(candidate.tool.id.toLowerCase())) {
           return { ...candidate, score: candidate.score + 2.0, matchedTerms: [...candidate.matchedTerms, candidate.tool.id], idAnchor: true };
+        }
+        return candidate;
+      })
+      .map(candidate => {
+        // Generic-verb hijack guard: a goal like "find thor in this pc"
+        // matches media.find_tracks ONLY on the generic verb "find" (its id
+        // anchor) — the object carries zero music vocabulary. A specialist
+        // id anchored by nothing but generic verbs is not evidence; demote
+        // it so the generic filesystem tool can answer. Goals with real
+        // domain words ("play some music", "find songs") keep their bonus.
+        if (
+          candidate.idAnchor &&
+          candidate.matchedTerms.length > 0 &&
+          candidate.matchedTerms.every(term => GENERIC_ACTION_VERBS.has(term)) &&
+          // filesystem/system tools ARE the generic layer — the penalty is
+          // for specialist domains claiming generic goals ("find thor"
+          // anchoring media.find_tracks on "find").
+          !GENERIC_DOMAINS.has(candidate.tool.domain)
+        ) {
+          return { ...candidate, score: candidate.score - 0.5 };
         }
         return candidate;
       })
