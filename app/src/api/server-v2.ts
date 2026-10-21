@@ -338,7 +338,9 @@ app.post('/api/command', async (req: any, res: any) => {
     }
 
     const result = await markRuntime.executeCommand(command, userId, source === 'voice' || source === 'cli' ? source : 'api', { sessionId });
-
+    if (process.env.MARK_ROUTING_DEBUG === 'on') {
+      console.log('[route-debug]', JSON.stringify({ command, sessionId, finalRoute: result.route, trace: (result as any).trace ?? null }));
+    }
     res.json({
       success: true,
       response: result.response,

@@ -4,6 +4,7 @@ import { stripQuoted } from '../../core/gateway';
 import { createSystemCheckTool } from '../../tools/system_check';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { homedir } from 'node:os';
 
 const execFilePromise = promisify(execFile);
 
@@ -52,9 +53,49 @@ export class LocalHostCapability implements Capability {
       })}.`;
     }
 
-    const command = intent.type === 'files'
-      ? 'ls -la ~'
-      : intent.metric === 'disk' ? 'df -h /'
+    if (intent.type === 'files') {
+      // Search-first phrasing ("list all mp4 files"): if the input names a
+      // file extension, answer with a filename find instead of a raw listing.
+      const extMatch = /\b(?:mp4|mkv|avi|mov|mp3|wav|flac|pdf|docx?|xlsx?|pptx?|csv|zip|tar|jpe?g|png|gif|svg|txt|md|json|ts|js|py|ipynb)\b/i
+        .exec(stripped);
+      const ext = extMatch ? extMatch[0].toLowerCase() : null;
+      if (ext) {
+        const target = intent.path?.trim() || homedir();
+        try {
+          const { stdout } = await promisify(execFile)('find', [
+            target, '-maxdepth', '5', '-not', '-path', '*/node_modules/*',
+            '-type', 'f', '-iname', `*.${ext}`,
+          ], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 })
+            .catch((err: { stdout?: string; stderr?: string; message?: string }) => {
+              // find exits 1 when it hits unreadable directories — that is
+              // a partial result, not a failure. Only fail with no matches.
+              if (typeof err?.stdout === 'string' && err.stdout.trim()) return { stdout: err.stdout };
+              throw new Error('nothing found (critical error)');
+            });
+          const found = stdout.trim() ? stdout.trim().split('\n') : [];
+          if (found.length === 0) return `No ${ext} files found under ${target}.`;
+          const shown = found.slice(0, 25);
+          const more = found.length > shown.length ? `\n… and ${found.length - shown.length} more` : '';
+          return `Found ${found.length} ${ext} file(s) under ${target}:\n${shown.join('\n')}${more}`;
+        } catch (error: any) {
+          return `Could not search ${target}: ${error.message || 'unknown error'}`;
+        }
+      }
+      // Plain directory listing: honor the bound folder ("downloads folder"),
+      // default to the home directory. Cap output so answers stay readable.
+      const target = intent.path?.trim() || homedir();
+      try {
+        const { stdout } = await execFilePromise('ls', ['-la', '--', target], { timeout: 15000, maxBuffer: 2 * 1024 * 1024 });
+        const lines = stdout.trimEnd().split('\n');
+        const shown = lines.slice(0, 40);
+        const more = lines.length > shown.length ? `\n… (${lines.length - shown.length} more entries not shown)` : '';
+        return `Contents of ${target}:\n${shown.join('\n')}${more}`;
+      } catch (error: any) {
+        return `Could not list ${target}: ${error.message || 'unknown error'}`;
+      }
+    }
+
+    const command = intent.metric === 'disk' ? 'df -h /'
       : intent.metric === 'memory' ? 'free -h'
       : 'top -bn1 | grep "Cpu(s)"';
     return createSystemCheckTool().func({ command });

@@ -333,7 +333,20 @@ export class Gateway {
 
     // Handle exploratory directory and conceptual explanation requests before
     // any local or agent heuristics can misclassify them as operational tasks.
-    if (DIRECTORY_LOOKUP_RE.test(cmd) || CONCEPTUAL_EXPLANATION_RE.test(cmd)) {
+    // Directory asks with a REAL local folder are the exception: the local
+    // host capability lists them directly (routeLocally binds "downloads
+    // folder" → $HOME/Downloads). Observed live: forcing these into reasoning
+    // made the LLM answer "I can't see your files" while the capability
+    // existed and worked. Only non-folder lookups stay with the LLM.
+    if (DIRECTORY_LOOKUP_RE.test(cmd)) {
+      if (routeLocally(cmd)?.type === 'files') {
+        return {
+          path: 'deterministic',
+          needsLLM: false,
+          priority: 'normal',
+          reasoning: 'Directory listing of a known local folder; local capability answers.',
+        };
+      }
       return {
         path: 'reasoning',
         needsLLM: true,

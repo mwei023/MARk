@@ -259,7 +259,7 @@ export const fsDirectoryListImplementation: ToolImplementation = {
     const rawPath =
       typeof action.input.path === 'string' && action.input.path.length > 0
         ? String(action.input.path)
-        : context.workingDirectory ?? process.cwd();
+        : os.homedir();
     const requestedLimit =
       typeof action.input.limit === 'number' ? Math.floor(action.input.limit) : 20;
     const limit = Math.min(Math.max(requestedLimit, 1), DIRECTORY_LIST_LIMIT);
@@ -488,6 +488,21 @@ export const fsFileSearchTool: ToolDescriptor = {
 
 const FILE_SEARCH_LIMIT = 50;
 
+/**
+ * Common file extensions recognized for by-name search. When a search
+ * pattern is exactly one of these (optionally *.ext or .ext), fs.file_search
+ * answers with a filename find instead of a content grep: asking for
+ * "mp4 files" means files named *.mp4.
+ */
+const COMMON_FILE_EXTENSIONS = new Set([
+  'mp4', 'mkv', 'avi', 'mov', 'wmv', 'webm', 'mp3', 'wav', 'flac', 'm4a',
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'csv', 'txt', 'md',
+  'zip', 'tar', 'gz', 'rar', '7z', 'iso', 'deb',
+  'jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp',
+  'exe', 'apk', 'bin',
+  'json', 'xml', 'yml', 'yaml', 'html', 'css', 'js', 'ts', 'py', 'ipynb', 'sh',
+]);
+
 export const fsFileSearchImplementation: ToolImplementation = {
   toolId: fsFileSearchTool.id,
 
@@ -499,7 +514,7 @@ export const fsFileSearchImplementation: ToolImplementation = {
     const rawPath =
       typeof action.input.path === 'string' && action.input.path.length > 0
         ? String(action.input.path)
-        : context.workingDirectory ?? process.cwd();
+        : os.homedir();
     const requestedLimit =
       typeof action.input.limit === 'number' ? Math.floor(action.input.limit) : 20;
     const limit = Math.min(Math.max(requestedLimit, 1), FILE_SEARCH_LIMIT);
@@ -512,6 +527,55 @@ export const fsFileSearchImplementation: ToolImplementation = {
     const include = typeof action.input.include === 'string' && action.input.include.length > 0
       ? String(action.input.include)
       : null;
+
+    // Filename search for extension-shaped patterns: users asking for
+    // "mp4 files" want files NAMED *.mp4, not file contents containing the
+    // text "mp4". When the pattern is (an optional * and/or dot plus) a
+    // common file extension, switch to read-only `find` semantics.
+    const extMatch = /^(?:\*)?\.?([a-z0-9]{1,6})$/i.exec(pattern.trim());
+    const ext = extMatch ? extMatch[1].toLowerCase() : null;
+    if (ext && COMMON_FILE_EXTENSIONS.has(ext)) {
+      const findArgs = [
+        resolved, '-maxdepth', '6',
+        '-not', '-path', '*/node_modules/*', '-not', '-path', '*/.git/*',
+        '-type', 'f', '-iname', `*.${ext}`,
+      ];
+      let stdout = '';
+      try {
+        ({ stdout } = await execFileAsync('find', findArgs, { timeout: 30000, maxBuffer: 4 * 1024 * 1024 }));
+      } catch (error: any) {
+        throw new Error(`Search failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const found = stdout.trim() ? stdout.trim().split('\n') : [];
+      const truncated = found.length > limit;
+      const sliced = found.slice(0, limit);
+      const output = {
+        path: resolved,
+        pattern,
+        mode: 'by-name' as const,
+        extension: ext,
+        count: sliced.length,
+        truncated,
+        matches: sliced.map(file => ({ file, line: 0, preview: '(filename match)' })),
+        capturedAt: new Date().toISOString(),
+      };
+      return {
+        output,
+        observations: [
+          {
+            id: `observation-${Date.now()}`,
+            kind: 'file',
+            source: 'native.system',
+            subject: resolved,
+            summary: `Searched ${resolved} for *.${ext} file names: ${sliced.length} match(es)${truncated ? ' (truncated)' : ''}.`,
+            data: output,
+            confidence: 1,
+            observedAt: output.capturedAt,
+            relatedResourceIds: [],
+          },
+        ],
+      };
+    }
 
     // Fixed flags only; the pattern travels as an operand after `--`,
     // never through a shell. grep exits 1 on no matches: that is an

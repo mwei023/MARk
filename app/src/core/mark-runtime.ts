@@ -781,14 +781,35 @@ export function isHollowReuse(  plan: { steps: Array<{ toolId: string; input?: R
     }
   }
   if (Object.keys(tool.inputSchema?.properties ?? {}).length === 0) return false;
-  let evidenced = false;
-  try {
-    evidenced = bind(command, tool).matchedFields.length > 0;
-  } catch (_err) {
-    // bind() threw (e.g. malformed tool schema) — treat as not evidenced, allow reuse.
-    return false;
+  const goalLower = command.toLowerCase();
+  const binding = (() => {
+    try {
+      return bind(command, tool);
+    } catch (_err) {
+      // bind() threw (e.g. malformed tool schema) — treat as not evidenced, allow reuse.
+      return null;
+    }
+  })();
+  if (!binding) return false;
+
+  // Binding evidence must cover the plan's ESSENCE, not just its location.
+  // The goal's object (what is searched/read/found) is the substance of the
+  // task; WHERE (paths) may legitimately carry over from memory. Observed
+  // live: the binder bound path="downloads" from a listing ask and replayed
+  // a stored mp4-content search — old WHAT, new WHERE, wrong answer. Any
+  // stored non-path, non-rebound value the goal never restates
+  // → the recall is hollow for this goal; plan fresh instead.
+  const rebound = new Set(binding.matchedFields ?? []);
+  for (const step of plan.steps) {
+    for (const [field, value] of Object.entries(step.input ?? {})) {
+      if (typeof value !== 'string' || value.length === 0) continue;
+      if (rebound.has(field)) continue;
+      if (/^(?:\/|~|[a-z]:\\)/i.test(value)) continue; // file locations persist across goals
+      if (goalLower.includes(value.toLowerCase())) continue; // goal restates the value
+      return true; // stored essence the new goal never says: stale replay
+    }
   }
-  if (evidenced) return false;
+  if (binding.matchedFields.length > 0) return false;
   if (!fresh?.tool) return false;
   return fresh.tool.id !== first.toolId || (fresh.matchedTerms?.length ?? 0) <= 1;
 }

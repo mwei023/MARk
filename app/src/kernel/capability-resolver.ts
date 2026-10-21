@@ -21,6 +21,17 @@ export interface CapabilityResolverDependencies {
  */
 export const MIN_RESOLUTION_SCORE = 0.5;
 
+/** Harm ordering for equal-score ties: safer tools win neutrals. */
+const TOOL_HARM: Record<string, number> = {
+  read: 0,
+  diagnostic: 1,
+  reversible: 2,
+  mutating: 3,
+  privileged: 4,
+  financial: 5,
+  unknown: 6,
+};
+
 /**
  * Resolves a natural-language goal against currently discovered
  * capabilities.
@@ -34,6 +45,9 @@ export interface RankedCapability {
   matchedTerms: string[];
   /** A goal term exactly equals an id token (strong addressing signal). */
   idAnchor: boolean;
+  /** A goal term meets a tool NAME token ("files" ~ File search). Optional
+   * so callers/mock resolvers need not supply it; absent reads as false. */
+  nameAnchor?: boolean;
 }
 
 export class CapabilityResolver {
@@ -132,13 +146,20 @@ export class CapabilityResolver {
       .filter(candidate =>
         candidate.score >= MIN_RESOLUTION_SCORE &&
         // The evidence gate keeps weak single matches from firing tools
-        // ("help" must not open Yelp). Callers doing their own arbitration
-        // (binding evidence, LLM choice) opt out via { gate: false }.
+        // ("help" must not open Yelp; "install" must not claim skill.install).
+        // Callers doing their own arbitration (binding evidence, LLM choice)
+        // opt out via { gate: false }.
         (opts.gate === false ||
           terms.length <= 1 || candidate.matchedTerms.length >= 2 ||
           (candidate.idAnchor && candidate.score >= 1.0)),
       )
-      .sort((left, right) => right.score - left.score);
+      .sort((left, right) =>
+        right.score - left.score ||
+        // Equal scores break toward the safer tool: a file-search ask
+        // resolving equally against "open the file manager" must pick the
+        // read-only tool, never one that launches a GUI session.
+        TOOL_HARM[(left.tool as ToolDescriptor).risk] - TOOL_HARM[(right.tool as ToolDescriptor).risk],
+      );
   }
 
   private scoreTool(
@@ -150,6 +171,7 @@ export class CapabilityResolver {
     score: number;
     matchedTerms: string[];
     idAnchor: boolean;
+    nameAnchor?: boolean;
   } {
     const searchable = index.tokens;
 
@@ -162,14 +184,25 @@ export class CapabilityResolver {
       [...searchable].some(word => wordMatch(term, word)),
     );
 
+    // Name vocabulary: a goal term meeting the tool's NAME token is the
+    // single strongest non-addressing signal. The evidence gate also honors
+    // it so "mp4 files in my pc" (whose filler got stopworded) can still
+    // resolve fs.file_search on one content word.
+    const nameTokens = this.tokenize(tool.name);
+
     if (matchedTerms.length === 0) {
       return {
         tool,
         score: 0,
         matchedTerms: [],
         idAnchor: false,
+        nameAnchor: false,
       };
     }
+
+    const nameAnchor = [...new Set(matchedTerms)].some(term =>
+      [...nameTokens].some(word => wordMatch(term, word)),
+    );
 
     /*
      * Score is intentionally based on discovered metadata.
@@ -201,7 +234,6 @@ export class CapabilityResolver {
       if (terms.length > 2) score += 0.3;
     }
 
-    const nameTokens = this.tokenize(tool.name);
     if (uniqueMatches.some(term => [...nameTokens].some(word => wordMatch(term, word)))) {
       score += 0.2 * coverage;
     }
@@ -228,6 +260,7 @@ export class CapabilityResolver {
       score,
       matchedTerms: uniqueMatches,
       idAnchor,
+      nameAnchor,
     };
   }
 
@@ -239,6 +272,7 @@ export class CapabilityResolver {
       'an',
       'and',
       'are',
+      'there',
       'can',
       'could',
       'do',
