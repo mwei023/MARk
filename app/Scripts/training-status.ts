@@ -34,6 +34,7 @@ function readJsonl(file: string) {
 
 const liveCount = (file: string) => readJsonl(file).filter((r) => r.source === 'live').length;
 const routingLive = liveCount('routing.jsonl');
+const routingProbe = readJsonl('routing.jsonl').filter((r) => r.source === 'probe').length;
 const failureLive = readJsonl('failure.jsonl').filter((r) => r.source === 'pseudo' || r.source === 'unverified').length;
 
 const synthRouting = liveCount(join('synthetic', 'routing-synthetic.jsonl')) || readJsonl(join('synthetic', 'routing-synthetic.jsonl')).length;
@@ -49,6 +50,7 @@ const bar = '█'.repeat(Math.round(progress * 24)).padEnd(24, '░');
 console.log('===== MARK TRAINING STATUS =====');
 console.log(`live routing rows : ${routingLive}/${LIVE_GATE} toward model gate`);
 console.log(`                    [${bar}] ${(progress * 100).toFixed(1)}%`);
+console.log(`probe routing rows: ${routingProbe} (self-exercise coverage — labeled separately by phrasing)`);
 console.log(`failure rows      : ${failureLive} (pseudo+unverified; verified-join comes later)`);
 console.log(`synthetic (quar.) : routing ${synthRouting}, failure ${synthFailure} — NOT counted toward the gate`);
 if (routingRows.length === 0) {

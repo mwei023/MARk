@@ -238,9 +238,15 @@ export class MarkRuntime {
     // Auto-log: the final routing decision IS the ground-truth label for
     // future classifier distillation (router is the oracle). Best-effort,
     // never throws. Disable with MARK_TRAINING_LOG=false.
+    // Sources are kept distinct for model training quality:
+    //   'live'  — a human drove this (playground/api/cli as themselves)
+    //   'probe' — scripted self-exercise (session 'probe:*', read-only catalog)
+    // Retraining prefers 'live' phrasing; 'probe' rows add coverage only.
+    const probeSession = (opts.sessionId ?? currentInteractionSession() ?? '').startsWith('probe:');
     logRoutingDecision({
       text: command,
       label: decision.agent ? `agent:${decision.agent}` : decision.path,
+      source: probeSession ? 'probe' : 'live',
     });
     let result: CommandResult;
 
