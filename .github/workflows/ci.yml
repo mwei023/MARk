@@ -20,6 +20,9 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
+      - name: Install native audio headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - run: npm ci
       - run: npm run typecheck:mark
       - run: npm run test:unit -- --reporter=dot
