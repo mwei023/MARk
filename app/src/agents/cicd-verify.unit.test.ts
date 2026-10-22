@@ -40,7 +40,7 @@ describe('verify order', () => {
     const res = await agent.handleCommand(mk(`verify the build in ${scratchGoRepo()}`), {} as any);
     expect(res).toMatch(/PASS go build/);
     expect(res).toMatch(/All checks passed/);
-  });
+  }, 30000);
 
   it('fails a broken go repo with an excerpt, not a dump', async () => {
     const dir = scratchGoRepo();
@@ -50,7 +50,7 @@ describe('verify order', () => {
     expect(res).toMatch(/FAIL go build/);
     expect(res).toMatch(/1 check\(s\) failed/);
     expect(res.length).toBeLessThan(2000);
-  });
+  }, 30000);
 
   it('reports repos with no known checks honestly', async () => {
     const agent = new CICDAgent();

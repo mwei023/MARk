@@ -10,7 +10,7 @@ vi.mock('../code/indexer.js', () => ({
   searchCode: vi.fn().mockResolvedValue([]),
 }));
 
-const REPO = '/home/mwei/jarvis-core/app';
+const REPO = process.cwd();
 
 function impl(id: string) {
   const found = repoSemanticImplementations.find(i => i.toolId === id);
