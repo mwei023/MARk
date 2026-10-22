@@ -22,6 +22,15 @@ function scratchGoRepo(): string {
   return dir;
 }
 
+function scratchNodeBuildRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'mark-cicd-node-'));
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({
+    private: true,
+    scripts: { build: 'node -e "process.stdout.write(\\\"built\\\")"' },
+  }));
+  return dir;
+}
+
 describe('verify order', () => {
   it('still refuses non-verify requests (triage only, approval-gated)', async () => {
     const agent = new CICDAgent();
@@ -39,6 +48,13 @@ describe('verify order', () => {
     const agent = new CICDAgent();
     const res = await agent.handleCommand(mk(`verify the build in ${scratchGoRepo()}`), {} as any);
     expect(res).toMatch(/PASS go build/);
+    expect(res).toMatch(/All checks passed/);
+  }, 30000);
+
+  it('passes a package repo with a build script', async () => {
+    const agent = new CICDAgent();
+    const res = await agent.handleCommand(mk(`verify the build in ${scratchNodeBuildRepo()}`), {} as any);
+    expect(res).toMatch(/PASS npm run build/);
     expect(res).toMatch(/All checks passed/);
   }, 30000);
 

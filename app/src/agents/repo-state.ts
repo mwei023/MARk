@@ -76,7 +76,7 @@ export async function assessWorldState(repoPath: string): Promise<WorldState> {
     const pkg = JSON.parse(readFileSync(`${repoPath}/package.json`, 'utf8'));
     state.hasPackageJson = true;
     state.scripts = Object.keys(pkg?.scripts ?? {});
-    state.hasChecks = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck);
+    state.hasChecks = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck ?? pkg?.scripts?.build);
   } catch {
     state.blockers.push('no readable package.json');
   }
@@ -102,7 +102,7 @@ export function formatWorldState(state: WorldState): string {
     `HEAD: ${state.recentCommit ?? 'unknown'}`,
     `node: ${state.nodeVersion ?? 'missing'}`,
     `deps: ${state.hasNodeModules ? 'installed' : 'MISSING'}`,
-    `checks: ${state.hasChecks ? state.scripts.filter(s => ['lint', 'test', 'typecheck'].includes(s)).join(',') : 'none'}`,
+    `checks: ${state.hasChecks ? state.scripts.filter(s => ['lint', 'test', 'typecheck', 'typecheck:mark', 'build'].includes(s)).join(',') : 'none'}`,
     `repair-ready: ${state.repairReady ? 'yes' : 'NO (' + state.blockers.join('; ') + ')'}`,
   ];
   return `State assessment: ${parts.join(' | ')}.`;

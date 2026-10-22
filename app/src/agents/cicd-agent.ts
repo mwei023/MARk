@@ -55,7 +55,7 @@ export class CICDAgent extends Agent {
 
   /**
    * Run an explicitly named repo's own checks: `go build ./...` when go.mod
-   * is present, otherwise the package.json typecheck script when one exists.
+   * is present, otherwise the package.json verification script when one exists.
    * Each check runs at most 3 minutes; output is tailed, never dumped whole.
    */
   private async verifyBuild(command: string): Promise<string> {
@@ -74,14 +74,19 @@ export class CICDAgent extends Agent {
       const pkgDir = existsSync(`${abs}/app/package.json`) ? `${abs}/app` : abs;
       try {
         const scripts = Object.keys(JSON.parse(readFileSync(`${pkgDir}/package.json`, 'utf8'))?.scripts ?? {});
-        const typecheck = scripts.includes('typecheck:mark') ? 'typecheck:mark' : scripts.includes('typecheck') ? 'typecheck' : null;
-        if (typecheck) checks.push({ name: `npm run ${typecheck}`, cwd: pkgDir, cmd: 'npm', args: ['run', typecheck] });
+        const check = scripts.includes('typecheck:mark') ? 'typecheck:mark'
+          : scripts.includes('typecheck') ? 'typecheck'
+          : scripts.includes('lint') ? 'lint'
+          : scripts.includes('test') ? 'test'
+          : scripts.includes('build') ? 'build'
+          : null;
+        if (check) checks.push({ name: `npm run ${check}`, cwd: pkgDir, cmd: 'npm', args: ['run', check] });
       } catch {
         // Unreadable package.json — reported below as "no known checks".
       }
     }
     if (checks.length === 0) {
-      return `No known build checks on ${abs} (no go.mod, no typecheck script). Nothing verified.`;
+      return `No known build checks on ${abs} (no go.mod, typecheck, lint, test, or build script). Nothing verified.`;
     }
     const lines = [`Verify ${abs}:`];
     let failed = 0;

@@ -133,7 +133,12 @@ export class CodeAgent extends Agent {
         const { readFileSync: readPkg, existsSync: existsPkg } = await import('node:fs');
         if (existsPkg(`${repoPath}/package.json`)) {
           const scripts = Object.keys(JSON.parse(readPkg(`${repoPath}/package.json`, 'utf8'))?.scripts ?? {});
-          const gate = scripts.includes('typecheck') ? 'typecheck' : scripts.includes('typecheck:mark') ? 'typecheck:mark' : scripts.includes('lint') ? 'lint' : null;
+          const gate = scripts.includes('typecheck') ? 'typecheck'
+            : scripts.includes('typecheck:mark') ? 'typecheck:mark'
+            : scripts.includes('lint') ? 'lint'
+            : scripts.includes('test') ? 'test'
+            : scripts.includes('build') ? 'build'
+            : null;
           if (gate) {
             verificationName = `npm run ${gate}`;
             const { execFile: execGate } = await import('node:child_process');
@@ -147,7 +152,7 @@ export class CodeAgent extends Agent {
               await find(`Verification gate 3/3: ${verificationName} FAILED; auto-ship blocked: ${msg.slice(0, 200)}`);
             }
           } else {
-            await find('Verification gate 3/3 unavailable; auto-ship blocked because the repository exposes no typecheck or lint script.');
+            await find('Verification gate 3/3 unavailable; auto-ship blocked because the repository exposes no typecheck, lint, test, or build script.');
           }
         } else {
           await find('Verification gate 3/3 unavailable; auto-ship blocked because package.json is missing.');

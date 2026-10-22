@@ -935,7 +935,7 @@ export class GitAgent extends Agent {
       try {
         const pkg = JSON.parse(readFileSync(`${repoPath}/package.json`, 'utf8'));
         pkgScripts = Object.keys(pkg?.scripts ?? {}).join(', ');
-        hasCheckScripts = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck);
+        hasCheckScripts = Boolean(pkg?.scripts?.lint ?? pkg?.scripts?.test ?? pkg?.scripts?.typecheck ?? pkg?.scripts?.build);
         await incidentStore.addFinding(incidentId, `Probe package-scripts: ${pkgScripts || '(no scripts)'}`);
       } catch {
         await incidentStore.addFinding(incidentId, 'Probe package-scripts unavailable (no readable package.json).');
@@ -1020,7 +1020,7 @@ export class GitAgent extends Agent {
     if (!hasCheckScripts && !diagnosed) {
       await incidentStore.addFinding(
         incidentId,
-        `Diagnosis: this repo has no automated checks (no lint/test/typecheck scripts; only: ${pkgScripts || 'none'}). ` +
+        `Diagnosis: this repo has no automated checks (no lint/test/typecheck/build scripts; only: ${pkgScripts || 'none'}). ` +
         `A CI failure here cannot come from code checks — suspect the pipeline itself (install, build, deploy steps). ` +
         `Remedy (your steps): add a lint or test script so failures become diagnosable, and inspect the workflow file for non-code steps.`,
       );
