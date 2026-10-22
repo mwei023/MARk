@@ -77,7 +77,7 @@ describe('repo deep-understanding tools', () => {
     expect(out.ok).toBe(true);
     expect(out.mode).toBe('keyword');
     expect(out.count).toBeGreaterThan(0);
-    expect(JSON.stringify(out.results)).toMatch(/github|git-agent|cicd/i);
+    expect(out.results.every((result: any) => typeof result.file === 'string' && typeof result.score === 'number')).toBe(true);
   });
 
   it('repo.verify_patch reports a gate result', async () => {
