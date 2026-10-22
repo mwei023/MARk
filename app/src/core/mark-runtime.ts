@@ -765,8 +765,11 @@ function isCreativeRequest(command: string): boolean {
  * plan can never satisfy one — shared by the hollow-reuse guard and the
  * workflow saver so both agree on what "doing" means.
  */
-export const ACTION_GOAL_RE = /\b(play|launch|start|restart|stop|send|delete|remove|create|write|minimize|minimise|maximize|maximise|raise|open)\b/i;
+// Single source of truth for action-verb classification lives in
+// core/goal-verbs (shared with the kernel's plan-intent validation).
+import { ACTION_GOAL_RE } from './goal-verbs';
 
+export { ACTION_GOAL_RE };
 export function isHollowReuse(  plan: { steps: Array<{ toolId: string; input?: Record<string, unknown> }> },
   command: string,
   tools: ToolDescriptor[],

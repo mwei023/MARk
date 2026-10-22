@@ -175,6 +175,8 @@ export class MARKKernel {
 
       executePlanReport: (plan, context) =>
         this.executePlanWithReport(plan, context),
+
+      listTools: () => this.listTools(),
     });
 
     this.workflowMemory = workflowMemory;

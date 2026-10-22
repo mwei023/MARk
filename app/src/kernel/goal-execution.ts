@@ -23,6 +23,7 @@ import {
   ExecutionPlan,
   PlanValidationResult,
 } from './planner';
+import { ACTION_GOAL_RE } from '../core/goal-verbs';
 
 export interface GoalExecutionOptions {
   usePlanner?: boolean;
@@ -82,6 +83,8 @@ export interface GoalExecutionDependencies {
     plan: ExecutionPlan,
     context: ExecutionContext,
   ) => Promise<import('./planner').PlanExecutionReport>;
+  /** Current tool registry (for plan-intent validation). */
+  listTools?: () => import('./index').ToolDescriptor[];
 }
 
 export class GoalExecutor {
@@ -130,17 +133,36 @@ export class GoalExecutor {
         const composedValidation = this.dependencies.validatePlan
           ? this.dependencies.validatePlan(trimmed)
           : undefined;
+        // Plan-intent rule: non-action goals must be planned read-only.
+        // The LLM planner composes from metadata similarity and happily
+        // drafts state-changing steps for knowledge questions (observed
+        // live: "is the web agent available" planned a browser launch;
+        // each such step pends a confirmation nobody installed this on
+        // fills with unanswered asks). Read goals keep their reads — a
+        // legitimate non-read plan under an action verb ("play thor",
+        // "open thunar") still passes.
         if (composedValidation?.valid && trimmed.steps.length > 1) {
-          const planReport = await this.dependencies.executePlanReport(trimmed, context);
-          const resolution = this.dependencies.resolveCapability(goal);
-          return finish({
-            goal,
-            resolution,
-            plan: trimmed,
-            validation: composedValidation,
-            planReport,
-            executionMode: 'plan',
+          const toolsById = new Map((this.dependencies.listTools?.() ?? []).map(t => [t.id, t.risk] as const));
+          const actionGoal = ACTION_GOAL_RE.test(goal);
+          const nonReadSteps = trimmed.steps.filter(step => {
+            const risk = toolsById.get(step.toolId);
+            return risk !== undefined && risk !== 'read' && risk !== 'diagnostic';
           });
+          if (!actionGoal && nonReadSteps.length > 0) {
+            console.debug('[goal-execution] read-goal plan rejected non-read steps:',
+              nonReadSteps.map(s => s.toolId).join(', '));
+          } else {
+            const resolution = this.dependencies.resolveCapability(goal);
+            const planReport = await this.dependencies.executePlanReport(trimmed, context);
+            return finish({
+              goal,
+              resolution,
+              plan: trimmed,
+              validation: composedValidation,
+              planReport,
+              executionMode: 'plan',
+            });
+          }
         }
       } catch (err) {
         // Planner path is best-effort: fall through to single-tool execution.

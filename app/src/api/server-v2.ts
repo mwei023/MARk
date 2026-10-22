@@ -478,11 +478,23 @@ app.post('/api/execute', async (req: any, res: any) => {
   }
 });
 
-/**
- * GET /api/confirmations - List pending kernel confirmations
- */
 app.get('/api/confirmations', (_req: any, res: any) => {
-  res.json({ success: true, pending: likeMeLoop.listPending() });
+  const all = likeMeLoop.listPending() as unknown as Array<Record<string, unknown>>;
+  // The Approvals panel shows actionable asks only. Every pass of the
+  // exercise daemon used to leave confirmation asks that nobody answered;
+  // they persisted in kernel_confirmations and reappeared here forever —
+  // a display of dead asks, not approvals. Fresh window now, backlog count
+  // below; stale rows stay in the DB (never auto-resolved: closing a real
+  // ask without the user is a user decision, not ours).
+  const FRESH_MS = 30 * 60 * 1000;
+  const cutoff = Date.now() - FRESH_MS;
+  const fresh = all.filter(c =>
+    Date.parse(String(c.createdAt ?? '')) >= cutoff);
+  res.json({
+    success: true,
+    pending: fresh,
+    staleCount: all.length - fresh.length,
+  });
 });
 
 /**
