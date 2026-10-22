@@ -551,10 +551,16 @@ export class MarkRuntime {
       // replays the failure forever. Observed live: a failed repo.symbols
       // probe memorized as a "known procedure".
       const outputOk = (result.output as Record<string, unknown> | undefined)?.ok !== false;
-      const savedId = outputOk ? this.maybeSaveSuccess(command, outcome.plan, outcome.resolution) : undefined;
+      const saveAttempt = outputOk ? this.maybeSaveSuccess(command, outcome.plan, outcome.resolution) : undefined;
+      const savedId = saveAttempt?.id;
       if (!outputOk) trace.push('memory → not saved: output reports ok:false');
       if (savedId) trace.push(`memory → saved workflow ${savedId} (read-only success)`);
-      if (!savedId && outputOk) trace.push(`memory → not saved: resolution score ${outcome.resolution.score.toFixed(2)} / ${outcome.resolution.matchedTerms?.length ?? 0} terms (threshold 0.8 / 2)`);
+      if (outputOk && saveAttempt) {
+        trace.push(
+          savedId
+            ? `memory → saved workflow ${savedId} (read-only success)`
+            : `memory → not saved: ${saveAttempt.reason}`);
+      }
       return { response: `⚙️ ${summary}\n${compactKernelOutput(result.output)}`, route: 'kernel', trace };
     }
 
@@ -602,32 +608,36 @@ export class MarkRuntime {
     command: string,
     plan: Awaited<ReturnType<MARKKernelBridge['executeGoal']>>['plan'],
     resolution?: { score: number; matchedTerms?: string[] },
-  ): string | undefined {
+  ): { id?: string; reason: string } {
     try {
-      if (!plan || plan.steps.length === 0) return undefined;
+      if (!plan || plan.steps.length === 0) return { reason: 'empty plan' };
       // Single-term goals ("hi", "status") execute fine but are never worth
       // memorizing: they are usually false-positive matches or too vague to
       // replay safely.
-      if (extractGoalTerms(command).length < 2) return undefined;
+      if (extractGoalTerms(command).length < 2) return { reason: 'goal too vague (<2 terms)' };
       // Weak resolution: the tool ran but only because a thin coincidental
       // term overlap matched — not because it was the right tool for this
       // goal. Saving would replay the wrong tool on every similar future
       // command. Require score ≥ 0.8 AND at least 2 matched terms.
       const score = resolution?.score ?? 0;
       const matchedCount = resolution?.matchedTerms?.length ?? 0;
-      if (score < 0.8 || matchedCount < 2) return undefined;
+      if (score < 0.8 || matchedCount < 2) {
+        return { reason: `weak resolve (${score.toFixed(2)} < 0.8 or <2 terms)` };
+      }
       const risks = new Map(this.kernelBridge.listTools().map(tool => [tool.id, tool.risk] as const));
       const allReadOnly = plan.steps.every(step => {
         const risk = risks.get(step.toolId);
         return risk === 'read' || risk === 'diagnostic';
       });
-      if (!allReadOnly) return undefined;
-      if (ACTION_GOAL_RE.test(command)) return undefined;
-      if (this.kernelBridge.recallWorkflows(command, 1, 0.9).length > 0) return undefined;
-      return this.kernelBridge.saveWorkflow(plan).id;
+      if (!allReadOnly) return { reason: 'not read-only' };
+      if (ACTION_GOAL_RE.test(command)) return { reason: 'action goal (writes are never auto-saved)' };
+      if (this.kernelBridge.recallWorkflows(command, 1, 0.9).length > 0) {
+        return { reason: 'already memorized' };
+      }
+      return { id: this.kernelBridge.saveWorkflow(plan).id, reason: 'saved' };
     } catch (err) {
       // Workflow save failed — non-critical, proceed without saving.
-      return undefined;
+      return { reason: `save failed (${err instanceof Error ? err.message : String(err)})` };
     }
   }
 
@@ -707,6 +717,13 @@ function isExplanationRequest(command: string): boolean {
  */
 function isDiscoveryQuestion(command: string): boolean {
   if (/^(are there|is there|do you have|can i find|do i have|are there any|is there any|any (playable|available|existing)|show me if|check if there)\b/i.test(command.trim())) return true;
+  // Availability/seeking questions: "where can i get/download/find X",
+  // "how can i get X" — asking where to OBTAIN something, not asking to
+  // obtain it now (that would be an imperative: "download X to ~/docs").
+  // Observed live: "where can i download a batman movie" resolved
+  // media.play_video (score 1.80, matched: download, movie) and executed
+  // a play attempt against the fully-bound whole-sentence title.
+  if (/\b(where|how|what)\s+(can|could|do|do-you)\s+i\s+(get|find|download|obtain|buy|acquire|watch)\b/i.test(command.trim())) return true;
   // Container inspect: "access X", "connect to X", "inspect X", "show me what is inside X"
   if (/\b(access|inspect|connect to|look inside|show (me )?what('?s| is) (in|inside))\b/i.test(command)) return true;
   return false;

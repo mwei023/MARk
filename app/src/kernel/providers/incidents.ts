@@ -154,11 +154,71 @@ export const incidentGetImplementation: ToolImplementation = {
   },
 };
 
-export const incidentTools: ToolDescriptor[] = [incidentListOpenTool, incidentGetTool];
+export const incidentStatsTool: ToolDescriptor = {
+  id: 'incident.stats',
+  name: 'Incident counts',
+  description: 'Returns incident counts by status (open, investigating, resolved, escalated), a severity breakdown, and how many open incidents are in the auto-resolvable class. Read-only aggregate — answers "how many incidents are resolved" and similar.',
+  version: '1.0.0',
+  domain: 'incidents',
+  risk: 'read',
+  available: true,
+  inputSchema: {
+    type: 'object',
+    properties: {},
+    required: [],
+  },
+  outputSchema: {
+    type: 'object',
+    properties: {
+      open: { type: 'number' },
+      investigating: { type: 'number' },
+      resolved: { type: 'number' },
+      escalated: { type: 'number' },
+      autoResolvable: { type: 'number' },
+      autoResolvableDefinition: { type: 'string' },
+      severityBreakdown: { type: 'object' },
+      capturedAt: { type: 'string' },
+    },
+    required: ['open', 'resolved', 'autoResolvable', 'severityBreakdown', 'capturedAt'],
+  },
+  capabilities: ['incident-listing', 'operations-awareness'],
+  supportedResourceKinds: ['unknown'],
+  requiredPermissions: [],
+  reversible: true,
+  metadata: {},
+  provider: 'ops.incidents',
+};
+
+export const incidentStatsImplementation: ToolImplementation = {
+  toolId: incidentStatsTool.id,
+
+  async execute() {
+    const counts = await incidentStore.getStatusCounts();
+    return {
+      output: counts,
+      observations: [
+        {
+          id: `observation-${Date.now()}`,
+          kind: 'output',
+          source: 'ops.incidents',
+          subject: 'incident-counts',
+          summary: `${counts.resolved} resolved, ${counts.open} open of which ${counts.autoResolvable} auto-resolvable (low severity).`,
+          data: counts,
+          confidence: 1,
+          observedAt: counts.capturedAt,
+          relatedResourceIds: [],
+        },
+      ],
+    };
+  },
+};
+
+export const incidentTools: ToolDescriptor[] = [incidentListOpenTool, incidentGetTool, incidentStatsTool];
 
 export const incidentImplementations: ToolImplementation[] = [
   incidentListOpenImplementation,
   incidentGetImplementation,
+  incidentStatsImplementation,
 ];
 
 export const incidentDiscoveryProvider: DiscoveryProvider = {

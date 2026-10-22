@@ -261,8 +261,7 @@ export class IncidentStore {
     );
   }
 
-  async getOpenIncidents(): Promise<Incident[]> {
-    const pool = getPool();
+  async getOpenIncidents(): Promise<Incident[]> {    const pool = getPool();
     const result = await pool.query(
       `SELECT * FROM incidents WHERE status != 'resolved' ORDER BY created_at DESC`,
     );
@@ -272,6 +271,42 @@ export class IncidentStore {
       incidents.push(this.rowToIncident(row, actions));
     }
     return incidents;
+  }
+
+  /**
+   * Read-only counts for incident.stats.
+   * "Can be automatically resolved" is defined honestly and visibly:
+   * count of OPEN low-severity incidents (the class the real-checks daemon
+   * already auto-detects and auto-resolves with recovery evidence). MARK
+   * shows its definition next to the number — never a silent verdict.
+   */
+  async getStatusCounts(): Promise<{
+    open: number; investigating: number; resolved: number; escalated: number;
+    autoResolvable: number; autoResolvableDefinition: string;
+    severityBreakdown: Record<string, number>; capturedAt: string;
+  }> {
+    const pool = getPool();
+    const status = await pool.query(
+      `SELECT status, COUNT(*)::int AS count FROM incidents GROUP BY status`,
+    );
+    const severityOpen = await pool.query(
+      `SELECT severity, COUNT(*)::int AS count FROM incidents WHERE status != 'resolved' GROUP BY severity`,
+    );
+    const counts: Record<string, number> = {};
+    for (const row of status.rows) counts[String(row.status)] = Number(row.count);
+    const severityBreakdown: Record<string, number> = {};
+    for (const row of severityOpen.rows) severityBreakdown[String(row.severity)] = Number(row.count);
+    return {
+      open: (counts.open ?? 0) + (counts.investigating ?? 0) + (counts.escalated ?? 0),
+      investigating: counts.investigating ?? 0,
+      resolved: counts.resolved ?? 0,
+      escalated: counts.escalated ?? 0,
+      autoResolvable: severityBreakdown['low'] ?? 0,
+      autoResolvableDefinition:
+        'open low-severity incidents — the real-checks class that resolves itself when a later verification observes recovery; other severities need a human decision',
+      severityBreakdown,
+      capturedAt: new Date().toISOString(),
+    };
   }
 
   // ── Escalation audit log ───────────────────────────────────────────────────
