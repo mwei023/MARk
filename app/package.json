@@ -15,6 +15,8 @@
     "test:like-me": "tsx src/core/like-me-loop.test.ts",
     "chat": "tsx src/repl.ts",
     "test:unit": "vitest run",
+    "test:self-repair": "vitest run --config vitest.self-test.config.ts",
+    "test:build-ship": "vitest run --config vitest.self-test.config.ts src/core/mark-build-ship.self-test.test.ts",
     "eval": "tsx src/eval/run.ts",
     "db:migrate": "ts-node --transpile-only Scripts/migrate.ts",
     "training:status": "tsx Scripts/training-status.ts",

@@ -8,6 +8,9 @@ import { GitAgent } from '../agents/git-agent';
 import { repositoryRegistry } from '../repositories/registry';
 import { GitHubWebhookHandler } from '../webhooks/github';
 import { incidentStore } from './incident';
+import { opsMemory } from './ops-memory';
+import { repoBaseline } from './repo-baseline';
+import { shutdown as shutdownPostgres } from '../db/postgres';
 
 const registerTestRepositories = () => {
   repositoryRegistry.register({
@@ -127,8 +130,14 @@ const run = async (): Promise<void> => {
   const originalCreateIncident = incidentStore.createIncident.bind(incidentStore);
   const originalFindOrCreate = (incidentStore as any).findOrCreateIncident?.bind(incidentStore);
   const originalAddAction = incidentStore.addAction.bind(incidentStore);
+  const originalAddFinding = incidentStore.addFinding.bind(incidentStore);
   const originalUpdateStatus = incidentStore.updateStatus.bind(incidentStore);
   const originalResolveIncident = incidentStore.resolveIncident.bind(incidentStore);
+  const originalGetIncident = incidentStore.getIncident.bind(incidentStore);
+  const originalRecall = opsMemory.recall.bind(opsMemory);
+  const originalSave = opsMemory.save.bind(opsMemory);
+  const originalCheckAnomaly = repoBaseline.checkAnomaly.bind(repoBaseline);
+  const originalRefreshBaseline = repoBaseline.refresh.bind(repoBaseline);
 
   try {
     (incidentStore as any).createIncident = async (input: any) => {
@@ -143,8 +152,29 @@ const run = async (): Promise<void> => {
     (incidentStore as any).addFinding = async () => {};
     (incidentStore as any).updateStatus = async () => {};
     (incidentStore as any).resolveIncident = async () => {};
+    (incidentStore as any).getIncident = async () => null;
+    // This test is intentionally an in-memory runtime test. Keep GitAgent's
+    // memory and baseline sidecars in-memory too; otherwise best-effort
+    // Postgres queries make the standalone test depend on database state.
+    (opsMemory as any).recall = async () => undefined;
+    (opsMemory as any).save = async () => undefined;
+    (repoBaseline as any).checkAnomaly = async () => null;
+    (repoBaseline as any).refresh = async () => undefined;
 
     const gitAgent = new GitAgent();
+    // Dummy workflow IDs must never trigger a real GitHub request in this
+    // local routing test; the GitAgent log-fetch boundary is covered by the
+    // dedicated classifier/log-fetch tests.
+    (gitAgent as any).fetchLogs = async () => ({
+      source: 'unavailable',
+      content: '',
+      unavailableReason: 'test fixture: no GitHub network',
+      length: 0,
+    });
+    // Repository association is the subject of this test. The planner-driven
+    // unknown-failure investigation has its own coverage and would otherwise
+    // execute a real kernel plan against both local checkouts here.
+    (gitAgent as any).investigateUnknown = async () => {};
     (gitAgent as any).executeTool = async (toolName: string) => ({
       success: true,
       action: { agent: 'git-agent', action: toolName, tool: toolName, result: 'success', details: 'ok' },
@@ -162,8 +192,15 @@ const run = async (): Promise<void> => {
     (incidentStore as any).createIncident = originalCreateIncident;
     if (originalFindOrCreate) (incidentStore as any).findOrCreateIncident = originalFindOrCreate;
     (incidentStore as any).addAction = originalAddAction;
+    (incidentStore as any).addFinding = originalAddFinding;
     (incidentStore as any).updateStatus = originalUpdateStatus;
     (incidentStore as any).resolveIncident = originalResolveIncident;
+    (incidentStore as any).getIncident = originalGetIncident;
+    (opsMemory as any).recall = originalRecall;
+    (opsMemory as any).save = originalSave;
+    (repoBaseline as any).checkAnomaly = originalCheckAnomaly;
+    (repoBaseline as any).refresh = originalRefreshBaseline;
+    await shutdownPostgres();
   }
 
   assert.equal(bus.getRecentEvents('user.command.received', 10).length, 10);

@@ -99,6 +99,10 @@ export interface AppConfig {
   markSmart: 'on' | 'off';
   /** Set to 'true' to allow low-risk auto-fix actions without approval. */
   markEnableAutofix: boolean;
+  /** Set to 'true' to push only repairs that pass every verification gate. */
+  markAutoShip: boolean;
+  /** Maximum time to wait for GitHub Actions after an auto-ship. */
+  markShipCiTimeoutMs: number;
   /** Set to 'false' to disable workflow memory learning. */
   markLearning: boolean;
   /** Set to 'true' to auto-trust tools after first confirmation. */
@@ -198,6 +202,8 @@ export const config: AppConfig = {
   // Runtime behaviour
   markSmart: process.env.MARK_SMART === 'off' ? 'off' : 'on',
   markEnableAutofix: readBool(process.env.MARK_ENABLE_AUTOFIX, false),
+  markAutoShip: readBool(process.env.MARK_AUTO_SHIP, false),
+  markShipCiTimeoutMs: readInt(process.env.MARK_SHIP_CI_TIMEOUT_MS, 180000),
   markLearning: readBool(process.env.MARK_LEARNING, true),
   markAutoTrust: readBool(process.env.MARK_AUTO_TRUST, false),
   markDryRun: readBool(process.env.MARK_DRY_RUN, false),

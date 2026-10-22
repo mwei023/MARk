@@ -24,6 +24,7 @@ import { repositoryRegistry } from '../repositories/registry';
 import { collectEslintErrors, repairLintErrors, repairOneError, LintError, RepairOutcome, RepairRunContext } from './code-repair';
 import { consolidateBranches } from './branch-consolidate';
 import { opsObjective } from '../ops/objective';
+import { verifyPostShip } from './post-ship-verifier';
 
 const execFilePromise = promisify(execFile);
 
@@ -124,40 +125,50 @@ export class CodeAgent extends Agent {
       } catch (err) {
         await find(`Final verification failed safely: ${err instanceof Error ? err.message.slice(0, 160) : String(err)}`);
       }
-      // Gate 3/3 (new): repo-level check via safest script (typecheck > lint).
-      // Best-effort and reported, never blocking resolve on unrelated failures.
+      // Gate 3/3: repo-level verification. Auto-ship is allowed only when
+      // this gate passes; a failed or unavailable gate leaves the repair open.
+      let verificationPassed = false;
+      let verificationName = '';
       try {
         const { readFileSync: readPkg, existsSync: existsPkg } = await import('node:fs');
         if (existsPkg(`${repoPath}/package.json`)) {
           const scripts = Object.keys(JSON.parse(readPkg(`${repoPath}/package.json`, 'utf8'))?.scripts ?? {});
-          const gate = scripts.includes('typecheck') ? 'typecheck' : scripts.includes('lint') ? 'lint' : null;
+          const gate = scripts.includes('typecheck') ? 'typecheck' : scripts.includes('typecheck:mark') ? 'typecheck:mark' : scripts.includes('lint') ? 'lint' : null;
           if (gate) {
+            verificationName = `npm run ${gate}`;
             const { execFile: execGate } = await import('node:child_process');
             const { promisify: promGate } = await import('node:util');
             try {
               await promGate(execGate)('npm', ['run', gate], { cwd: repoPath, timeout: 120000 });
-              await find(`Verification gate 3/3: npm run ${gate} passed.`);
+              verificationPassed = true;
+              await find(`Verification gate 3/3: ${verificationName} passed.`);
             } catch (gateErr) {
               const msg = gateErr instanceof Error ? gateErr.message : String(gateErr);
-              await find(`Verification gate 3/3: npm run ${gate} FAILED (non-blocking): ${msg.slice(0, 200)}`);
+              await find(`Verification gate 3/3: ${verificationName} FAILED; auto-ship blocked: ${msg.slice(0, 200)}`);
             }
+          } else {
+            await find('Verification gate 3/3 unavailable; auto-ship blocked because the repository exposes no typecheck or lint script.');
           }
+        } else {
+          await find('Verification gate 3/3 unavailable; auto-ship blocked because package.json is missing.');
         }
       } catch {
-        // Gate 3/3 is informational only.
+        await find('Verification gate 3/3 could not be evaluated; auto-ship blocked.');
       }
-      const done = fixed > 0 && remaining === 0;
-      // Push is explicit, never default: the request must carry push:true
-      // (plus dry-run off). Pushed branches are the audit trail.
+      const done = fixed > 0 && remaining === 0 && verificationPassed;
+      // Push is allowed only after all gates pass. Explicit push requests and
+      // MARK_AUTO_SHIP use the same evidence gate; dry-run always wins.
       let pushedBranch: string | null = null;
-      if (fixed > 0 && data.push === true && !config.markDryRun) {
+      const wantsShip = data.push === true || (config.markAutoShip && data.autoShip !== false);
+      if (fixed > 0 && verificationPassed && remaining === 0 && wantsShip && !config.markDryRun) {
         pushedBranch = await this.pushFixes(repoPath, incidentId, outcomes.filter((o) => o.fixed), preexisting);
+      } else if (wantsShip && !config.markDryRun && fixed > 0) {
+        await find(`Auto-ship blocked: verification=${verificationPassed ? 'passed' : 'failed/unavailable'}, remaining=${remaining}.`);
       }
       await find(
         done
           ? `Repair complete and verified: ${fixed} error(s) fixed, ${remaining} remain repo-wide. ` +
-            `Verification ladder: eslint recount 0 (gate 1/2) + per-error tsc no-regression gate (gate 2/2, enforced in repairOneError). ` +
-            `Scoped tests remain yours to run (gate 3/3 not automated in this run).`
+            `Verification ladder: eslint recount 0 + per-error tsc no-regression + ${verificationName || 'repository'} passed.`
           : `Repair run finished: fixed ${fixed}/${attempted}, ${remaining >= 0 ? remaining : '?'} error(s) remain repo-wide.` +
             (pushedBranch ? ` Progress pushed to ${pushedBranch}.` : ' Needs another run or your action.'),
       );
@@ -216,6 +227,12 @@ export class CodeAgent extends Agent {
     }
     if (own.length === 0) return null;
     try {
+      let rollbackRef = 'unknown';
+      let originalBranch = '';
+      try {
+        rollbackRef = (await execFilePromise('git', ['-C', repoPath, 'rev-parse', 'HEAD'], { timeout: 15000 })).stdout.trim();
+        originalBranch = (await execFilePromise('git', ['-C', repoPath, 'branch', '--show-current'], { timeout: 15000 })).stdout.trim();
+      } catch { /* the branch itself remains the recoverable artifact */ }
       await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
       await execFilePromise('git', ['-C', repoPath, 'add', '--', ...own], { timeout: 15000 });
       await execFilePromise(
@@ -224,6 +241,10 @@ export class CodeAgent extends Agent {
         { timeout: 15000 },
       );
       await execFilePromise('git', ['-C', repoPath, 'push', '-u', 'origin', branchName], { timeout: 120000 });
+      await find(`Rollback point recorded: ${rollbackRef} (original branch) before ${branchName}.`);
+      const postShip = await verifyPostShip(repoPath, branchName, originalBranch || 'main');
+      await find(`Post-ship verification: ${postShip.detail}`);
+      if (postShip.status === 'rolled_back' || postShip.status === 'failed') return null;
       await find(`CodeAgent pushed ${branchName} with ${own.length} fixed file(s): ${own.slice(0, 5).join(', ')}.`);
       return branchName;
     } catch (error) {
