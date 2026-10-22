@@ -38,6 +38,34 @@ const GENERIC_ACTION_VERBS = new Set(['find', 'search', 'list', 'show', 'open', 
 /** Domains that are themselves the generic layer — never penalized by the verb guard. */
 const GENERIC_DOMAINS = new Set(['filesystem', 'system']);
 
+/** Play/watch goals are media-intent: playing a title is not launching a player. */
+const MEDIA_INTENT_RE = /\b(play|watch)\b/i;
+
+/** Player applications that a play goal must NOT be answered by opening. */
+const PLAYER_APPS = [
+  'mpv', 'vlc', 'parole', 'totem', 'smplayer', 'celluloid', 'dragon', 'haruna',
+  'elisa', 'kodi', 'banshee', 'rhythmbox', 'audacious', 'cmus', 'gxine', 'xfmedia',
+];
+
+const MEDIA_PLAYBACK_IDS = new Set(['media.play_video', 'media.play_track']);
+
+/** Tail of a desktop.<open|close>.<app> id → last human-recognizable app token. */
+function playerAppNamedInId(toolId: string): string | undefined {
+  if (!toolId.startsWith('desktop.open.') && !toolId.startsWith('desktop.close.')) return undefined;
+  const app = toolId.replace(/^desktop\.(open|close)\./, '').toLowerCase();
+  return PLAYER_APPS.find(player => app === player || app.includes(player));
+}
+
+/** All app words of a player id ("org.xfce.parole" → parole) present in the goal
+ * means the user named the player itself ("open vlc", "watch parole") — the
+ * play-intent demotion must NOT fire or "open vlc" would stop resolving. */
+function goalNamesPlayer(goal: string, toolId: string): boolean {
+  if (!toolId.startsWith('desktop.open.') && !toolId.startsWith('desktop.close.')) return false;
+  const app = toolId.replace(/^desktop\.(open|close)\./, '').toLowerCase();
+  return app.split(/\W+/).filter(Boolean).some(token =>
+    PLAYER_APPS.includes(token) && new RegExp(`\\b${token}\\b`, 'i').test(goal));
+}
+
 /**
  * Resolves a natural-language goal against currently discovered
  * capabilities.
@@ -112,6 +140,9 @@ export class CapabilityResolver {
 
     if (tools.length === 0) return [];
 
+    // Play-intent demotion needs to know the first-party media tools exist.
+    const mediaPlayable = tools.some(tool => MEDIA_PLAYBACK_IDS.has(tool.id));
+
     // Document frequency over catalog token sets: discriminating terms
     // ("largest", "vlc", "jarvis") outweigh glue words ("list", "files",
     // "open") that every other tool also matches.
@@ -166,6 +197,39 @@ export class CapabilityResolver {
           !GENERIC_DOMAINS.has(candidate.tool.domain)
         ) {
           return { ...candidate, score: candidate.score - 0.5 };
+        }
+        return candidate;
+      })
+        .map(candidate => {
+        // Play-intent media boost: the mirror of the demotion below. An
+        // unfamiliar title matches every player-adjacent description on
+        // the verb alone ("play chinje" → media.stop 1.13 via "playback",
+        // media.play_video 0.80), so the first-party playback tools get a
+        // half-point on play/watch goals — a single-term match must not
+        // lose to noise descriptions when the goal is explicitly playback.
+        if (MEDIA_INTENT_RE.test(goal) && MEDIA_PLAYBACK_IDS.has(candidate.tool.id)) {
+          return { ...candidate, score: candidate.score + 0.5 };
+        }
+        return candidate;
+      })
+      .map(candidate => {
+        // Play-intent player demotion: "play chinje" wants a video PLAYED,
+        // not a player application opened. Observed live: an unfamiliar
+        // title ("play chinje") matched desktop.open.mpv (score 1.13)
+        // while media.play_video (0.80, matched only the verb) fell out of
+        // reach — so the plan asked to open VLC and the ask pended forever.
+        // When the goal is a play/watch intent, the first-party media
+        // playback tool exists, and the goal does not name a player app
+        // itself ("open vlc", "watch parole" keep working), demote player
+        // launches/closes: the media tool answers and honestly says
+        // "no video matching X" when the library lacks the title.
+        if (
+          MEDIA_INTENT_RE.test(goal) &&
+          mediaPlayable &&
+          !goalNamesPlayer(goal, candidate.tool.id) &&
+          playerAppNamedInId(candidate.tool.id)
+        ) {
+          return { ...candidate, score: candidate.score - 2.0 };
         }
         return candidate;
       })
