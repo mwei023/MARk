@@ -33,6 +33,8 @@ import { opsObjective } from '../ops/objective';
 import { repairEslintTypescriptSkew } from './dependency-repair';
 import { repairLintErrors } from './code-repair';
 import { assessWorldState, formatWorldState } from './repo-state';
+import { canRepairMissingUnusedImport } from './build-repair';
+import { proposalStore, formatProposalAction } from '../core/proposal';
 
 const execFilePromise = promisify(execFile);
 
@@ -554,6 +556,51 @@ export class GitAgent extends Agent {
           : `Log fetch unavailable (${logFetch.unavailableReason}). Cannot classify failure automatically.`;
 
       await incidentStore.addFinding(incident.id, classificationFinding);
+
+      // A missing local import has one narrowly guarded repair strategy. Put
+      // it behind a durable medium-risk proposal; approval owns the mutation
+      // and push, while the proposal retains the real CI evidence.
+      if (logFetch.source === 'gh_cli' && canRepairMissingUnusedImport(logFetch.content) && repositoryContext.localPath) {
+        const originalBranch = await this.shellOut('git', ['-C', repositoryContext.localPath, 'branch', '--show-current']) ?? 'unknown';
+        const proposal = proposalStore.create({
+          incidentId: incident.id,
+          action: `Repair and verify missing local import in ${repositoryContext.fullName}`,
+          tool: 'code_repair_missing_import',
+          input: {
+            repoPath: repositoryContext.localPath,
+            repository: repositoryContext.fullName,
+            logs: logFetch.content.slice(0, 8000),
+            originalBranch,
+          },
+          rationale: 'The GitHub log identifies an unused missing local import. MARK will edit only that import, run the repository build, push an isolated branch, and require exact-SHA CI success before resolving the incident.',
+          riskLevel: 'medium',
+        });
+        await proposalStore.flush();
+        await incidentStore.addAction(incident.id, {
+          timestamp: new Date(),
+          agent: this.name,
+          action: 'proposal_created',
+          tool: 'proposal-store',
+          result: 'success',
+          details: formatProposalAction(proposal),
+        });
+        await incidentStore.addFinding(incident.id, `Repair proposal ${proposal.id} pending approval; no files changed and nothing pushed.`);
+        await incidentStore.updateStatus(incident.id, 'open');
+        await eventBus.emit({
+          id: `EVT-${Date.now()}`,
+          timestamp: new Date(),
+          source: this.name,
+          type: 'agent.action.failed',
+          severity: 'warning',
+          correlationId: incident.correlationId,
+          data: {
+            incidentId: incident.id,
+            message: `Repair proposal pending approval: ${proposal.action} (${proposal.id})`,
+            proposalId: proposal.id,
+          },
+        } as any);
+        return;
+      }
       // Auto-log: incident classifications become distillation rows.
       // High-confidence verdicts are pseudo-labels; low-confidence rows keep
       // label null and join to opsMemory.verified on incidentId later.
@@ -694,7 +741,10 @@ export class GitAgent extends Agent {
         ['run', 'view', String(runId), '--repo', repo, '--log'],
         { timeout: 20000 },
       );
-      const content = stdout.trim().slice(0, 8000);
+      const full = stdout.trim();
+      const content = full.length <= 8000
+        ? full
+        : `${full.slice(0, 4000)}\n...[MARK preserved log tail]...\n${full.slice(-4000)}`;
       if (content.length < 20) {
         return {
           source: 'unavailable',

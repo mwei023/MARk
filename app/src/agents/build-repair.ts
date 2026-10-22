@@ -11,6 +11,10 @@ export interface BuildRepairResult {
   file?: string;
 }
 
+export function canRepairMissingUnusedImport(logs: string): boolean {
+  return /Could not resolve ["'][^"']+["'] from ["'][^"']+["']/i.test(logs);
+}
+
 /**
  * Repairs one deliberately narrow, reversible Vite/Rollup failure:
  * an unused import whose local target does not exist. The build is the

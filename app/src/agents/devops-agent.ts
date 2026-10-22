@@ -27,6 +27,8 @@ import { config } from '../config.js';
 import { opsMemory } from '../core/ops-memory';
 import { repoBaseline } from '../core/repo-baseline';
 import type { CapabilityRegistry } from '../runtime/capabilities/registry';
+import { repairMissingUnusedImport } from './build-repair';
+import { verifyPostShip } from './post-ship-verifier';
 
 const execFilePromise = promisify(execFile);
 
@@ -366,6 +368,8 @@ export class DevOpsAgent extends Agent {
         result = await this.doRestartContainer(String(proposal.input.container ?? ''));
       } else if (proposal.tool === 'docker_compose_rollback') {
         result = await this.doRollback(proposal.input);
+      } else if (proposal.tool === 'code_repair_missing_import') {
+        result = await this.executeApprovedBuildRepair(proposal.input);
       } else {
         result = `Unknown tool ${proposal.tool} — no executor registered.`;
       }
@@ -428,6 +432,33 @@ export class DevOpsAgent extends Agent {
         durationMs: Date.now() - new Date(proposal.createdAt).getTime(),
       });
       return { success: false, message: msg };
+    }
+  }
+
+  private async executeApprovedBuildRepair(input: Record<string, unknown>): Promise<string> {
+    const repoPath = String(input.repoPath ?? '');
+    const logs = String(input.logs ?? '');
+    const originalBranch = String(input.originalBranch ?? '');
+    if (!repoPath || !originalBranch) throw new Error('Repair proposal is missing repository or original branch.');
+
+    const branchName = `auto-fix/build-${Date.now()}`;
+    await execFilePromise('git', ['-C', repoPath, 'checkout', '-b', branchName], { timeout: 15000 });
+    try {
+      const repair = await repairMissingUnusedImport(repoPath, logs);
+      if (!repair.fixed || !repair.file) throw new Error(repair.detail);
+
+      await execFilePromise('git', ['-C', repoPath, 'add', '--', repair.file], { timeout: 15000 });
+      await execFilePromise('git', ['-C', repoPath, 'commit', '-m', 'auto-fix: remove unused missing import'], { timeout: 15000 });
+      await execFilePromise('git', ['-C', repoPath, 'push', '-u', 'origin', branchName], { timeout: 120000 });
+
+      const postShip = await verifyPostShip(repoPath, branchName, originalBranch);
+      if (postShip.status !== 'passed' && postShip.status !== 'skipped') {
+        throw new Error(`Post-ship verification ${postShip.status}: ${postShip.detail}`);
+      }
+      return `Repaired ${repair.file}, pushed ${branchName}, and verified ${postShip.detail}`;
+    } catch (error) {
+      try { await execFilePromise('git', ['-C', repoPath, 'checkout', originalBranch], { timeout: 15000 }); } catch { /* preserve original error */ }
+      throw error;
     }
   }
 
