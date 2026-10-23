@@ -250,6 +250,10 @@ export class CodeAgent extends Agent {
       const postShip = await verifyPostShip(repoPath, branchName, originalBranch || 'main');
       await find(`Post-ship verification: ${postShip.detail}`);
       if (postShip.status === 'rolled_back' || postShip.status === 'failed') return null;
+      if (postShip.status === 'unverified') {
+        await find(`CodeAgent left ${branchName} available for later CI inspection; the fix is not marked shipped until verification completes.`);
+        return null;
+      }
       await find(`CodeAgent pushed ${branchName} with ${own.length} fixed file(s): ${own.slice(0, 5).join(', ')}.`);
       return branchName;
     } catch (error) {

@@ -4,7 +4,7 @@ import { config } from '../config.js';
 
 const execFilePromise = promisify(execFile);
 
-export type PostShipStatus = 'passed' | 'skipped' | 'rolled_back' | 'failed';
+export type PostShipStatus = 'passed' | 'skipped' | 'unverified' | 'rolled_back' | 'failed';
 
 export interface PostShipResult {
   status: PostShipStatus;
@@ -16,6 +16,7 @@ interface WorkflowRun {
   conclusion?: string | null;
   databaseId?: number;
   headSha?: string;
+  url?: string;
 }
 
 async function git(repoPath: string, args: string[]): Promise<string> {
@@ -46,12 +47,15 @@ async function rollbackBranch(repoPath: string, branch: string, originalBranch: 
 /**
  * Verify the remote workflow after an auto-ship. Non-GitHub remotes are
  * already covered by the local verification gate. GitHub branches must have
- * a completed successful Actions run; failed/unknown runs are rolled back.
+ * a completed successful Actions run; completed failed runs are rolled back.
+ * A timeout is unverified rather than failed: the branch remains available so
+ * a slow or queued workflow can finish and be inspected later.
  */
 export async function verifyPostShip(
   repoPath: string,
   branch: string,
   originalBranch: string,
+  timeoutMs = config.markShipCiTimeoutMs,
 ): Promise<PostShipResult> {
   let remote = '';
   try {
@@ -64,13 +68,13 @@ export async function verifyPostShip(
   }
 
   const pushedSha = await git(repoPath, ['rev-parse', 'HEAD']);
-  const deadline = Date.now() + config.markShipCiTimeoutMs;
+  const deadline = Date.now() + timeoutMs;
   let lastRun: WorkflowRun | undefined;
   while (Date.now() < deadline) {
     try {
       const { stdout } = await execFilePromise(
         'gh',
-        ['run', 'list', '--branch', branch, '--limit', '5', '--json', 'status,conclusion,databaseId,headSha'],
+        ['run', 'list', '--branch', branch, '--limit', '5', '--json', 'status,conclusion,databaseId,headSha,url'],
         { cwd: repoPath, timeout: 15000 },
       );
       const runs = JSON.parse(stdout) as WorkflowRun[];
@@ -86,13 +90,16 @@ export async function verifyPostShip(
       // not pretend success; continue polling until the bounded deadline.
       lastRun = undefined;
     }
-    await new Promise(resolve => setTimeout(resolve, 5000));
+    const remainingMs = Math.max(0, deadline - Date.now());
+    if (remainingMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(5000, remainingMs)));
+    }
   }
 
-  const rollback = await rollbackBranch(repoPath, branch, originalBranch);
   return {
-    status: rollback.status,
-    detail: `No completed successful GitHub Actions run before timeout (${config.markShipCiTimeoutMs}ms). ` +
-      `${lastRun?.status ? `Last status: ${lastRun.status}. ` : ''}${rollback.detail}`,
+    status: 'unverified',
+    detail: `No completed successful GitHub Actions run before timeout (${timeoutMs}ms); branch ${branch} was left intact. ` +
+      `${lastRun?.status ? `Last status: ${lastRun.status}. ` : ''}` +
+      `${lastRun?.url ? `Inspect the workflow: ${lastRun.url}` : 'No workflow run URL was available.'}`,
   };
 }
