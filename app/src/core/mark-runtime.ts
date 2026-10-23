@@ -750,7 +750,19 @@ function isConversationalRequest(command: string): boolean {
  * strong evidenced resolve (explicit fs/repo tool, 2+ terms, score ≥ 1).
  */
 function isCreativeRequest(command: string): boolean {
-  return /\b(compose|draft|homepage|landing page|blog( post)?|poem|short story|essay|markup)\b/i.test(command);
+  const composition = /\b(compose|draft|homepage|landing page|blog( post)?|poem|short story|essay|markup)\b/i.test(command);
+  // Observed live: "Open Blender and make a simple beautiful scene — a
+  // glowing crystal on a dark reflective floor" composed a plan that
+  // closed+opened Simple Screen Recorder — the resolver had anchored on the
+  // word "simple" in the app NAME, and the creative guard above never fired
+  // because its vocabulary only knew composition words. Expressive goals
+  // (make/draw/design/render … an artifact) are chat intents unless a
+  // genuine fs/repo tool claims them with evidence. The verb+noun pairing
+  // keeps "make money" (no artifact) and "open blender" (no make verb)
+  // out of the guard.
+  const makeArtifact =
+    /\b(make|draw|design|render|sculpt|animate)\b[^.,;!?]{0,40}\b(scene|artwork|logo|poster|sketch|illustration|rendering|animation|blender|crystal|picture|image|drawing|blueprint|object|mesh)\b/i;
+  return composition || makeArtifact.test(command);
 }
 
 /**

@@ -151,6 +151,14 @@ export class GitAgent extends Agent {
       // live: "commit and push" answered with git log + status, 0 commits).
       return this.commitAndPush(command);
     }
+    if (/^\s*commit\b/i.test(command) && !/\bpush\b/i.test(command) && !/\b(history|log|amend)\b/i.test(command)) {
+      // Commit WITHOUT push ("commit changes in <repo>"): observed live this
+      // twice answered with a status heads-up while the user's tree was
+      // never committed. Commit is explicit, local, and reversible; the
+      // honest completion reports the hash and says plainly that nothing
+      // was pushed because none was asked.
+      return this.commitWorkingTree(command, false);
+    }
     if (/\bclean\s?up\b/i.test(command) || /\buntrack\b/i.test(command)) {
       // Explicit cleanup order: untrack files that match ignore rules but
       // were committed anyway (logs, local env). Untrack-only — working
@@ -354,28 +362,39 @@ export class GitAgent extends Agent {
    * wrong checkout. DRY_RUN reports the plan without mutating.
    */
   private async commitAndPush(command: string): Promise<string> {
+    return this.commitWorkingTree(command, true);
+  }
+
+  /**
+   * Shared core of the explicit commit orders. Stages the working tree
+   * (add -A), commits with an extracted-or-default message, and pushes the
+   * current branch only when the order said so. Every failure point
+   * reports honestly what was and was not done — staging failure, commit
+   * failure, clean tree, detached HEAD, unreachable remote.
+   */
+  private async commitWorkingTree(command: string, push: boolean): Promise<string> {
     const resolved = this.resolveExplicitRepo(command);
     if (!resolved) {
-      return 'Which repository? Name it (owner/name or absolute path) and I will commit and push — e.g. "commit and push mwei023/MARk".';
+      return 'Which repository? Name it (owner/name or absolute path) and I will commit it — e.g. "commit changes in mwei023/MARk".';
     }
     const { localPath, label } = resolved;
     if (!(await this.shellOut('git', ['-C', localPath, 'rev-parse', '--git-dir']))) {
-      return `Not a git checkout: ${localPath}. Nothing committed, nothing pushed.`;
+      return `Not a git checkout: ${localPath}. Nothing committed${push ? ', nothing pushed' : ''}.`;
     }
     const status = await this.shellOut('git', ['-C', localPath, 'status', '--porcelain']);
-    if (status === null) return `Could not read git status for ${label}. Nothing committed, nothing pushed.`;
-    if (status === '') return `Tree clean on ${label} — nothing to commit, nothing pushed.`;
+    if (status === null) return `Could not read git status for ${label}. Nothing committed${push ? ', nothing pushed' : ''}.`;
+    if (status === '') return `Tree clean on ${label} — nothing to commit.`;
     const files = status.split('\n').filter(Boolean).length;
     if (config.markDryRun) {
       return [
-        `DRY RUN on ${label} — would have: staged ${files} changed file(s) (git add -A), committed, and pushed the current branch to origin.`,
+        `DRY RUN on ${label} — would have: staged ${files} changed file(s) (git add -A), committed${push ? ', and pushed the current branch to origin' : ''}.`,
         'Nothing committed, nothing pushed.',
       ].join('\n');
     }
     try {
       await this.execGit(localPath, ['add', '-A']);
     } catch (err) {
-      return `Staging failed on ${label}: ${err instanceof Error ? err.message : String(err)}. Nothing committed, nothing pushed.`;
+      return `Staging failed on ${label}: ${err instanceof Error ? err.message : String(err)}. Nothing committed${push ? ', nothing pushed' : ''}.`;
     }
     const message = GitAgent.extractCommitMessage(command) ?? 'mark: commit working tree';
     try {
@@ -387,6 +406,10 @@ export class GitAgent extends Agent {
     const branch = await this.shellOut('git', ['-C', localPath, 'branch', '--show-current']);
     if (!branch) {
       return `Committed ${hash} on ${label} ("${message}"), but HEAD is detached — not pushing a detached HEAD.`;
+    }
+    if (!push) {
+      console.log(`[GitAgent] commit on ${label}: committed ${hash} (push not requested)`);
+      return `Committed ${hash} on ${label} ("${message}", ${files} file(s)) on branch ${branch} — not pushed; say "push" or "commit and push" when you want it on origin.`;
     }
     try {
       const pushed = await this.execGit(localPath, ['push', '-u', 'origin', branch]);
