@@ -506,9 +506,11 @@ app.get('/api/pill', (_req: any, res: any) => {
   try {
     const FRESH_MS = 10 * 60 * 1000; // an ask older than this is backlog, not attention
     const cutoff = Date.now() - FRESH_MS;
-    const seen = new Set<string>(confirmationManager.listPending().map(c => c.id)); // all ids, stale too
+    const allToolPending = confirmationManager.listPending();
+    const staleToolCount = allToolPending.filter(c => Date.parse(c.createdAt) < cutoff).length;
+    const seen = new Set<string>(allToolPending.map(c => c.id)); // all ids, stale too
     const pending: Array<Record<string, unknown>> = [];
-    for (const c of confirmationManager.listPending()) {
+    for (const c of allToolPending) {
       if (!(Date.parse(c.createdAt) >= cutoff)) continue; // stale → quiet backlog
       seen.add(c.id);
       pending.push({ kind: 'tool', id: c.id, toolId: c.toolId, reason: c.reason, input: c.input, createdAt: c.createdAt });
@@ -527,6 +529,7 @@ app.get('/api/pill', (_req: any, res: any) => {
       success: true,
       now: new Date().toISOString(),
       confirmations: pending,
+      staleCount: staleToolCount + kernelPending.filter(p => Date.parse(String(p.createdAt ?? '')) < cutoff).length,
       activity: pillActivity.slice(-12).reverse(),
     });
   } catch (error: any) {

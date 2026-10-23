@@ -4,8 +4,8 @@ MARK pill — a floating attention surface for the runtime's own decisions.
 
 Stolen (in spirit) from the notch-companion idea, deliberately un-Mochi:
 it does not decorate. It exists for four moments only:
-  1. MARK is waiting for YOU (pending confirmations) — expands instantly
-     with a sound, then keeps a quiet pulse until you decide.
+  1. MARK needs YOU (pending confirmations) — expands instantly with a
+     sound, then keeps a quiet pulse until you decide.
   2. Activity pulse — the last thing MARK did, one small line.
   3. Window control — the 'wnd' button: show / maximize / minimize any
      visible X window (same verbs as MARK's desktop.window_* tools).
@@ -20,6 +20,7 @@ above everything, skipped by the taskbar.
 import glob
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -117,6 +118,31 @@ def alert_sound():
             continue
 
 
+def tool_label(tool_id):
+    labels = {
+        'desktop.open.thunar': 'Open File Manager',
+        'desktop.open.org.xfce.catfish': 'Open File Search',
+        'desktop.open.system-config-printer': 'Open Printer Settings',
+        'container.restart.jarvis-db': 'Restart Jarvis Database',
+    }
+    if tool_id in labels:
+        return labels[tool_id]
+    label = str(tool_id or 'Unknown action').replace('.', ' · ')
+    return label[:1].upper() + label[1:]
+
+
+def confirmation_summary(confirmation):
+    reason = str(confirmation.get('reason', ''))
+    marker = 'requires explicit confirmation:'
+    if marker in reason:
+        reason = reason.split(marker, 1)[1].strip()
+    match = re.search(r'evaluated as ["\']([^"\']+)["\'] risk', reason, re.IGNORECASE)
+    if match:
+        return f'Risk: {match.group(1).lower()}. Approve once, or always trust this tool.'
+    risk = 'reversible' if 'reversible' in reason.lower() else 'protected'
+    return f'Risk: {risk}. {reason[:150]}'
+
+
 # ── pill ─────────────────────────────────────────────────────────────────────
 class Pill(Gtk.Window):
     def __init__(self):
@@ -145,7 +171,10 @@ class Pill(Gtk.Window):
 .cardhead { color: rgb(255,205,120); font-size: 11.5px; font-weight: 600; }
 .cardbody { color: rgb(210,220,240); font-size: 10.5px; }
 .muted { color: rgb(160,175,200); font-size: 10.5px; }
-.btn { border-radius: 10px; padding: 0 6px; font-size: 10px; }
+.btn { border-radius: 10px; padding: 1px 7px; font-size: 10px; }
+.allow { color: rgb(120,235,165); }
+.deny { color: rgb(255,145,145); }
+.always { color: rgb(155,205,255); }
 """)
         Gtk.StyleContext.add_provider_for_screen(
             Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
@@ -178,7 +207,7 @@ class Pill(Gtk.Window):
         strip.pack_start(self.dot, False, False, 0)
 
         self.line = Gtk.EventBox()
-        self._line_label = Gtk.Label(label='MARK watching')
+        self._line_label = Gtk.Label(label='MARK is watching')
         self._line_label.set_ellipsize(Pango.EllipsizeMode.END)
         self._line_label.set_max_width_chars(40)
         self._line_label.set_xalign(0)
@@ -187,10 +216,10 @@ class Pill(Gtk.Window):
         self.line.connect('button-press-event', self.on_line_press)
         strip.pack_start(self.line, True, True, 0)
 
-        self.win_btn = Gtk.Button(label='wnd')
+        self.win_btn = Gtk.Button(label='▣')
         self.win_btn.set_relief(Gtk.ReliefStyle.NONE)
         self.win_btn.get_style_context().add_class('btn')
-        self.win_btn.set_tooltip_text('Windows: show · max · min')
+        self.win_btn.set_tooltip_text('Window controls: show · maximize · minimize')
         self.win_btn.connect('clicked', self.toggle_windows)
         strip.pack_end(self.win_btn, False, False, 0)
 
@@ -276,7 +305,7 @@ class Pill(Gtk.Window):
 
     def _render_offline(self, err):
         self._dot_state('offline')
-        self._line_label.set_text(f'MARK unreachable ({err[:34]})')
+        self._line_label.set_text('MARK is offline · click to retry')
         return False
 
     # ── render ───────────────────────────────────────────────────────────────
@@ -292,14 +321,14 @@ class Pill(Gtk.Window):
     def _render(self, data):
         pending = data.get('confirmations') or []
         activity = data.get('activity') or []
+        stale_count = int(data.get('staleCount') or 0)
         pending_ids = {str(c.get('id')) for c in pending}
         fresh = pending_ids - self.pending_ids
         self.pending_ids = pending_ids
 
         if pending:
             self._dot_state('pendingdot')
-            top = pending[0]
-            self._line_label.set_text(f'WAITING · {top.get("toolId", "?")}')
+            self._line_label.set_text(f'{len(pending)} decision{"s" if len(pending) != 1 else ""} need you')
             if fresh:
                 if not self.expanded:
                     self.set_expanded(True)
@@ -311,32 +340,40 @@ class Pill(Gtk.Window):
             if activity:
                 a = activity[0]
                 self._dot_state('okdot' if a.get('status') == 'ok' else None)
-                self._line_label.set_text(f"{a.get('route','')} · {a.get('command','')[:40]}")
+                verb = 'Done' if a.get('status') == 'ok' else 'Needs attention'
+                self._line_label.set_text(f"{verb} · {a.get('command','')[:40]}")
             else:
                 for c in ('okdot',):
                     self._dot_label.get_style_context().remove_class(c)
-                self._line_label.set_text('idle')
+                self._line_label.set_text('MARK is idle')
 
-        self._render_detail(pending, activity)
+        self._render_detail(pending, activity, stale_count)
         self._refresh_windows()
         return False
 
-    def _render_detail(self, pending, activity):
+    def _render_detail(self, pending, activity, stale_count=0):
         for child in self.detail.get_children():
             self.detail.remove(child)
 
         if pending:
-            head = Gtk.Label(label=f'{len(pending)} awaiting your decision')
+            head = Gtk.Label(label=f'{len(pending)} decision{"s" if len(pending) != 1 else ""} need your attention')
             head.set_xalign(0)
             head.get_style_context().add_class('cardhead')
             self.detail.pack_start(head, False, False, 0)
 
+            if stale_count:
+                backlog = Gtk.Label(label=f'{stale_count} older decision{"s" if stale_count != 1 else ""} kept in the backlog')
+                backlog.set_xalign(0)
+                backlog.set_line_wrap(True)
+                backlog.get_style_context().add_class('muted')
+                self.detail.pack_start(backlog, False, False, 0)
+
             for c in pending[:3]:
                 row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-                title = Gtk.Label(label=f'{c.get("toolId", "?")} · risk?')
+                title = Gtk.Label(label=tool_label(c.get('toolId', '')))
                 title.set_xalign(0)
                 title.get_style_context().add_class('cardhead')
-                reason = Gtk.Label(label=str(c.get('reason', ''))[:120])
+                reason = Gtk.Label(label=confirmation_summary(c))
                 reason.set_xalign(0)
                 reason.set_line_wrap(True)
                 reason.get_style_context().add_class('cardbody')
@@ -355,10 +392,22 @@ class Pill(Gtk.Window):
 
                 allow = Gtk.Button(label='✔ Allow')
                 allow.get_style_context().add_class('btn')
+                allow.get_style_context().add_class('allow')
                 allow.connect('clicked', lambda b: (send_decision(b, True), self.set_expanded(False)))
+                btns.pack_start(allow, False, False, 0)
+
+                always = Gtk.Button(label='Always')
+                always.set_tooltip_text('Allow this tool automatically in future')
+                always.get_style_context().add_class('btn')
+                always.get_style_context().add_class('always')
+                always.connect('clicked', lambda b: (send_decision(b, True, _always=True), self.set_expanded(False)))
+                btns.pack_start(always, False, False, 0)
+
                 deny = Gtk.Button(label='✘ Deny')
                 deny.get_style_context().add_class('btn')
+                deny.get_style_context().add_class('deny')
                 deny.connect('clicked', lambda b: (send_decision(b, False), self.set_expanded(False)))
+                btns.pack_start(deny, False, False, 0)
                 row.pack_start(btns, False, False, 0)
                 self.detail.pack_start(row, False, False, 0)
         elif activity:
