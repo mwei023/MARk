@@ -91,6 +91,17 @@ const CATALOG: string[] = [
   // web (light link checks only)
   'is the linkedin link working',
   'check on the link',
+  'open the portfolio site in the browser and tell me the title',
+  'check whether https://mwei023.github.io responds',
+  // system reads (grow the system-agent class — router needs volume there)
+  'what ports are listening on my machine',
+  'show my cpu load right now',
+  'how much memory is free',
+  'is the redis container healthy',
+  'what is my public ip address',
+  // research reads (grow the research-agent class)
+  'find open source alternatives to notion',
+  'research the latest stable kernel version',
   // reasoning (capped handful — slow by nature)
   'help me understand neural networks',
   'what is eating my disk',

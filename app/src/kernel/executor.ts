@@ -218,6 +218,18 @@ export class KernelExecutor {
             trustPattern: grant.pattern,
           });
         }
+        // Automated exercise probes never answer asks — minting one per
+        // probed gated tool was the confirmed backlog generator before
+        // dedupe + expiry. A probe step that needs confirmation is SKIPPED
+        // honestly: no ask is created, the step fails with the real reason.
+        if (String(context.sessionId ?? '').startsWith('probe:')) {
+          return this.finishFailure(
+            action,
+            `Probe step skipped: "${action.toolId}" requires confirmation and automated probes do not answer asks. No ask was created.`,
+            startedAt,
+            startedTime,
+          );
+        }
         const record = this.confirmations.request(
           action,
           `Tool "${tool.id}" (${tool.risk} risk) requires explicit confirmation: ${authority.reason}`,

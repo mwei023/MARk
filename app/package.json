@@ -20,6 +20,7 @@
     "eval": "tsx src/eval/run.ts",
     "db:migrate": "ts-node --transpile-only Scripts/migrate.ts",
     "training:status": "tsx Scripts/training-status.ts",
+    "training:eval": "tsx Scripts/training-eval.ts",
     "training:replay": "tsx Scripts/replay-synthetic-check.ts",
     "training:retrain": "tsx Scripts/retrain-routing-model.ts",
     "training:exercise": "tsx Scripts/self-exercise.ts",
