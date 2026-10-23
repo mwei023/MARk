@@ -38,7 +38,15 @@ const GENERIC_ACTION_VERBS = new Set(['find', 'search', 'list', 'show', 'open', 
 /** Domains that are themselves the generic layer — never penalized by the verb guard. */
 const GENERIC_DOMAINS = new Set(['filesystem', 'system']);
 
-/** Play/watch goals are media-intent: playing a title is not launching a player. */
+/** App vocabulary that is decorative on its own: matching these words
+ * (including inside an app NAME like "Simple Screen Recorder") proves
+ * nothing without the user naming the app itself. */
+const DECORATIVE_APPSTOP = new Set([
+  'app', 'application', 'window', 'screen', 'simple', 'clean', 'easy',
+]);
+
+/** Creative vocabulary from the mark-runtime creative guard (shared intent
+ * so both layers demote the same misclaims consistently). */
 const MEDIA_INTENT_RE = /\b(play|watch)\b/i;
 
 /** Player applications that a play goal must NOT be answered by opening. */
@@ -50,6 +58,35 @@ const PLAYER_APPS = [
 const MEDIA_PLAYBACK_IDS = new Set(['media.play_video', 'media.play_track']);
 
 /** Tail of a desktop.<open|close>.<app> id → last human-recognizable app token. */
+/** Creative vocabulary from the mark-runtime creative guard (shared intent
+ * so both layers demote the same misclaims consistently). */
+const CREATIVE_WORD_RE =
+  /\b(make|draw|design|render|sculpt|animate|scene|artwork|beautiful|glowing|crystal|creative|painting|illustration)\b/i;
+
+/** True when the user's goal named the app itself. Evidence = an app token
+ * (id tail like "simplescreenrecorder", or a NAME word like "Recorder")
+ * appearing as a whole word in the goal. Generic words (desktop, open,
+ * close, org, xfce, be) and decorative words (simple, screen, clean…)
+ * never count as naming — "Simple Screen Recorder" must not be claimed by
+ * a goal that merely says "simple" or "screen". */
+function goalNamesApp(goal: string, toolId: string, toolName: string): boolean {
+  const tokens = (text: string) => text.toLowerCase().split(/\W+/).filter(Boolean);
+  const skip = new Set(['desktop', 'open', 'close', 'org', 'net', 'xfce', 'be', 'com', 'io']);
+  const goalTokens = new Set(tokens(goal));
+  const candidates = new Set<string>();
+  for (const token of tokens(toolId.replace(/^desktop\.(open|close)\./, ''))) {
+    if (!skip.has(token) && token.length >= 4 && !DECORATIVE_APPSTOP.has(token)) candidates.add(token);
+  }
+  for (const token of tokens(toolName)) {
+    if (!skip.has(token) && token.length >= 4 && !DECORATIVE_APPSTOP.has(token)) candidates.add(token);
+  }
+  for (const candidate of candidates) {
+    if (goalTokens.has(candidate)) return true;
+  }
+  return false;
+}
+
+/** Tail of a desktop.<open|close>.<app> id → last human-recognizable app token. */
 function playerAppNamedInId(toolId: string): string | undefined {
   if (!toolId.startsWith('desktop.open.') && !toolId.startsWith('desktop.close.')) return undefined;
   const app = toolId.replace(/^desktop\.(open|close)\./, '').toLowerCase();
@@ -58,8 +95,7 @@ function playerAppNamedInId(toolId: string): string | undefined {
 
 /** All app words of a player id ("org.xfce.parole" → parole) present in the goal
  * means the user named the player itself ("open vlc", "watch parole") — the
- * play-intent demotion must NOT fire or "open vlc" would stop resolving. */
-function goalNamesPlayer(goal: string, toolId: string): boolean {
+ * play-intent demotion must NOT fire or "open vlc" would stop resolving. */function goalNamesPlayer(goal: string, toolId: string): boolean {
   if (!toolId.startsWith('desktop.open.') && !toolId.startsWith('desktop.close.')) return false;
   const app = toolId.replace(/^desktop\.(open|close)\./, '').toLowerCase();
   return app.split(/\W+/).filter(Boolean).some(token =>
@@ -228,6 +264,30 @@ export class CapabilityResolver {
           mediaPlayable &&
           !goalNamesPlayer(goal, candidate.tool.id) &&
           playerAppNamedInId(candidate.tool.id)
+        ) {
+          return { ...candidate, score: candidate.score - 2.0 };
+        }
+        return candidate;
+      })
+      .map(candidate => {
+        // Named-app rule: a desktop open/close instance may only carry a
+        // planning decision when the goal names the app beyond generic
+        // verbs. Observed live: "Open Blender and make a simple beautiful
+        // scene" ranked Simple Screen Recorder purely on the word
+        // "simple" in the app's NAME plus the generic verb "open" — the
+        // composed plan then closed+opened a screen recorder the user
+        // never mentioned. Distinctive evidence means at least one
+        // non-generic goal term matching one of the app's own tokens.
+        const genericOnly =
+          candidate.matchedTerms.length > 0 &&
+          candidate.matchedTerms.every(term =>
+            GENERIC_ACTION_VERBS.has(term) ||
+            CREATIVE_WORD_RE.test(term) ||
+            DECORATIVE_APPSTOP.has(term));
+        if (
+          genericOnly &&
+          /^(desktop\.open\.|desktop\.close\.)/.test(candidate.tool.id) &&
+          !goalNamesApp(goal, candidate.tool.id, candidate.tool.name)
         ) {
           return { ...candidate, score: candidate.score - 2.0 };
         }

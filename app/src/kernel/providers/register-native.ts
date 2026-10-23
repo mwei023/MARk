@@ -29,6 +29,11 @@ import {
 } from './incidents';
 
 import {
+  blenderDiscoveryProvider,
+  blenderImplementations,
+} from './blender';
+
+import {
   browserDiscoveryProvider,
   browserNativeImplementations,
 } from './browser';
@@ -138,6 +143,10 @@ export function registerNativeSystemProvider(
   }
 
   for (const implementation of incidentImplementations) {
+    kernel.registerImplementation(implementation);
+  }
+
+  for (const implementation of blenderImplementations) {
     kernel.registerImplementation(implementation);
   }
 

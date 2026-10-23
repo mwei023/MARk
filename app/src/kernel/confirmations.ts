@@ -37,6 +37,23 @@ export class ConfirmationManager {
   constructor(private readonly trust: TrustStore = trustStore) {}
 
   request(action: ActionRequest, reason: string, scopePath?: string): ConfirmationRecord {
+    // Dedupe: an identical unchanged action (same tool + same input snapshot
+    // + same scope) that is still pending returns the EXISTING record.
+    // Observed live: the failed Blender plan minted a fresh confirmation on
+    // every retry attempt, flooding the approvals panel with interchangeable
+    // asks for one unchanged decision. Same decision, same ask, same id.
+    const snapshot = JSON.stringify(action.input ?? {});
+    for (const record of this.records.values()) {
+      if (
+        record.status === 'pending' &&
+        record.toolId === action.toolId &&
+        JSON.stringify(record.input ?? {}) === snapshot &&
+        (record.scopePath ?? undefined) === (scopePath ?? undefined)
+      ) {
+        console.debug('[confirmations] reused pending ask', record.id, 'for', action.toolId);
+        return record;
+      }
+    }
     const record: ConfirmationRecord = {
       id: createKernelId('confirm'),
       toolId: action.toolId,

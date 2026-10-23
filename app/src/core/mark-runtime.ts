@@ -429,8 +429,13 @@ export class MarkRuntime {
           const pre = this.kernelBridge.resolveCapability(command);
           const strong =
             (pre.matchedTerms?.length ?? 0) >= 2 &&
-            (pre.score ?? 0) >= 1.0 &&
-            /^(fs\.|repo\.)/.test(pre.tool?.id ?? '');
+            (pre.score ?? 0) >= 1.0;
+          // Any-provider strong resolve now counts, not just fs/repo.
+          // Observed live: "Open Blender and make a glowing crystal scene"
+          // should plan blender.* work once a real blender capability
+          // exists — but only the resolver's named-app rule and demotions
+          // keep this honest (Simple Screen Recorder cannot claim the goal
+          // on the word "simple"). Thin matches still go to chat.
           if (!strong) return undefined;
         } catch {
           return undefined;

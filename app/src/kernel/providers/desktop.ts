@@ -39,7 +39,16 @@ const DESKTOP_LAUNCH_DENY_BINARIES = new Set([
   'python', 'python3', 'perl', 'ruby', 'node',
 ]);
 
-const DESKTOP_SCAN_DIRS = ['/usr/share/applications', `${os.homedir()}/.local/share/applications`];
+const DESKTOP_SCAN_DIRS = [
+  '/usr/share/applications',
+  `${os.homedir()}/.local/share/applications`,
+  // Snap packages install their launchers here, NOT in /usr/share/applications.
+  // Observed live: Blender (snap) was invisible to the app catalog — "open
+  // blender" resolved to noise because the tool never existed to resolve.
+  '/var/lib/snapd/desktop/applications',
+  '/var/lib/flatpak/exports/share/applications',
+  `${os.homedir()}/.local/share/flatpak/exports/share/applications`,
+];
 
 /** Parses installed .desktop files into launchable app entries. */
 export async function scanDesktopEntries(): Promise<DesktopEntry[]> {
