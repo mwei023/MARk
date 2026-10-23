@@ -70,6 +70,10 @@ const CATALOG: string[] = [
   'what services are running on this host',
   'which ports are listening',
   'how is the uptime',
+  'show the network interfaces on this machine',
+  'which Node.js version is installed here',
+  'what processes are using the most memory',
+  'diagnose my system and summarize any obvious issues',
   // devops reads
   'list running containers',
   'is jarvis-db healthy',
@@ -77,31 +81,49 @@ const CATALOG: string[] = [
   'are all services up',
   'status of the docker containers please',
   'is the deployment healthy',
+  'tail the docker logs of the api container',
+  'show container restart counts for the database',
+  'check disk space on the database volume',
   // cicd reads
   'is the pipeline green',
   'what is the pipeline status',
   'show build status for the project',
-  // git reads
+  // git reads (confusion analysis: git rows collapse into reasoning when
+  // they lack git vocabulary — 'check on my portfolio' taught the model
+  // nothing distinguishable. Distinctive tokens: branch, diff, commit,
+  // pull request, merge, log.)
   'list git branches',
   'git status of mwei023/MARk',
   'show my recent commits',
-  'check on my portfolio',
-  'is the portfolio ready',
-  'can you check on institution OS and tell me if its ready to pilot',
+  'show the git diff of the last commit',
+  'list open pull requests in this repo',
+  'how many commits landed in the last week',
+  'show the merge history of the main branch',
+  'is there anything uncommitted in the git worktree',
   // web (light link checks only)
   'is the linkedin link working',
   'check on the link',
   'open the portfolio site in the browser and tell me the title',
   'check whether https://mwei023.github.io responds',
+  'look up the current Node.js LTS release on the web',
+  'search the web for the official Docker Compose healthcheck documentation',
+  'find current documentation for GitHub Actions artifact retention',
+  'browse for the official Vite deployment guide',
   // system reads (grow the system-agent class — router needs volume there)
   'what ports are listening on my machine',
   'show my cpu load right now',
   'how much memory is free',
   'is the redis container healthy',
   'what is my public ip address',
-  // research reads (grow the research-agent class)
-  'find open source alternatives to notion',
-  'research the latest stable kernel version',
+  'top cpu processes on this host',
+  'disk usage of the home directory',
+  'which kernel version and distro is running',
+  'list failed systemd services',
+  // research reads (explicit deep-research wording selects ResearchAgent)
+  'deep research open source alternatives to Notion for a small team',
+  'do a literature review of local-first application synchronization',
+  'survey the field of vector databases and compare their tradeoffs',
+  'map the field of browser-based coding agents and cite key sources',
   // reasoning (capped handful — slow by nature)
   'help me understand neural networks',
   'what is eating my disk',
