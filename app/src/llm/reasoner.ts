@@ -14,7 +14,7 @@
  *   timeout. Failures propagate as errors so MarkRuntime can answer
  *   `unavailable` honestly instead of roleplaying.
  */
-import { getLLMProviderCached, Message, LLMProvider } from './index';
+import { getFallbackLLMProvider, getLLMProviderCached, Message, LLMProvider } from './index';
 import { retrieveContext } from '../rags';
 import { getRecentHistory, saveTurn } from '../agent/history';
 
@@ -24,6 +24,7 @@ export interface ReasonerDeps {
   loadHistory?: (userId: string) => Promise<string>;
   saveHistory?: (userId: string, input: string, response: string) => Promise<void>;
   timeoutMs?: number;
+  getFallbackProvider?: (excludedProviders: string[], reason: string) => Promise<LLMProvider>;
 }
 
 const MEMORY_QUESTION = /\b(what'?s my|did i|remind me|my notes?|my favorite|remember about|what did i (say|mention|tell))\b/i;
@@ -58,7 +59,7 @@ export async function respondWithLLM(
   deps: ReasonerDeps = {},
 ): Promise<string> {
   const timeoutMs = deps.timeoutMs ?? Number(process.env.MARK_LLM_TIMEOUT_MS ?? 45000);
-  const provider = deps.provider ?? await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
+  let provider = deps.provider ?? await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
 
   const [history, notes] = await Promise.all([
     (deps.loadHistory ?? loadHistoryDefault)(userId).catch(() => ''),
@@ -91,17 +92,33 @@ export async function respondWithLLM(
   // Tool-inclined models sometimes emit a call anyway despite the ban;
   // providers reject it (tool_use_failed). One reinforced retry before
   // giving up — the runtime then answers `unavailable` honestly.
+  const failedProviders = new Set<string>();
   let lastError: unknown = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (;;) {
+    const providerName = provider.getMetadata().provider;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const response = await withTimeout(provider.chat(attempt === 1 ? messages : reinforced(messages)), timeoutMs, 'LLM chat');
+        const text = stripFences(response.content).trim();
+        if (!text) throw new Error('LLM returned an empty response');
+        await (deps.saveHistory ?? saveHistoryDefault)(userId, input, text).catch(() => {});
+        return text;
+      } catch (error: any) {
+        lastError = error;
+        if (!looksLikeToolCallRejection(error) || attempt === 2) break;
+      }
+    }
+
+    if (!isRuntimeProviderFailure(lastError)) break;
+    failedProviders.add(providerName);
     try {
-      const response = await withTimeout(provider.chat(attempt === 1 ? messages : reinforced(messages)), timeoutMs, 'LLM chat');
-      const text = stripFences(response.content).trim();
-      if (!text) throw new Error('LLM returned an empty response');
-      await (deps.saveHistory ?? saveHistoryDefault)(userId, input, text).catch(() => {});
-      return text;
-    } catch (error: any) {
-      lastError = error;
-      if (!looksLikeToolCallRejection(error) || attempt === 2) break;
+      provider = await (deps.getFallbackProvider ?? getFallbackLLMProvider)(
+        [...failedProviders],
+        `${providerName} failed: ${errorSummary(lastError)}`,
+      );
+    } catch (fallbackError) {
+      lastError = fallbackError;
+      break;
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -120,7 +137,7 @@ export async function respondWithLLMStream(
   deps: ReasonerDeps = {},
 ): Promise<string> {
   const timeoutMs = deps.timeoutMs ?? Number(process.env.MARK_LLM_TIMEOUT_MS ?? 45000);
-  const provider = deps.provider ?? await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
+  let provider = deps.provider ?? await withTimeout(getLLMProviderCached(), timeoutMs, 'LLM provider init');
 
   const [history, notes] = await Promise.all([
     (deps.loadHistory ?? loadHistoryDefault)(userId).catch(() => ''),
@@ -144,30 +161,52 @@ export async function respondWithLLMStream(
     { role: 'user', content: contextBlocks.length > 0 ? `${contextBlocks.join('\n\n')}\n\nUser: ${input}` : input },
   ];
 
-  const runStream = async (msgs: Message[]): Promise<string> => {
-    if (provider.stream) {
+  let emittedTokens = false;
+  const runStream = async (activeProvider: LLMProvider, msgs: Message[]): Promise<string> => {
+    if (activeProvider.stream) {
       const response = await withTimeout(
-        provider.stream(msgs, undefined, (token) => onToken(token)),
+        activeProvider.stream(msgs, undefined, (token) => {
+          emittedTokens = true;
+          onToken(token);
+        }),
         timeoutMs,
         'LLM stream',
       );
       return stripFences(response.content).trim();
     }
-    const text = stripFences((await withTimeout(provider.chat(msgs), timeoutMs, 'LLM chat')).content).trim();
-    if (text) onToken(text);
+    const text = stripFences((await withTimeout(activeProvider.chat(msgs), timeoutMs, 'LLM chat')).content).trim();
+    if (text) {
+      emittedTokens = true;
+      onToken(text);
+    }
     return text;
   };
 
+  const failedProviders = new Set<string>();
   let lastError: unknown = null;
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (;;) {
+    const providerName = provider.getMetadata().provider;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const text = await runStream(provider, attempt === 1 ? messages : reinforced(messages));
+        if (!text) throw new Error('LLM returned an empty response');
+        await (deps.saveHistory ?? saveHistoryDefault)(userId, input, text).catch(() => {});
+        return text;
+      } catch (error: any) {
+        lastError = error;
+        if (!looksLikeToolCallRejection(error) || attempt === 2) break;
+      }
+    }
+    if (!isRuntimeProviderFailure(lastError) || emittedTokens) break;
+    failedProviders.add(providerName);
     try {
-      const text = await runStream(attempt === 1 ? messages : reinforced(messages));
-      if (!text) throw new Error('LLM returned an empty response');
-      await (deps.saveHistory ?? saveHistoryDefault)(userId, input, text).catch(() => {});
-      return text;
-    } catch (error: any) {
-      lastError = error;
-      if (!looksLikeToolCallRejection(error) || attempt === 2) break;
+      provider = await (deps.getFallbackProvider ?? getFallbackLLMProvider)(
+        [...failedProviders],
+        `${providerName} failed: ${errorSummary(lastError)}`,
+      );
+    } catch (fallbackError) {
+      lastError = fallbackError;
+      break;
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -186,6 +225,15 @@ function reinforced(messages: Message[]): Message[] {
 function looksLikeToolCallRejection(error: any): boolean {
   const text = `${error?.message || ''} ${String(error)}`.toLowerCase();
   return text.includes('tool') && (text.includes('400') || text.includes('tool_choice') || text.includes('tool_use_failed') || text.includes('function'));
+}
+
+function isRuntimeProviderFailure(error: unknown): boolean {
+  const text = `${(error as any)?.message || ''} ${String(error)}`.toLowerCase();
+  return /(?:\b429\b|rate[_ -]?limit|too many requests|\b5(?:00|02|03|04)\b|network|fetch failed|econnreset|econnrefused|etimedout|timed out|timeout)/i.test(text);
+}
+
+function errorSummary(error: unknown): string {
+  return String((error as any)?.message || error).replace(/\s+/g, ' ').slice(0, 180);
 }
 
 export function looksLikeMemoryQuestion(input: string): boolean {

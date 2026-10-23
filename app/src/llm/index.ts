@@ -8,6 +8,7 @@
 export {
   getLLMProvider,
   getLLMProviderCached,
+  getFallbackLLMProvider,
   resetLLMProvider,
   getLLMConfiguration,
   getActiveLLMInfo,

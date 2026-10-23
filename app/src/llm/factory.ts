@@ -151,28 +151,42 @@ if (primary) {
   return primary;
 }
 
-  // Try fallback providers in order
-  console.log(`[LLM Factory] Attempting fallback providers: ${config.fallbackProviders.join(', ')}`);
-  for (const fallback of config.fallbackProviders) {
-  const provider = await tryProvider(fallback, config);
-
-  if (provider) {
-    _activeLLMInfo = {
-      configuredPrimary: config.primaryProvider,
-      activeProvider: fallback,
-      activeModel: config.models[fallback] || null,
-      fallbackUsed: true,
-      fallbackReason: `${config.primaryProvider} was unavailable`,
-    };
-
-    console.warn(`[LLM Factory] ⚠️  Using fallback provider: ${fallback}`);
-    return provider;
-  }
+  return getFallbackLLMProvider([config.primaryProvider], `${config.primaryProvider} was unavailable`, config);
 }
+
+/**
+ * Select a configured fallback after a provider fails during a request.
+ * Excluded providers are not retried, which lets one request walk the chain
+ * (for example Groq → OpenRouter → Ollama) without restarting the process.
+ */
+export async function getFallbackLLMProvider(
+  excludedProviders: string[] = [],
+  reason = `${excludedProviders.join(', ') || 'provider'} failed during request`,
+  loadedConfig: LLMConfig = loadLLMConfig(),
+): Promise<LLMProvider> {
+  const excluded = new Set(excludedProviders.map(provider => provider.toLowerCase()));
+  const candidates = loadedConfig.fallbackProviders.filter(provider => !excluded.has(provider));
+  console.log(`[LLM Factory] Attempting fallback providers: ${candidates.join(', ')}`);
+
+  for (const fallback of candidates) {
+    const provider = await tryProvider(fallback, loadedConfig);
+    if (provider) {
+      _activeLLMInfo = {
+        configuredPrimary: loadedConfig.primaryProvider,
+        activeProvider: fallback,
+        activeModel: loadedConfig.models[fallback] || null,
+        fallbackUsed: true,
+        fallbackReason: reason,
+      };
+      console.warn(`[LLM Factory] ⚠️  Using fallback provider: ${fallback}`);
+      _provider = provider;
+      return provider;
+    }
+  }
 
   // If we got here, no provider worked. This is a fatal error for MARK.
   const error = `[LLM Factory] FATAL: No LLM provider available. Checked: ${
-    [config.primaryProvider, ...config.fallbackProviders].join(', ')
+    [loadedConfig.primaryProvider, ...loadedConfig.fallbackProviders].join(', ')
   }. Please ensure at least one provider is configured and available.`;
   
   console.error(error);
