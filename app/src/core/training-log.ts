@@ -73,8 +73,15 @@ export function logRoutingDecision(args: {
   });
 }
 
-export function logFailureClassification(args: {
-  text: string;
+/** Archive a training-side artifact (eval summaries etc.) as one JSONL
+ * row — best-effort, never throws, same dir logic as the decision log.
+ * Without this, evals lived only in terminals and the benchmark spine had
+ * no trackable history. */
+export function appendTrainingArtifact(file: string, row: Record<string, unknown>): void {
+  appendRow(file, row);
+}
+
+export function logFailureClassification(args: {  text: string;
   predicted: string;
   confidence: number;
   incidentId?: string;
